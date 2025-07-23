@@ -50,9 +50,13 @@ jobs:
           source .env
           # Deploy with verification, but conditionally set verification parameters
           if [[ "${{ vars.NETWORK }}" == "avalanche" || "${{ vars.NETWORK }}" == "fuji" ]]; then
-            # Deploy with verification for Avalanche using custom verifier URL
-            unset ETHERSCAN_API_KEY
-            forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier sourcify -vvvv 2>&1 | tee deployment_output.txt
+            # Deploy with verification for Avalanche using both Sourcify and native block explorer
+            echo "Deploying to Avalanche network with verification..."
+            forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url ${{ vars.AVA_VERIFIER_URL }} -vvvv 2>&1 | tee deployment_output.txt
+            
+            # Also verify on Sourcify as backup
+            echo "Also verifying on Sourcify..."
+            forge verify-contract $(grep "Factory deployed at:" deployment_output.txt | awk '{print $4}') src/EscrowContractFactory.sol:EscrowContractFactory --verifier sourcify --rpc-url $NETWORK_RPC_URL --constructor-args $(grep "Constructor args:" deployment_output.txt | awk '{print $3}' || echo "0000000000000000000000005425890298aed601595a70ab815c96711a31bc650000000000000000000000001936cad0b758ad8f83ca392ac9138ff2b4ab0b05") || echo "Sourcify verification failed or already verified"
           else
             # Deploy with verification using ETHERSCAN_API_KEY for Ethereum networks
             forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify -vvvv 2>&1 | tee deployment_output.txt
