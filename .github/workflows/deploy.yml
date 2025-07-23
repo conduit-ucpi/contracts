@@ -65,8 +65,5 @@ jobs:
           echo "==================================================="
           echo "🏭 FACTORY ADDRESS (SAVE THIS FOR UI CONFIG)"
           echo "==================================================="
-          echo $FACTORY_ADDRESS
-          echo "==================================================="
-          
-          # Set output for potential future steps
-          echo "factory_address=$FACTORY_ADDRESS" >> $GITHUB_OUTPUT 
+          echo "deployed $FACTORY_ADDRESS"
+          echo "===================================================" 
