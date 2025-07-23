@@ -3,7 +3,7 @@ name: Deploy Smart Contracts
 on:
   push:
     branches:
-      - deploy
+      - build-test
   workflow_dispatch:
 
 jobs:
