@@ -34,8 +34,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          forge install OpenZeppelin/openzeppelin-contracts --no-commit
-          forge install
+          forge install OpenZeppelin/openzeppelin-contracts --shallow
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
 
       - name: Build contracts
         run: forge build
