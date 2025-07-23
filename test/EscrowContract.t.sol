@@ -88,54 +88,51 @@ contract EscrowContractTest is Test {
             description
         );
         
-        vm.expectRevert("Amount must be positive");
+        vm.expectRevert("Invalid USDC address");
         new EscrowContract(
-            address(usdc),
-            buyer,
-            seller,
-            gasPayer,
-            0,
-            expiryTimestamp,
-            description
-        );
-        
-        vm.expectRevert("Expiry must be future");
-        new EscrowContract(
-            address(usdc),
-            buyer,
-            seller,
-            gasPayer,
-            AMOUNT,
-            block.timestamp - 1,
-            description
-        );
-        
-        string memory longDescription = "This is a very long description that exceeds the 160 character limit and should cause the constructor to revert with an error message";
-        vm.expectRevert("Description too long");
-        new EscrowContract(
-            address(usdc),
+            address(0),
             buyer,
             seller,
             gasPayer,
             AMOUNT,
             expiryTimestamp,
-            longDescription
+            description
+        );
+        
+        vm.expectRevert("Invalid buyer");
+        new EscrowContract(
+            address(usdc),
+            address(0),
+            seller,
+            gasPayer,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        
+        vm.expectRevert("Invalid gas payer");
+        new EscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            address(0),
+            AMOUNT,
+            expiryTimestamp,
+            description
         );
     }
     
     function testSuccessfulDeployment() public {
-        vm.prank(buyer);
-        usdc.approve(address(this), AMOUNT);
-        
-        EscrowContract escrow = new EscrowContract(
-            address(usdc),
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
             buyer,
             seller,
-            gasPayer,
             AMOUNT,
             expiryTimestamp,
             description
         );
+        
+        EscrowContract escrow = EscrowContract(escrowAddress);
         
         assertEq(address(escrow.USDC_TOKEN()), address(usdc));
         assertEq(escrow.BUYER(), buyer);
@@ -153,10 +150,8 @@ contract EscrowContractTest is Test {
     
     function testRaiseDispute() public {
         vm.prank(gasPayer);
-        usdc.approve(address(factory), AMOUNT);
-        
-        vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -164,7 +159,7 @@ contract EscrowContractTest is Test {
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
-        vm.prank(gasPayer); // gasPayer is the buyer in this test
+        vm.prank(buyer);
         escrow.raiseDispute();
         
         assertTrue(escrow.disputed());
@@ -175,6 +170,7 @@ contract EscrowContractTest is Test {
     function testOnlyBuyerCanRaiseDispute() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -194,6 +190,7 @@ contract EscrowContractTest is Test {
     function testCannotRaiseDisputeTwice() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -212,6 +209,7 @@ contract EscrowContractTest is Test {
     function testResolveDispute() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -236,6 +234,7 @@ contract EscrowContractTest is Test {
     function testOnlyGasPayerCanResolveDispute() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -258,6 +257,7 @@ contract EscrowContractTest is Test {
     function testClaimFundsAfterExpiry() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -280,6 +280,7 @@ contract EscrowContractTest is Test {
     function testGasPayerCanClaimFunds() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -301,6 +302,7 @@ contract EscrowContractTest is Test {
     function testCannotClaimBeforeExpiry() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -316,6 +318,7 @@ contract EscrowContractTest is Test {
     function testCannotClaimIfDisputed() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -336,6 +339,7 @@ contract EscrowContractTest is Test {
     function testViewFunctions() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,

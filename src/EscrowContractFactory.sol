@@ -27,18 +27,20 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
     }
     
     function createEscrowContract(
+        address buyer,
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
         string calldata description
     ) external onlyOwner nonReentrant returns (address) {
+        require(buyer != address(0), "Invalid buyer address");
         require(seller != address(0), "Invalid seller address");
         require(amount > 0, "Amount must be positive");
         require(expiryTimestamp > block.timestamp, "Expiry must be future");
         require(bytes(description).length <= 160, "Description too long");
         
         bytes32 salt = keccak256(abi.encodePacked(
-            msg.sender,
+            buyer,
             seller,
             amount,
             expiryTimestamp,
@@ -47,13 +49,13 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
         
         // Transfer USDC from buyer to factory first
         require(
-            USDC_TOKEN.transferFrom(msg.sender, address(this), amount),
+            USDC_TOKEN.transferFrom(buyer, address(this), amount),
             "USDC transfer failed"
         );
         
         EscrowContract newContract = new EscrowContract{salt: salt}(
             address(USDC_TOKEN),
-            msg.sender,
+            buyer,
             seller,
             owner(),
             amount,
@@ -69,7 +71,7 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
         
         emit ContractCreated(
             address(newContract),
-            msg.sender,
+            buyer,
             seller,
             amount,
             expiryTimestamp,

@@ -98,8 +98,10 @@ contract EscrowContractFactoryTest is Test {
     }
     
     function testCreateEscrowContract() public {
+        // Gas-payer (owner) calls factory with buyer and seller addresses
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -109,21 +111,22 @@ contract EscrowContractFactoryTest is Test {
         assertTrue(escrowAddress != address(0));
         
         EscrowContract escrow = EscrowContract(escrowAddress);
-        assertEq(escrow.BUYER(), owner); // owner called the factory, so they're the "buyer"
+        assertEq(escrow.BUYER(), buyer); // buyer is the actual buyer
         assertEq(escrow.SELLER(), seller);
-        assertEq(escrow.GAS_PAYER(), owner);
+        assertEq(escrow.GAS_PAYER(), owner); // owner is the gas payer
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         assertEq(escrow.description(), description);
         
         assertEq(usdc.balanceOf(escrowAddress), AMOUNT);
-        assertEq(usdc.balanceOf(owner), AMOUNT * 10 - AMOUNT); // owner's balance reduced
+        assertEq(usdc.balanceOf(buyer), AMOUNT * 10 - AMOUNT); // buyer's balance reduced
     }
     
     function testOnlyOwnerCanCreateEscrow() public {
         vm.prank(other);
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", other));
         factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -134,8 +137,18 @@ contract EscrowContractFactoryTest is Test {
     function testCreateEscrowValidation() public {
         vm.startPrank(owner);
         
+        vm.expectRevert("Invalid buyer address");
+        factory.createEscrowContract(
+            address(0),
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        
         vm.expectRevert("Invalid seller address");
         factory.createEscrowContract(
+            buyer,
             address(0),
             AMOUNT,
             expiryTimestamp,
@@ -144,6 +157,7 @@ contract EscrowContractFactoryTest is Test {
         
         vm.expectRevert("Amount must be positive");
         factory.createEscrowContract(
+            buyer,
             seller,
             0,
             expiryTimestamp,
@@ -152,15 +166,17 @@ contract EscrowContractFactoryTest is Test {
         
         vm.expectRevert("Expiry must be future");
         factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             block.timestamp - 1,
             description
         );
         
-        string memory longDescription = "This is a very long description that exceeds the 160 character limit and should cause the function to revert with an error message";
+        string memory longDescription = "This is a very long description that exceeds the 160 character limit and should cause the function to revert with an error message - adding more text to make it longer than 160 chars";
         vm.expectRevert("Description too long");
         factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -174,7 +190,7 @@ contract EscrowContractFactoryTest is Test {
         vm.expectEmit(false, true, true, true); // Check all except first indexed param (address)
         emit ContractCreated(
             address(0), // We don't know the address beforehand
-            owner,
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -183,6 +199,7 @@ contract EscrowContractFactoryTest is Test {
         
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -196,6 +213,7 @@ contract EscrowContractFactoryTest is Test {
         vm.startPrank(owner);
         
         address escrow1 = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -203,6 +221,7 @@ contract EscrowContractFactoryTest is Test {
         );
         
         address escrow2 = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT * 2,
             expiryTimestamp + 1 days,
@@ -229,6 +248,7 @@ contract EscrowContractFactoryTest is Test {
         
         uint256 creationTime1 = block.timestamp;
         address escrow1 = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -239,6 +259,7 @@ contract EscrowContractFactoryTest is Test {
         
         uint256 creationTime2 = block.timestamp;
         address escrow2 = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -249,7 +270,7 @@ contract EscrowContractFactoryTest is Test {
         
         // Test that the prediction function exists and runs without error
         factory.getContractAddress(
-            owner,
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -258,7 +279,7 @@ contract EscrowContractFactoryTest is Test {
         );
         
         factory.getContractAddress(
-            owner,
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -272,6 +293,7 @@ contract EscrowContractFactoryTest is Test {
     function testReentrancyProtection() public {
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -282,10 +304,13 @@ contract EscrowContractFactoryTest is Test {
     }
     
     function testInsufficientBalance() public {
-        // Don't give owner any USDC allowance or balance for this test
+        // Create a new buyer with no USDC balance
+        address poorBuyer = address(0x5);
+        
         vm.prank(owner);
-        vm.expectRevert("USDC transfer failed");
+        vm.expectRevert("Insufficient balance");
         factory.createEscrowContract(
+            poorBuyer,
             seller,
             AMOUNT,
             expiryTimestamp,
@@ -294,12 +319,14 @@ contract EscrowContractFactoryTest is Test {
     }
     
     function testInsufficientAllowance() public {
-        vm.prank(owner);
+        // Reduce buyer's allowance to insufficient
+        vm.prank(buyer);
         usdc.approve(address(factory), AMOUNT - 1);
         
         vm.prank(owner);
-        vm.expectRevert("USDC transfer failed");
+        vm.expectRevert("Insufficient allowance");
         factory.createEscrowContract(
+            buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
