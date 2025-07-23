@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "forge-std/Script.sol";
-import "../src/EscrowContractFactory.sol";
+import {Script, console} from "forge-std/Script.sol";
+import {EscrowContractFactory} from "../src/EscrowContractFactory.sol";
 
 contract DeploymentScript is Script {
     function run() external {
@@ -37,7 +37,7 @@ contract DeploymentScript is Script {
         
         console.log("Deployment completed successfully!");
         console.log("Factory contract address:", address(factory));
-        console.log("USDC token address:", address(factory.usdcToken()));
+        console.log("USDC token address:", address(factory.USDC_TOKEN()));
         console.log("Factory owner:", factory.owner());
     }
 }

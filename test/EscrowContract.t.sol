@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "forge-std/Test.sol";
-import "../src/EscrowContract.sol";
-import "../src/EscrowContractFactory.sol";
+import {Test, console} from "forge-std/Test.sol";
+import {EscrowContract} from "../src/EscrowContract.sol";
+import {EscrowContractFactory} from "../src/EscrowContractFactory.sol";
 
 contract MockERC20 is Test {
     mapping(address => uint256) public balanceOf;
@@ -132,12 +132,12 @@ contract EscrowContractTest is Test {
             description
         );
         
-        assertEq(address(escrow.usdcToken()), address(usdc));
-        assertEq(escrow.buyer(), buyer);
-        assertEq(escrow.seller(), seller);
-        assertEq(escrow.gasPayer(), gasPayer);
-        assertEq(escrow.amount(), AMOUNT);
-        assertEq(escrow.expiryTimestamp(), expiryTimestamp);
+        assertEq(address(escrow.USDC_TOKEN()), address(usdc));
+        assertEq(escrow.BUYER(), buyer);
+        assertEq(escrow.SELLER(), seller);
+        assertEq(escrow.GAS_PAYER(), gasPayer);
+        assertEq(escrow.AMOUNT(), AMOUNT);
+        assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         assertEq(escrow.description(), description);
         assertFalse(escrow.disputed());
         assertFalse(escrow.resolved());
@@ -148,6 +148,9 @@ contract EscrowContractTest is Test {
     
     function testRaiseDispute() public {
         vm.prank(gasPayer);
+        usdc.approve(address(factory), AMOUNT);
+        
+        vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
             seller,
             AMOUNT,
@@ -156,7 +159,7 @@ contract EscrowContractTest is Test {
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
-        vm.prank(buyer);
+        vm.prank(gasPayer); // gasPayer is the buyer in this test
         escrow.raiseDispute();
         
         assertTrue(escrow.disputed());

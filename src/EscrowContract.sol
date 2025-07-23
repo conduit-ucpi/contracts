@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 contract EscrowContract is ReentrancyGuard {
     
-    IERC20 public immutable usdcToken;
-    address public immutable factory;
-    address public immutable buyer;
-    address public immutable seller;
-    address public immutable gasPayer;
+    IERC20 public immutable USDC_TOKEN;
+    address public immutable FACTORY;
+    address public immutable BUYER;
+    address public immutable SELLER;
+    address public immutable GAS_PAYER;
     
-    uint256 public immutable amount;
-    uint256 public immutable expiryTimestamp;
+    uint256 public immutable AMOUNT;
+    uint256 public immutable EXPIRY_TIMESTAMP;
     string public description;
     
     bool public disputed;
@@ -25,17 +25,17 @@ contract EscrowContract is ReentrancyGuard {
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
     
     modifier onlyBuyer() {
-        require(msg.sender == buyer, "Only buyer can call");
+        require(msg.sender == BUYER, "Only buyer can call");
         _;
     }
     
     modifier onlyGasPayer() {
-        require(msg.sender == gasPayer, "Only gas payer can call");
+        require(msg.sender == GAS_PAYER, "Only gas payer can call");
         _;
     }
     
     modifier onlySellerOrGasPayer() {
-        require(msg.sender == seller || msg.sender == gasPayer, "Unauthorized");
+        require(msg.sender == SELLER || msg.sender == GAS_PAYER, "Unauthorized");
         _;
     }
     
@@ -56,19 +56,16 @@ contract EscrowContract is ReentrancyGuard {
         require(_expiryTimestamp > block.timestamp, "Expiry must be future");
         require(bytes(_description).length <= 160, "Description too long");
         
-        usdcToken = IERC20(_usdcToken);
-        factory = msg.sender;
-        buyer = _buyer;
-        seller = _seller;
-        gasPayer = _gasPayer;
-        amount = _amount;
-        expiryTimestamp = _expiryTimestamp;
+        USDC_TOKEN = IERC20(_usdcToken);
+        FACTORY = msg.sender;
+        BUYER = _buyer;
+        SELLER = _seller;
+        GAS_PAYER = _gasPayer;
+        AMOUNT = _amount;
+        EXPIRY_TIMESTAMP = _expiryTimestamp;
         description = _description;
         
-        require(
-            usdcToken.transferFrom(_buyer, address(this), _amount),
-            "USDC transfer failed"
-        );
+        // Note: USDC transfer is handled by the factory
     }
     
     function raiseDispute() external onlyBuyer nonReentrant {
@@ -82,33 +79,33 @@ contract EscrowContract is ReentrancyGuard {
     function resolveDispute(address recipient) external onlyGasPayer nonReentrant {
         require(disputed, "Not disputed");
         require(!resolved, "Already resolved");
-        require(recipient == buyer || recipient == seller, "Invalid recipient");
+        require(recipient == BUYER || recipient == SELLER, "Invalid recipient");
         
         resolved = true;
         claimed = true;
         
         require(
-            usdcToken.transfer(recipient, amount),
+            USDC_TOKEN.transfer(recipient, AMOUNT),
             "USDC transfer failed"
         );
         
         emit DisputeResolved(recipient, block.timestamp);
-        emit FundsClaimed(recipient, amount, block.timestamp);
+        emit FundsClaimed(recipient, AMOUNT, block.timestamp);
     }
     
     function claimFunds() external onlySellerOrGasPayer nonReentrant {
-        require(block.timestamp >= expiryTimestamp, "Not expired yet");
+        require(block.timestamp >= EXPIRY_TIMESTAMP, "Not expired yet");
         require(!disputed, "Contract disputed");
         require(!claimed, "Already claimed");
         
         claimed = true;
         
         require(
-            usdcToken.transfer(seller, amount),
+            USDC_TOKEN.transfer(SELLER, AMOUNT),
             "USDC transfer failed"
         );
         
-        emit FundsClaimed(seller, amount, block.timestamp);
+        emit FundsClaimed(SELLER, AMOUNT, block.timestamp);
     }
     
     function getContractInfo() external view returns (
@@ -123,10 +120,10 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _currentTimestamp
     ) {
         return (
-            buyer,
-            seller,
-            amount,
-            expiryTimestamp,
+            BUYER,
+            SELLER,
+            AMOUNT,
+            EXPIRY_TIMESTAMP,
             description,
             disputed,
             resolved,
@@ -136,11 +133,11 @@ contract EscrowContract is ReentrancyGuard {
     }
     
     function isExpired() external view returns (bool) {
-        return block.timestamp >= expiryTimestamp;
+        return block.timestamp >= EXPIRY_TIMESTAMP;
     }
     
     function canClaim() external view returns (bool) {
-        return block.timestamp >= expiryTimestamp && !disputed && !claimed;
+        return block.timestamp >= EXPIRY_TIMESTAMP && !disputed && !claimed;
     }
     
     function canDispute() external view returns (bool) {
