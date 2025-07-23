@@ -1,0 +1,33 @@
+# Foundry
+cache/
+out/
+libs/
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node modules (if using any)
+node_modules/
+
+# ABI exports
+abi/
+
+# Deployment artifacts
+broadcast/
+deployments/
+
+# Coverage reports
+coverage/
+lcov.info
