@@ -171,7 +171,7 @@ contract EscrowContractFactoryTest is Test {
     }
     
     function testContractCreatedEvent() public {
-        vm.expectEmit(true, true, true, false); // Don't check data field (address)
+        vm.expectEmit(false, true, true, true); // Check all except first indexed param (address)
         emit ContractCreated(
             address(0), // We don't know the address beforehand
             owner,

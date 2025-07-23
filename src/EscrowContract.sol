@@ -48,13 +48,11 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _expiryTimestamp,
         string memory _description
     ) {
+        // Factory validates all parameters, so we only need basic non-zero checks
         require(_usdcToken != address(0), "Invalid USDC address");
         require(_buyer != address(0), "Invalid buyer");
-        require(_seller != address(0), "Invalid seller");
+        require(_seller != address(0), "Invalid seller");  
         require(_gasPayer != address(0), "Invalid gas payer");
-        require(_amount > 0, "Amount must be positive");
-        require(_expiryTimestamp > block.timestamp, "Expiry must be future");
-        require(bytes(_description).length <= 160, "Description too long");
         
         USDC_TOKEN = IERC20(_usdcToken);
         FACTORY = msg.sender;

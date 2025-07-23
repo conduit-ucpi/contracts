@@ -65,7 +65,12 @@ contract EscrowContractTest is Test {
         
         expiryTimestamp = block.timestamp + 7 days;
         
+        // Give USDC to gasPayer so they can create escrow contracts
+        usdc.mint(gasPayer, AMOUNT * 10);
         usdc.mint(buyer, AMOUNT * 10);
+        
+        vm.prank(gasPayer);
+        usdc.approve(address(factory), AMOUNT * 10);
         
         vm.prank(buyer);
         usdc.approve(address(factory), AMOUNT * 10);
