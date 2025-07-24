@@ -2,24 +2,19 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract EscrowContract is ReentrancyGuard {
+contract EscrowContract {
     
-    IERC20 public immutable USDC_TOKEN;
-    address public immutable FACTORY;
-    address public immutable BUYER;
-    address public immutable SELLER;
-    address public immutable GAS_PAYER;
+    IERC20 public USDC_TOKEN;
+    address public BUYER;
+    address public SELLER;
+    address public GAS_PAYER;
     
-    uint256 public immutable AMOUNT;
-    uint256 public immutable EXPIRY_TIMESTAMP;
-    string public description;
+    uint256 public AMOUNT;
+    uint256 public EXPIRY_TIMESTAMP;
+    bytes32 public DESCRIPTION_HASH;
     
-    bool public funded;
-    bool public disputed;
-    bool public resolved;
-    bool public claimed;
+    uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
     
     event FundsDeposited(address buyer, uint256 amount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
@@ -41,38 +36,41 @@ contract EscrowContract is ReentrancyGuard {
         _;
     }
     
-    constructor(
+    modifier initialized() {
+        require(_state != 255, "Not initialized");
+        _;
+    }
+    
+    constructor() {
+        // Implementation contract - disable initialization
+        _state = 255; // Mark as disabled
+    }
+    
+    function initialize(
         address _usdcToken,
         address _buyer,
         address _seller,
         address _gasPayer,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        string memory _description
-    ) {
-        // Factory validates all parameters, so we only need basic non-zero checks
-        require(_usdcToken != address(0), "Invalid USDC address");
-        require(_buyer != address(0), "Invalid buyer");
-        require(_seller != address(0), "Invalid seller");  
-        require(_gasPayer != address(0), "Invalid gas payer");
+        bytes32 _descriptionHash
+    ) external {
+        require(_state == 0, "Already initialized");
         
         USDC_TOKEN = IERC20(_usdcToken);
-        FACTORY = msg.sender;
         BUYER = _buyer;
         SELLER = _seller;
         GAS_PAYER = _gasPayer;
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
-        description = _description;
-        
-        // Note: Contract starts unfunded - buyer must call depositFunds()
+        DESCRIPTION_HASH = _descriptionHash;
+        _state = 0; // Set to unfunded state
     }
     
-    function depositFunds() external onlyBuyer nonReentrant {
-        require(!funded, "Already funded");
-        require(!claimed, "Already claimed");
+    function depositFunds() external onlyBuyer initialized {
+        require(_state == 0, "Already funded or claimed");
         
-        funded = true;
+        _state = 1; // funded
         
         require(
             USDC_TOKEN.transferFrom(msg.sender, address(this), AMOUNT),
@@ -82,23 +80,18 @@ contract EscrowContract is ReentrancyGuard {
         emit FundsDeposited(msg.sender, AMOUNT, block.timestamp);
     }
     
-    function raiseDispute() external onlyBuyer nonReentrant {
-        require(funded, "Contract not funded");
-        require(!disputed, "Already disputed");
-        require(!claimed, "Already claimed");
+    function raiseDispute() external onlyBuyer initialized {
+        require(_state == 1, "Not funded or already processed");
         
-        disputed = true;
+        _state = 2; // disputed
         emit DisputeRaised(block.timestamp);
     }
     
-    function resolveDispute(address recipient) external onlyGasPayer nonReentrant {
-        require(funded, "Contract not funded");
-        require(disputed, "Not disputed");
-        require(!resolved, "Already resolved");
+    function resolveDispute(address recipient) external onlyGasPayer initialized {
+        require(_state == 2, "Not disputed");
         require(recipient == BUYER || recipient == SELLER, "Invalid recipient");
         
-        resolved = true;
-        claimed = true;
+        _state = 4; // claimed (resolved)
         
         require(
             USDC_TOKEN.transfer(recipient, AMOUNT),
@@ -109,13 +102,11 @@ contract EscrowContract is ReentrancyGuard {
         emit FundsClaimed(recipient, AMOUNT, block.timestamp);
     }
     
-    function claimFunds() external onlySellerOrGasPayer nonReentrant {
-        require(funded, "Contract not funded");
+    function claimFunds() external onlySellerOrGasPayer initialized {
+        require(_state == 1, "Not funded or already processed");
         require(block.timestamp >= EXPIRY_TIMESTAMP, "Not expired yet");
-        require(!disputed, "Contract disputed");
-        require(!claimed, "Already claimed");
         
-        claimed = true;
+        _state = 4; // claimed
         
         require(
             USDC_TOKEN.transfer(SELLER, AMOUNT),
@@ -125,16 +116,13 @@ contract EscrowContract is ReentrancyGuard {
         emit FundsClaimed(SELLER, AMOUNT, block.timestamp);
     }
     
-    function getContractInfo() external view returns (
+    function getContractInfo() external view initialized returns (
         address _buyer,
         address _seller,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        string memory _description,
-        bool _funded,
-        bool _disputed,
-        bool _resolved,
-        bool _claimed,
+        bytes32 _descriptionHash,
+        uint8 _currentState,
         uint256 _currentTimestamp
     ) {
         return (
@@ -142,32 +130,37 @@ contract EscrowContract is ReentrancyGuard {
             SELLER,
             AMOUNT,
             EXPIRY_TIMESTAMP,
-            description,
-            funded,
-            disputed,
-            resolved,
-            claimed,
+            DESCRIPTION_HASH,
+            _state,
             block.timestamp
         );
     }
     
-    function isExpired() external view returns (bool) {
+    function isExpired() external view initialized returns (bool) {
         return block.timestamp >= EXPIRY_TIMESTAMP;
     }
     
-    function canClaim() external view returns (bool) {
-        return funded && block.timestamp >= EXPIRY_TIMESTAMP && !disputed && !claimed;
+    function canClaim() external view initialized returns (bool) {
+        return _state == 1 && block.timestamp >= EXPIRY_TIMESTAMP;
     }
     
-    function canDispute() external view returns (bool) {
-        return funded && !disputed && !claimed;
+    function canDispute() external view initialized returns (bool) {
+        return _state == 1;
     }
     
-    function isFunded() external view returns (bool) {
-        return funded;
+    function isFunded() external view initialized returns (bool) {
+        return _state >= 1;
     }
     
-    function canDeposit() external view returns (bool) {
-        return !funded && !claimed;
+    function canDeposit() external view initialized returns (bool) {
+        return _state == 0;
+    }
+    
+    function isDisputed() external view initialized returns (bool) {
+        return _state == 2;
+    }
+    
+    function isClaimed() external view initialized returns (bool) {
+        return _state == 4;
     }
 }

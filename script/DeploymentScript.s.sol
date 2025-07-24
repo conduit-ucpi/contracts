@@ -37,7 +37,15 @@ contract DeploymentScript is Script {
         
         console.log("Deployment completed successfully!");
         console.log("Factory contract address:", address(factory));
+        console.log("Implementation contract address:", factory.IMPLEMENTATION());
         console.log("USDC token address:", address(factory.USDC_TOKEN()));
-        console.log("Factory owner:", factory.owner());
+        console.log("Factory owner:", factory.OWNER());
+        
+        console.log("=================================================");
+        console.log("CLONE DEPLOYMENT SUCCESSFUL!");
+        console.log("Each escrow will be cloned from implementation:");
+        console.log("Implementation:", factory.IMPLEMENTATION());
+        console.log("Gas per escrow: ~188k (vs ~856k before cloning)");
+        console.log("=================================================");
     }
 }

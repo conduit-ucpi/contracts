@@ -1,29 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {EscrowContract} from "./EscrowContract.sol";
 
-contract EscrowContractFactory is Ownable, ReentrancyGuard {
+contract EscrowContractFactory {
     
     IERC20 public immutable USDC_TOKEN;
+    address public immutable OWNER;
+    address public immutable IMPLEMENTATION;
     
     event ContractCreated(
         address indexed contractAddress,
         address indexed buyer,
         address indexed seller,
         uint256 amount,
-        uint256 expiryTimestamp,
-        string description
+        uint256 expiryTimestamp
     );
     
-    constructor(address _usdcToken, address _owner) Ownable(_owner) {
-        require(_usdcToken != address(0), "Invalid USDC address");
-        require(_owner != address(0), "Invalid owner address");
-        
+    constructor(address _usdcToken, address _owner) {
         USDC_TOKEN = IERC20(_usdcToken);
+        OWNER = _owner;
+        IMPLEMENTATION = address(new EscrowContract());
     }
     
     function createEscrowContract(
@@ -31,13 +30,11 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        string calldata description
-    ) external onlyOwner nonReentrant returns (address) {
-        require(buyer != address(0), "Invalid buyer address");
-        require(seller != address(0), "Invalid seller address");
-        require(amount > 0, "Amount must be positive");
-        require(expiryTimestamp > block.timestamp, "Expiry must be future");
-        require(bytes(description).length <= 160, "Description too long");
+        bytes32 descriptionHash
+    ) external returns (address) {
+        require(msg.sender == OWNER, "Only owner");
+        require(buyer != address(0) && seller != address(0), "Invalid addresses");
+        require(amount > 0 && expiryTimestamp > block.timestamp, "Invalid params");
         
         bytes32 salt = keccak256(abi.encodePacked(
             buyer,
@@ -47,23 +44,26 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
             block.timestamp
         ));
         
-        EscrowContract newContract = new EscrowContract{salt: salt}(
+        address clone = Clones.cloneDeterministic(IMPLEMENTATION, salt);
+        
+        EscrowContract(clone).initialize(
             address(USDC_TOKEN),
             buyer,
             seller,
-            owner(),
+            OWNER,
             amount,
             expiryTimestamp,
-            description
+            descriptionHash
         );
+        
+        EscrowContract newContract = EscrowContract(clone);
         
         emit ContractCreated(
             address(newContract),
             buyer,
             seller,
             amount,
-            expiryTimestamp,
-            description
+            expiryTimestamp
         );
         
         return address(newContract);
@@ -75,7 +75,7 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
         uint256 amount,
         uint256 expiryTimestamp,
         uint256 creationTimestamp,
-        string calldata description
+        bytes32 /* descriptionHash */
     ) external view returns (address) {
         bytes32 salt = keccak256(abi.encodePacked(
             buyer,
@@ -85,24 +85,6 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
             creationTimestamp
         ));
         
-        bytes32 hash = keccak256(abi.encodePacked(
-            bytes1(0xff),
-            address(this),
-            salt,
-            keccak256(abi.encodePacked(
-                type(EscrowContract).creationCode,
-                abi.encode(
-                    address(USDC_TOKEN),
-                    buyer,
-                    seller,
-                    owner(),
-                    amount,
-                    expiryTimestamp,
-                    description
-                )
-            ))
-        ));
-        
-        return address(uint160(uint256(hash)));
+        return Clones.predictDeterministicAddress(IMPLEMENTATION, salt, address(this));
     }
 }

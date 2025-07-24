@@ -58,12 +58,14 @@ contract EscrowContractTest is Test {
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
     uint256 public expiryTimestamp;
     string public description = "Test escrow transaction";
+    bytes32 public descriptionHash;
     
     function setUp() public {
         usdc = new MockERC20();
         factory = new EscrowContractFactory(address(usdc), gasPayer);
         
         expiryTimestamp = block.timestamp + 7 days;
+        descriptionHash = keccak256(abi.encodePacked(description));
         
         // Give USDC to gasPayer so they can create escrow contracts
         usdc.mint(gasPayer, AMOUNT * 10);
@@ -83,7 +85,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            descriptionHash
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -99,49 +101,24 @@ contract EscrowContractTest is Test {
     }
     
     function testConstructorValidation() public {
-        vm.expectRevert("Invalid seller");
-        new EscrowContract(
-            address(usdc),
-            buyer,
-            address(0),
-            gasPayer,
-            AMOUNT,
-            expiryTimestamp,
-            description
-        );
+        // Test implementation contract constructor
+        EscrowContract implementation = new EscrowContract();
         
-        vm.expectRevert("Invalid USDC address");
-        new EscrowContract(
-            address(0),
-            buyer,
-            seller,
-            gasPayer,
-            AMOUNT,
-            expiryTimestamp,
-            description
-        );
+        // Implementation should be disabled (state 255)
+        vm.expectRevert("Not initialized");
+        implementation.isFunded();
         
-        vm.expectRevert("Invalid buyer");
-        new EscrowContract(
-            address(usdc),
-            address(0),
-            seller,
-            gasPayer,
-            AMOUNT,
-            expiryTimestamp,
-            description
-        );
+        // Test cloned contract initialization
+        EscrowContract testEscrow = createAndFundEscrow();
         
-        vm.expectRevert("Invalid gas payer");
-        new EscrowContract(
-            address(usdc),
-            buyer,
-            seller,
-            address(0),
-            AMOUNT,
-            expiryTimestamp,
-            description
-        );
+        // Verify all parameters were set correctly
+        assertEq(address(testEscrow.USDC_TOKEN()), address(usdc));
+        assertEq(testEscrow.BUYER(), buyer);
+        assertEq(testEscrow.SELLER(), seller);
+        assertEq(testEscrow.GAS_PAYER(), gasPayer);
+        assertEq(testEscrow.AMOUNT(), AMOUNT);
+        assertEq(testEscrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
+        assertEq(testEscrow.DESCRIPTION_HASH(), descriptionHash);
     }
     
     function testSuccessfulDeployment() public {
@@ -151,7 +128,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            descriptionHash
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -162,14 +139,13 @@ contract EscrowContractTest is Test {
         assertEq(escrow.GAS_PAYER(), gasPayer);
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
-        assertEq(escrow.description(), description);
-        assertFalse(escrow.disputed());
-        assertFalse(escrow.resolved());
-        assertFalse(escrow.claimed());
+        assertEq(escrow.DESCRIPTION_HASH(), descriptionHash);
+        assertFalse(escrow.isDisputed());
+        assertFalse(escrow.isClaimed());
         
         // Contract starts unfunded
         assertEq(usdc.balanceOf(address(escrow)), 0);
-        assertFalse(escrow.funded());
+        assertFalse(escrow.isFunded());
     }
     
     function testRaiseDispute() public {
@@ -178,7 +154,7 @@ contract EscrowContractTest is Test {
         vm.prank(buyer);
         escrow.raiseDispute();
         
-        assertTrue(escrow.disputed());
+        assertTrue(escrow.isDisputed());
         assertFalse(escrow.canClaim());
         assertFalse(escrow.canDispute());
     }
@@ -202,7 +178,7 @@ contract EscrowContractTest is Test {
         escrow.raiseDispute();
         
         vm.prank(buyer);
-        vm.expectRevert("Already disputed");
+        vm.expectRevert("Not funded or already processed");
         escrow.raiseDispute();
     }
     
@@ -217,8 +193,8 @@ contract EscrowContractTest is Test {
         vm.prank(gasPayer);
         escrow.resolveDispute(buyer);
         
-        assertTrue(escrow.resolved());
-        assertTrue(escrow.claimed());
+        assertTrue(escrow.isClaimed());
+        assertTrue(escrow.isClaimed());
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore + AMOUNT);
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
@@ -248,7 +224,7 @@ contract EscrowContractTest is Test {
         vm.prank(seller);
         escrow.claimFunds();
         
-        assertTrue(escrow.claimed());
+        assertTrue(escrow.isClaimed());
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + AMOUNT);
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
@@ -263,7 +239,7 @@ contract EscrowContractTest is Test {
         vm.prank(gasPayer);
         escrow.claimFunds();
         
-        assertTrue(escrow.claimed());
+        assertTrue(escrow.isClaimed());
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + AMOUNT);
     }
     
@@ -284,7 +260,7 @@ contract EscrowContractTest is Test {
         vm.warp(expiryTimestamp + 1);
         
         vm.prank(seller);
-        vm.expectRevert("Contract disputed");
+        vm.expectRevert("Not funded or already processed");
         escrow.claimFunds();
     }
     
@@ -296,11 +272,8 @@ contract EscrowContractTest is Test {
             address _seller,
             uint256 _amount,
             uint256 _expiryTimestamp,
-            string memory _description,
-            bool _funded,
-            bool _disputed,
-            bool _resolved,
-            bool _claimed,
+            bytes32 _descriptionHash,
+            uint8 _currentState,
             uint256 _currentTimestamp
         ) = escrow.getContractInfo();
         
@@ -308,11 +281,8 @@ contract EscrowContractTest is Test {
         assertEq(_seller, seller);
         assertEq(_amount, AMOUNT);
         assertEq(_expiryTimestamp, expiryTimestamp);
-        assertEq(_description, description);
-        assertTrue(_funded);
-        assertFalse(_disputed);
-        assertFalse(_resolved);
-        assertFalse(_claimed);
+        assertEq(_descriptionHash, descriptionHash);
+        assertEq(_currentState, 1); // funded state
         assertEq(_currentTimestamp, block.timestamp);
         
         assertFalse(escrow.isExpired());
@@ -331,11 +301,11 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            descriptionHash
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
-        assertFalse(escrow.funded());
+        assertFalse(escrow.isFunded());
         assertEq(usdc.balanceOf(address(escrow)), 0);
         
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
@@ -346,7 +316,7 @@ contract EscrowContractTest is Test {
         vm.prank(buyer);
         escrow.depositFunds();
         
-        assertTrue(escrow.funded());
+        assertTrue(escrow.isFunded());
         assertEq(usdc.balanceOf(address(escrow)), AMOUNT);
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
     }
@@ -358,7 +328,7 @@ contract EscrowContractTest is Test {
         usdc.approve(address(escrow), AMOUNT);
         
         vm.prank(buyer);
-        vm.expectRevert("Already funded");
+        vm.expectRevert("Already funded or claimed");
         escrow.depositFunds();
     }
     
@@ -369,7 +339,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            descriptionHash
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -389,22 +359,22 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            descriptionHash
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
         vm.prank(buyer);
-        vm.expectRevert("Contract not funded");
+        vm.expectRevert("Not funded or already processed");
         escrow.raiseDispute();
         
         vm.warp(expiryTimestamp + 1);
         
         vm.prank(seller);
-        vm.expectRevert("Contract not funded");
+        vm.expectRevert("Not funded or already processed");
         escrow.claimFunds();
         
         vm.prank(gasPayer);
-        vm.expectRevert("Contract not funded");
+        vm.expectRevert("Not disputed");
         escrow.resolveDispute(buyer);
     }
 }
