@@ -58,14 +58,12 @@ contract EscrowContractTest is Test {
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
     uint256 public expiryTimestamp;
     string public description = "Test escrow transaction";
-    bytes32 public descriptionHash;
     
     function setUp() public {
         usdc = new MockERC20();
         factory = new EscrowContractFactory(address(usdc), gasPayer);
         
         expiryTimestamp = block.timestamp + 7 days;
-        descriptionHash = keccak256(abi.encodePacked(description));
         
         // Give USDC to gasPayer so they can create escrow contracts
         usdc.mint(gasPayer, AMOUNT * 10);
@@ -85,7 +83,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -118,7 +116,7 @@ contract EscrowContractTest is Test {
         assertEq(testEscrow.GAS_PAYER(), gasPayer);
         assertEq(testEscrow.AMOUNT(), AMOUNT);
         assertEq(testEscrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
-        assertEq(testEscrow.DESCRIPTION_HASH(), descriptionHash);
+        assertEq(testEscrow.DESCRIPTION(), description);
     }
     
     function testSuccessfulDeployment() public {
@@ -128,7 +126,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -139,7 +137,7 @@ contract EscrowContractTest is Test {
         assertEq(escrow.GAS_PAYER(), gasPayer);
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
-        assertEq(escrow.DESCRIPTION_HASH(), descriptionHash);
+        assertEq(escrow.DESCRIPTION(), description);
         assertFalse(escrow.isDisputed());
         assertFalse(escrow.isClaimed());
         
@@ -272,7 +270,7 @@ contract EscrowContractTest is Test {
             address _seller,
             uint256 _amount,
             uint256 _expiryTimestamp,
-            bytes32 _descriptionHash,
+            string memory _description,
             uint8 _currentState,
             uint256 _currentTimestamp
         ) = escrow.getContractInfo();
@@ -281,7 +279,7 @@ contract EscrowContractTest is Test {
         assertEq(_seller, seller);
         assertEq(_amount, AMOUNT);
         assertEq(_expiryTimestamp, expiryTimestamp);
-        assertEq(_descriptionHash, descriptionHash);
+        assertEq(keccak256(abi.encodePacked(_description)), keccak256(abi.encodePacked(description)));
         assertEq(_currentState, 1); // funded state
         assertEq(_currentTimestamp, block.timestamp);
         
@@ -301,7 +299,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -339,7 +337,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -359,7 +357,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         

@@ -30,7 +30,7 @@ contract EscrowContractFactory {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        bytes32 descriptionHash
+        string memory description
     ) external returns (address) {
         require(msg.sender == OWNER, "Only owner");
         require(buyer != address(0) && seller != address(0), "Invalid addresses");
@@ -53,7 +53,7 @@ contract EscrowContractFactory {
             OWNER,
             amount,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         EscrowContract newContract = EscrowContract(clone);
@@ -75,7 +75,7 @@ contract EscrowContractFactory {
         uint256 amount,
         uint256 expiryTimestamp,
         uint256 creationTimestamp,
-        bytes32 /* descriptionHash */
+        string memory /* description */
     ) external view returns (address) {
         bytes32 salt = keccak256(abi.encodePacked(
             buyer,

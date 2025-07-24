@@ -58,7 +58,6 @@ contract EscrowContractFactoryTest is Test {
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
     uint256 public expiryTimestamp;
     string public description = "Test escrow transaction";
-    bytes32 public descriptionHash;
     
     event ContractCreated(
         address indexed contractAddress,
@@ -73,7 +72,6 @@ contract EscrowContractFactoryTest is Test {
         factory = new EscrowContractFactory(address(usdc), owner);
         
         expiryTimestamp = block.timestamp + 7 days;
-        descriptionHash = keccak256(abi.encodePacked(description));
         
         usdc.mint(buyer, AMOUNT * 10);
         usdc.mint(owner, AMOUNT * 10);
@@ -105,7 +103,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -116,7 +114,7 @@ contract EscrowContractFactoryTest is Test {
         assertEq(escrow.GAS_PAYER(), owner); // owner is the gas payer
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
-        assertEq(escrow.DESCRIPTION_HASH(), descriptionHash);
+        assertEq(escrow.DESCRIPTION(), description);
         
         // Contract starts unfunded - no USDC transferred yet
         assertEq(usdc.balanceOf(escrowAddress), 0);
@@ -131,7 +129,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
     }
     
@@ -144,7 +142,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         vm.expectRevert("Invalid addresses");
@@ -153,7 +151,7 @@ contract EscrowContractFactoryTest is Test {
             address(0),
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         vm.expectRevert("Invalid params");
@@ -162,7 +160,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             0,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         vm.expectRevert("Invalid params");
@@ -171,7 +169,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             block.timestamp - 1,
-            descriptionHash
+            description
         );
         
         // Test with invalid parameters - zero addresses
@@ -181,7 +179,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         vm.stopPrank();
@@ -203,7 +201,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -212,15 +210,15 @@ contract EscrowContractFactoryTest is Test {
     function testMultipleContracts() public {
         vm.startPrank(owner);
         
-        bytes32 firstDescHash = keccak256(abi.encodePacked("First escrow"));
-        bytes32 secondDescHash = keccak256(abi.encodePacked("Second escrow"));
+        string memory firstDesc = "First escrow";
+        string memory secondDesc = "Second escrow";
         
         address escrow1 = factory.createEscrowContract(
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            firstDescHash
+            firstDesc
         );
         
         address escrow2 = factory.createEscrowContract(
@@ -228,7 +226,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT * 2,
             expiryTimestamp + 1 days,
-            secondDescHash
+            secondDesc
         );
         
         assertTrue(escrow1 != escrow2);
@@ -240,8 +238,8 @@ contract EscrowContractFactoryTest is Test {
         
         assertEq(contract1.AMOUNT(), AMOUNT);
         assertEq(contract2.AMOUNT(), AMOUNT * 2);
-        assertEq(contract1.DESCRIPTION_HASH(), firstDescHash);
-        assertEq(contract2.DESCRIPTION_HASH(), secondDescHash);
+        assertEq(contract1.DESCRIPTION(), firstDesc);
+        assertEq(contract2.DESCRIPTION(), secondDesc);
         
         vm.stopPrank();
     }
@@ -255,7 +253,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         vm.warp(block.timestamp + 1);
@@ -266,7 +264,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         assertTrue(escrow1 != escrow2);
@@ -278,7 +276,7 @@ contract EscrowContractFactoryTest is Test {
             AMOUNT,
             expiryTimestamp,
             creationTime1,
-            descriptionHash
+            description
         );
         
         factory.getContractAddress(
@@ -287,7 +285,7 @@ contract EscrowContractFactoryTest is Test {
             AMOUNT,
             expiryTimestamp,
             creationTime2,
-            descriptionHash
+            description
         );
         
         vm.stopPrank();
@@ -300,7 +298,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -317,7 +315,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -337,7 +335,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            descriptionHash
+            description
         );
         
         assertTrue(escrowAddress != address(0));

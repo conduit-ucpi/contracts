@@ -12,7 +12,7 @@ contract EscrowContract {
     
     uint256 public AMOUNT;
     uint256 public EXPIRY_TIMESTAMP;
-    bytes32 public DESCRIPTION_HASH;
+    string public DESCRIPTION;
     
     uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
     
@@ -53,7 +53,7 @@ contract EscrowContract {
         address _gasPayer,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        bytes32 _descriptionHash
+        string memory _description
     ) external {
         require(_state == 0, "Already initialized");
         
@@ -63,7 +63,7 @@ contract EscrowContract {
         GAS_PAYER = _gasPayer;
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
-        DESCRIPTION_HASH = _descriptionHash;
+        DESCRIPTION = _description;
         _state = 0; // Set to unfunded state
     }
     
@@ -121,7 +121,7 @@ contract EscrowContract {
         address _seller,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        bytes32 _descriptionHash,
+        string memory _description,
         uint8 _currentState,
         uint256 _currentTimestamp
     ) {
@@ -130,7 +130,7 @@ contract EscrowContract {
             SELLER,
             AMOUNT,
             EXPIRY_TIMESTAMP,
-            DESCRIPTION_HASH,
+            DESCRIPTION,
             _state,
             block.timestamp
         );
