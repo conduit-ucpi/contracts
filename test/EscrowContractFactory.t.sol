@@ -118,8 +118,9 @@ contract EscrowContractFactoryTest is Test {
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         assertEq(escrow.description(), description);
         
-        assertEq(usdc.balanceOf(escrowAddress), AMOUNT);
-        assertEq(usdc.balanceOf(buyer), AMOUNT * 10 - AMOUNT); // buyer's balance reduced
+        // Contract starts unfunded - no USDC transferred yet
+        assertEq(usdc.balanceOf(escrowAddress), 0);
+        assertEq(usdc.balanceOf(buyer), AMOUNT * 10); // buyer's balance unchanged
     }
     
     function testOnlyOwnerCanCreateEscrow() public {
@@ -307,30 +308,47 @@ contract EscrowContractFactoryTest is Test {
         // Create a new buyer with no USDC balance
         address poorBuyer = address(0x5);
         
+        // Factory no longer transfers funds, so this should succeed
         vm.prank(owner);
-        vm.expectRevert("Insufficient balance");
-        factory.createEscrowContract(
+        address escrowAddress = factory.createEscrowContract(
             poorBuyer,
             seller,
             AMOUNT,
             expiryTimestamp,
             description
         );
+        
+        assertTrue(escrowAddress != address(0));
+        
+        // But depositFunds should fail for poor buyer
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        vm.prank(poorBuyer);
+        vm.expectRevert("Insufficient balance");
+        escrow.depositFunds();
     }
     
     function testInsufficientAllowance() public {
-        // Reduce buyer's allowance to insufficient
-        vm.prank(buyer);
-        usdc.approve(address(factory), AMOUNT - 1);
-        
+        // Factory no longer transfers funds, so creation should succeed
         vm.prank(owner);
-        vm.expectRevert("Insufficient allowance");
-        factory.createEscrowContract(
+        address escrowAddress = factory.createEscrowContract(
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
             description
         );
+        
+        assertTrue(escrowAddress != address(0));
+        
+        // But depositFunds should fail with insufficient allowance
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        
+        // Reduce buyer's allowance to escrow contract
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT - 1);
+        
+        vm.prank(buyer);
+        vm.expectRevert("Insufficient allowance");
+        escrow.depositFunds();
     }
 }

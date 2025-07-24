@@ -47,12 +47,6 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
             block.timestamp
         ));
         
-        // Transfer USDC from buyer to factory first
-        require(
-            USDC_TOKEN.transferFrom(buyer, address(this), amount),
-            "USDC transfer failed"
-        );
-        
         EscrowContract newContract = new EscrowContract{salt: salt}(
             address(USDC_TOKEN),
             buyer,
@@ -61,12 +55,6 @@ contract EscrowContractFactory is Ownable, ReentrancyGuard {
             amount,
             expiryTimestamp,
             description
-        );
-        
-        // Transfer USDC from factory to the new escrow contract
-        require(
-            USDC_TOKEN.transfer(address(newContract), amount),
-            "USDC transfer to escrow failed"
         );
         
         emit ContractCreated(

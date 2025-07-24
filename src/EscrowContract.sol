@@ -16,10 +16,12 @@ contract EscrowContract is ReentrancyGuard {
     uint256 public immutable EXPIRY_TIMESTAMP;
     string public description;
     
+    bool public funded;
     bool public disputed;
     bool public resolved;
     bool public claimed;
     
+    event FundsDeposited(address buyer, uint256 amount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
     event DisputeResolved(address recipient, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
@@ -63,10 +65,25 @@ contract EscrowContract is ReentrancyGuard {
         EXPIRY_TIMESTAMP = _expiryTimestamp;
         description = _description;
         
-        // Note: USDC transfer is handled by the factory
+        // Note: Contract starts unfunded - buyer must call depositFunds()
+    }
+    
+    function depositFunds() external onlyBuyer nonReentrant {
+        require(!funded, "Already funded");
+        require(!claimed, "Already claimed");
+        
+        funded = true;
+        
+        require(
+            USDC_TOKEN.transferFrom(msg.sender, address(this), AMOUNT),
+            "USDC transfer failed"
+        );
+        
+        emit FundsDeposited(msg.sender, AMOUNT, block.timestamp);
     }
     
     function raiseDispute() external onlyBuyer nonReentrant {
+        require(funded, "Contract not funded");
         require(!disputed, "Already disputed");
         require(!claimed, "Already claimed");
         
@@ -75,6 +92,7 @@ contract EscrowContract is ReentrancyGuard {
     }
     
     function resolveDispute(address recipient) external onlyGasPayer nonReentrant {
+        require(funded, "Contract not funded");
         require(disputed, "Not disputed");
         require(!resolved, "Already resolved");
         require(recipient == BUYER || recipient == SELLER, "Invalid recipient");
@@ -92,6 +110,7 @@ contract EscrowContract is ReentrancyGuard {
     }
     
     function claimFunds() external onlySellerOrGasPayer nonReentrant {
+        require(funded, "Contract not funded");
         require(block.timestamp >= EXPIRY_TIMESTAMP, "Not expired yet");
         require(!disputed, "Contract disputed");
         require(!claimed, "Already claimed");
@@ -112,6 +131,7 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _amount,
         uint256 _expiryTimestamp,
         string memory _description,
+        bool _funded,
         bool _disputed,
         bool _resolved,
         bool _claimed,
@@ -123,6 +143,7 @@ contract EscrowContract is ReentrancyGuard {
             AMOUNT,
             EXPIRY_TIMESTAMP,
             description,
+            funded,
             disputed,
             resolved,
             claimed,
@@ -135,10 +156,18 @@ contract EscrowContract is ReentrancyGuard {
     }
     
     function canClaim() external view returns (bool) {
-        return block.timestamp >= EXPIRY_TIMESTAMP && !disputed && !claimed;
+        return funded && block.timestamp >= EXPIRY_TIMESTAMP && !disputed && !claimed;
     }
     
     function canDispute() external view returns (bool) {
-        return !disputed && !claimed;
+        return funded && !disputed && !claimed;
+    }
+    
+    function isFunded() external view returns (bool) {
+        return funded;
+    }
+    
+    function canDeposit() external view returns (bool) {
+        return !funded && !claimed;
     }
 }
