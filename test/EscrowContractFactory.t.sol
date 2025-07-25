@@ -54,6 +54,7 @@ contract EscrowContractFactoryTest is Test {
     address public buyer = address(0x2);
     address public seller = address(0x3);
     address public other = address(0x4);
+    address public trustedForwarder = address(0x5);
     
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
     uint256 public expiryTimestamp;
@@ -69,7 +70,7 @@ contract EscrowContractFactoryTest is Test {
     
     function setUp() public {
         usdc = new MockERC20();
-        factory = new EscrowContractFactory(address(usdc), owner);
+        factory = new EscrowContractFactory(address(usdc), owner, trustedForwarder);
         
         expiryTimestamp = block.timestamp + 7 days;
         
@@ -85,7 +86,7 @@ contract EscrowContractFactoryTest is Test {
     
     function testConstructorValidation() public {
         // Constructor should accept valid addresses without reverting
-        EscrowContractFactory testFactory = new EscrowContractFactory(address(usdc), owner);
+        EscrowContractFactory testFactory = new EscrowContractFactory(address(usdc), owner, trustedForwarder);
         assertEq(address(testFactory.USDC_TOKEN()), address(usdc));
         assertEq(testFactory.OWNER(), owner);
     }

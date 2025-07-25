@@ -2,8 +2,9 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 
-contract EscrowContract {
+contract EscrowContract is ERC2771Context {
     
     IERC20 public USDC_TOKEN;
     address public BUYER;
@@ -15,6 +16,7 @@ contract EscrowContract {
     string public DESCRIPTION;
     
     uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
+    address private _trustedForwarderOverride;
     
     event FundsDeposited(address buyer, uint256 amount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
@@ -22,17 +24,17 @@ contract EscrowContract {
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
     
     modifier onlyBuyer() {
-        require(msg.sender == BUYER, "Only buyer can call");
+        require(_msgSender() == BUYER, "Only buyer can call");
         _;
     }
     
     modifier onlyGasPayer() {
-        require(msg.sender == GAS_PAYER, "Only gas payer can call");
+        require(_msgSender() == GAS_PAYER, "Only gas payer can call");
         _;
     }
     
     modifier onlySellerOrGasPayer() {
-        require(msg.sender == SELLER || msg.sender == GAS_PAYER, "Unauthorized");
+        require(_msgSender() == SELLER || _msgSender() == GAS_PAYER, "Unauthorized");
         _;
     }
     
@@ -41,9 +43,13 @@ contract EscrowContract {
         _;
     }
     
-    constructor() {
+    constructor() ERC2771Context(address(0)) {
         // Implementation contract - disable initialization
         _state = 255; // Mark as disabled
+    }
+    
+    function trustedForwarder() public view virtual override returns (address) {
+        return _trustedForwarderOverride != address(0) ? _trustedForwarderOverride : super.trustedForwarder();
     }
     
     function initialize(
@@ -53,7 +59,8 @@ contract EscrowContract {
         address _gasPayer,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        string memory _description
+        string memory _description,
+        address _trustedForwarder
     ) external {
         require(_state == 0, "Already initialized");
         
@@ -64,6 +71,7 @@ contract EscrowContract {
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
         DESCRIPTION = _description;
+        _trustedForwarderOverride = _trustedForwarder;
         _state = 0; // Set to unfunded state
     }
     
@@ -73,11 +81,11 @@ contract EscrowContract {
         _state = 1; // funded
         
         require(
-            USDC_TOKEN.transferFrom(msg.sender, address(this), AMOUNT),
+            USDC_TOKEN.transferFrom(_msgSender(), address(this), AMOUNT),
             "USDC transfer failed"
         );
         
-        emit FundsDeposited(msg.sender, AMOUNT, block.timestamp);
+        emit FundsDeposited(_msgSender(), AMOUNT, block.timestamp);
     }
     
     function raiseDispute() external onlyBuyer initialized {

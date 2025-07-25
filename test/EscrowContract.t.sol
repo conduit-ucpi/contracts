@@ -54,6 +54,7 @@ contract EscrowContractTest is Test {
     address public seller = address(0x2);
     address public gasPayer = address(0x3);
     address public other = address(0x4);
+    address public trustedForwarder = address(0x5);
     
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
     uint256 public expiryTimestamp;
@@ -61,7 +62,7 @@ contract EscrowContractTest is Test {
     
     function setUp() public {
         usdc = new MockERC20();
-        factory = new EscrowContractFactory(address(usdc), gasPayer);
+        factory = new EscrowContractFactory(address(usdc), gasPayer, trustedForwarder);
         
         expiryTimestamp = block.timestamp + 7 days;
         
@@ -374,5 +375,41 @@ contract EscrowContractTest is Test {
         vm.prank(gasPayer);
         vm.expectRevert("Not disputed");
         escrow.resolveDispute(buyer);
+    }
+    
+    function testTrustedForwarderConfiguration() public {
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        
+        assertEq(escrow.trustedForwarder(), trustedForwarder);
+        assertTrue(escrow.isTrustedForwarder(trustedForwarder));
+        assertFalse(escrow.isTrustedForwarder(other));
+    }
+    
+    function testFactoryTrustedForwarderConfiguration() public {
+        assertEq(factory.trustedForwarder(), trustedForwarder);
+        assertTrue(factory.isTrustedForwarder(trustedForwarder));
+        assertFalse(factory.isTrustedForwarder(other));
+    }
+    
+    // Mock test for meta-transaction functionality
+    // In a real implementation, you would use a proper forwarder contract
+    function testMetaTransactionMocking() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // This test validates that the contract is configured to accept
+        // meta-transactions from the trusted forwarder
+        assertTrue(escrow.isTrustedForwarder(trustedForwarder));
+        
+        // In a real scenario, the trusted forwarder would call functions
+        // on behalf of users by appending the user's address to calldata
+        assertEq(escrow.trustedForwarder(), trustedForwarder);
     }
 }
