@@ -50,30 +50,49 @@ jobs:
           source .env
           echo "Deploying MinimalForwarder contract..."
           
-          # Deploy the MinimalForwarder contract
+          # Deploy the MinimalForwarder contract and capture the output
+          echo "Deploying MinimalForwarder contract..."
+          
           if [[ "${{ vars.NETWORK }}" == "avalanche" || "${{ vars.NETWORK }}" == "fuji" ]]; then
-            # Deploy with verification for Avalanche networks
-            echo "Deploying to Avalanche network with verification..."
+            # Deploy with broadcast for Avalanche networks
+            echo "Deploying to Avalanche network..."
             forge create src/MinimalForwarder.sol:MinimalForwarder \
               --rpc-url $NETWORK_RPC_URL \
               --private-key $RELAYER_WALLET_PRIVATE_KEY \
-              --verify \
-              --verifier blockscout \
-              --verifier-url ${{ vars.AVA_VERIFIER_URL }} \
-              -vvvv 2>&1 | tee forwarder_deployment_output.txt
+              --broadcast \
+              2>&1 | tee forwarder_deployment_output.txt
           else
-            # Deploy with verification for Ethereum networks
-            echo "Deploying to Ethereum network with verification..."
+            # Deploy with broadcast for Ethereum networks
+            echo "Deploying to Ethereum network..."
             forge create src/MinimalForwarder.sol:MinimalForwarder \
               --rpc-url $NETWORK_RPC_URL \
               --private-key $RELAYER_WALLET_PRIVATE_KEY \
-              --verify \
-              --etherscan-api-key $ETHERSCAN_API_KEY \
-              -vvvv 2>&1 | tee forwarder_deployment_output.txt
+              --broadcast \
+              2>&1 | tee forwarder_deployment_output.txt
           fi
           
-          # Extract forwarder address from the output
-          FORWARDER_ADDRESS=$(grep "Deployed to:" forwarder_deployment_output.txt | awk '{print $3}')
+          # Try multiple methods to extract the deployed address
+          FORWARDER_ADDRESS=""
+          
+          # Method 1: Look for "Deployed to:" pattern
+          if [[ -z "$FORWARDER_ADDRESS" ]]; then
+            FORWARDER_ADDRESS=$(grep -i "deployed to" forwarder_deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          fi
+          
+          # Method 2: Look for contract address in transaction receipt
+          if [[ -z "$FORWARDER_ADDRESS" ]]; then
+            FORWARDER_ADDRESS=$(grep -o "0x[a-fA-F0-9]\{40\}" forwarder_deployment_output.txt | tail -1)
+          fi
+          
+          # If still no address, provide manual instructions
+          if [[ -z "$FORWARDER_ADDRESS" ]]; then
+            echo "❌ Could not automatically extract contract address."
+            echo "📋 Manual steps:"
+            echo "1. Find the transaction hash in the output above"
+            echo "2. Check the transaction on block explorer"
+            echo "3. Copy the contract address from the transaction receipt"
+            FORWARDER_ADDRESS="CHECK_TRANSACTION_RECEIPT"
+          fi
           
           # Create a summary with the forwarder address
           echo "==================================================="
