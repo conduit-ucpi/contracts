@@ -24,6 +24,7 @@ jobs:
         run: |
           echo "USDC_CONTRACT_ADDRESS=${{ vars.USDC_CONTRACT_ADDRESS }}" >> .env
           echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> .env
+          echo "TRUSTED_FORWARDER_ADDRESS=${{ vars.TRUSTED_FORWARDER_ADDRESS }}" >> .env
           echo "NETWORK=${{ vars.NETWORK }}" >> .env
           echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> .env
           echo "INFURA_API_KEY=${{ secrets.INFURA_API_KEY }}" >> .env
