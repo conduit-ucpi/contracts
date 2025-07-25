@@ -1,0 +1,100 @@
+name: Deploy MinimalForwarder Contract
+
+on:
+  push:
+    branches:
+      - build-minimalForwarder
+  workflow_dispatch:
+
+jobs:
+  deploy-forwarder:
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Create .env file
+        run: |
+          echo "USDC_CONTRACT_ADDRESS=${{ vars.USDC_CONTRACT_ADDRESS }}" >> .env
+          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> .env
+          echo "NETWORK=${{ vars.NETWORK }}" >> .env
+          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> .env
+          echo "INFURA_API_KEY=${{ secrets.INFURA_API_KEY }}" >> .env
+          echo "ETHERSCAN_API_KEY=${{ secrets.ETHERSCAN_API_KEY }}" >> .env
+          echo "AVA_VERIFIER_URL=${{ vars.AVA_VERIFIER_URL }}" >> .env
+          echo "SEPOLIA_RPC_URL=${{ vars.NETWORK_RPC_URL }}${{  secrets.INFURA_API_KEY}}" >> .env
+          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
+
+      - name: Install dependencies
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts --shallow
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+
+      - name: Build contracts
+        run: forge build
+
+      - name: Run tests
+        run: forge test -vvv
+
+      - name: Deploy MinimalForwarder
+        id: deploy-forwarder
+        run: |
+          source .env
+          echo "Deploying MinimalForwarder contract..."
+          
+          # Deploy the MinimalForwarder contract
+          if [[ "${{ vars.NETWORK }}" == "avalanche" || "${{ vars.NETWORK }}" == "fuji" ]]; then
+            # Deploy with verification for Avalanche networks
+            echo "Deploying to Avalanche network with verification..."
+            forge create src/MinimalForwarder.sol:MinimalForwarder \
+              --rpc-url $NETWORK_RPC_URL \
+              --private-key $RELAYER_WALLET_PRIVATE_KEY \
+              --verify \
+              --verifier blockscout \
+              --verifier-url ${{ vars.AVA_VERIFIER_URL }} \
+              -vvvv 2>&1 | tee forwarder_deployment_output.txt
+          else
+            # Deploy with verification for Ethereum networks
+            echo "Deploying to Ethereum network with verification..."
+            forge create src/MinimalForwarder.sol:MinimalForwarder \
+              --rpc-url $NETWORK_RPC_URL \
+              --private-key $RELAYER_WALLET_PRIVATE_KEY \
+              --verify \
+              --etherscan-api-key $ETHERSCAN_API_KEY \
+              -vvvv 2>&1 | tee forwarder_deployment_output.txt
+          fi
+          
+          # Extract forwarder address from the output
+          FORWARDER_ADDRESS=$(grep "Deployed to:" forwarder_deployment_output.txt | awk '{print $3}')
+          
+          # Create a summary with the forwarder address
+          echo "==================================================="
+          echo "🚀 MINIMAL FORWARDER ADDRESS (EIP-2771)"
+          echo "==================================================="
+          echo "deployed $FORWARDER_ADDRESS"
+          echo "==================================================="
+          echo ""
+          echo "📋 NEXT STEPS:"
+          echo "1. Update TRUSTED_FORWARDER_ADDRESS in your environment"
+          echo "2. Use this address when deploying the factory contract"
+          echo "3. Set this as the trusted forwarder for meta-transactions"
+          echo "==================================================="
+          
+          # Set output for potential use in other jobs
+          echo "forwarder_address=$FORWARDER_ADDRESS" >> $GITHUB_OUTPUT
+
+      - name: Display deployment summary
+        run: |
+          echo "✅ MinimalForwarder deployment completed!"
+          echo "📍 Network: ${{ vars.NETWORK }}"
+          echo "🔗 Address: ${{ steps.deploy-forwarder.outputs.forwarder_address }}"
+          echo ""
+          echo "This forwarder can now be used for gasless transactions in your escrow contracts."
