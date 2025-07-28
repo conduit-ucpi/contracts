@@ -14,13 +14,14 @@ contract EscrowContract is ERC2771Context {
     uint256 public AMOUNT;
     uint256 public EXPIRY_TIMESTAMP;
     string public DESCRIPTION;
+    uint256 public CREATOR_FEE; // Fee amount to be sent to creator on deposit
     
     uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
     address private _trustedForwarderOverride;
     
     event FundsDeposited(address buyer, uint256 amount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
-    event DisputeResolved(address recipient, uint256 timestamp);
+    event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
     
     modifier onlyBuyer() {
@@ -60,7 +61,8 @@ contract EscrowContract is ERC2771Context {
         uint256 _amount,
         uint256 _expiryTimestamp,
         string memory _description,
-        address _trustedForwarder
+        address _trustedForwarder,
+        uint256 _creatorFee
     ) external {
         require(_state == 0, "Already initialized");
         
@@ -72,6 +74,8 @@ contract EscrowContract is ERC2771Context {
         EXPIRY_TIMESTAMP = _expiryTimestamp;
         DESCRIPTION = _description;
         _trustedForwarderOverride = _trustedForwarder;
+        CREATOR_FEE = _creatorFee;
+        require(_creatorFee < _amount, "Creator fee must be less than amount");
         _state = 0; // Set to unfunded state
     }
     
@@ -80,10 +84,19 @@ contract EscrowContract is ERC2771Context {
         
         _state = 1; // funded
         
+        // Transfer full amount from buyer to contract
         require(
             USDC_TOKEN.transferFrom(_msgSender(), address(this), AMOUNT),
             "USDC transfer failed"
         );
+        
+        // Immediately transfer creator fee to gas payer (creator)
+        if (CREATOR_FEE > 0) {
+            require(
+                USDC_TOKEN.transfer(GAS_PAYER, CREATOR_FEE),
+                "Creator fee transfer failed"
+            );
+        }
         
         emit FundsDeposited(_msgSender(), AMOUNT, block.timestamp);
     }
@@ -95,19 +108,37 @@ contract EscrowContract is ERC2771Context {
         emit DisputeRaised(block.timestamp);
     }
     
-    function resolveDispute(address recipient) external onlyGasPayer initialized {
+    function resolveDispute(uint256 buyerPercentage, uint256 sellerPercentage) external onlyGasPayer initialized {
         require(_state == 2, "Not disputed");
-        require(recipient == BUYER || recipient == SELLER, "Invalid recipient");
+        require(buyerPercentage + sellerPercentage == 100, "Percentages must sum to 100");
         
         _state = 4; // claimed (resolved)
         
-        require(
-            USDC_TOKEN.transfer(recipient, AMOUNT),
-            "USDC transfer failed"
-        );
+        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
+        uint256 buyerAmount = (escrowAmount * buyerPercentage) / 100;
+        uint256 sellerAmount = escrowAmount - buyerAmount; // Use subtraction to handle rounding
         
-        emit DisputeResolved(recipient, block.timestamp);
-        emit FundsClaimed(recipient, AMOUNT, block.timestamp);
+        // Transfer to buyer if their share > 0
+        if (buyerAmount > 0) {
+            require(
+                USDC_TOKEN.transfer(BUYER, buyerAmount),
+                "Buyer transfer failed"
+            );
+        }
+        
+        // Transfer to seller if their share > 0
+        if (sellerAmount > 0) {
+            require(
+                USDC_TOKEN.transfer(SELLER, sellerAmount),
+                "Seller transfer failed"
+            );
+        }
+        
+        emit DisputeResolved(buyerPercentage, sellerPercentage, block.timestamp);
+        emit FundsClaimed(BUYER, buyerAmount, block.timestamp);
+        if (sellerAmount > 0) {
+            emit FundsClaimed(SELLER, sellerAmount, block.timestamp);
+        }
     }
     
     function claimFunds() external onlySellerOrGasPayer initialized {
@@ -116,12 +147,13 @@ contract EscrowContract is ERC2771Context {
         
         _state = 4; // claimed
         
+        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
         require(
-            USDC_TOKEN.transfer(SELLER, AMOUNT),
+            USDC_TOKEN.transfer(SELLER, escrowAmount),
             "USDC transfer failed"
         );
         
-        emit FundsClaimed(SELLER, AMOUNT, block.timestamp);
+        emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
     }
     
     function getContractInfo() external view initialized returns (
@@ -131,7 +163,8 @@ contract EscrowContract is ERC2771Context {
         uint256 _expiryTimestamp,
         string memory _description,
         uint8 _currentState,
-        uint256 _currentTimestamp
+        uint256 _currentTimestamp,
+        uint256 _creatorFee
     ) {
         return (
             BUYER,
@@ -140,7 +173,8 @@ contract EscrowContract is ERC2771Context {
             EXPIRY_TIMESTAMP,
             DESCRIPTION,
             _state,
-            block.timestamp
+            block.timestamp,
+            CREATOR_FEE
         );
     }
     

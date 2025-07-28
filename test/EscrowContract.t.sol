@@ -57,6 +57,7 @@ contract EscrowContractTest is Test {
     address public trustedForwarder = address(0x5);
     
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
+    uint256 public constant CREATOR_FEE = 10 * 10**6; // 10 USDC creator fee
     uint256 public expiryTimestamp;
     string public description = "Test escrow transaction";
     
@@ -84,7 +85,8 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            CREATOR_FEE
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -127,7 +129,8 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            CREATOR_FEE
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -190,11 +193,11 @@ contract EscrowContractTest is Test {
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
         
         vm.prank(gasPayer);
-        escrow.resolveDispute(buyer);
+        escrow.resolveDispute(100, 0); // 100% to buyer
         
         assertTrue(escrow.isClaimed());
         assertTrue(escrow.isClaimed());
-        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore + AMOUNT);
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore + (AMOUNT - CREATOR_FEE));
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
     
@@ -206,11 +209,11 @@ contract EscrowContractTest is Test {
         
         vm.prank(buyer);
         vm.expectRevert("Only gas payer can call");
-        escrow.resolveDispute(buyer);
+        escrow.resolveDispute(100, 0); // 100% to buyer
         
         vm.prank(seller);
         vm.expectRevert("Only gas payer can call");
-        escrow.resolveDispute(buyer);
+        escrow.resolveDispute(100, 0); // 100% to buyer
     }
     
     function testClaimFundsAfterExpiry() public {
@@ -224,7 +227,7 @@ contract EscrowContractTest is Test {
         escrow.claimFunds();
         
         assertTrue(escrow.isClaimed());
-        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + AMOUNT);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
     
@@ -239,7 +242,7 @@ contract EscrowContractTest is Test {
         escrow.claimFunds();
         
         assertTrue(escrow.isClaimed());
-        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + AMOUNT);
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
     }
     
     function testCannotClaimBeforeExpiry() public {
@@ -273,7 +276,8 @@ contract EscrowContractTest is Test {
             uint256 _expiryTimestamp,
             string memory _description,
             uint8 _currentState,
-            uint256 _currentTimestamp
+            uint256 _currentTimestamp,
+            uint256 _creatorFee
         ) = escrow.getContractInfo();
         
         assertEq(_buyer, buyer);
@@ -283,6 +287,7 @@ contract EscrowContractTest is Test {
         assertEq(keccak256(abi.encodePacked(_description)), keccak256(abi.encodePacked(description)));
         assertEq(_currentState, 1); // funded state
         assertEq(_currentTimestamp, block.timestamp);
+        assertEq(_creatorFee, CREATOR_FEE);
         
         assertFalse(escrow.isExpired());
         assertTrue(escrow.canDispute());
@@ -300,7 +305,8 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            CREATOR_FEE
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -316,7 +322,7 @@ contract EscrowContractTest is Test {
         escrow.depositFunds();
         
         assertTrue(escrow.isFunded());
-        assertEq(usdc.balanceOf(address(escrow)), AMOUNT);
+        assertEq(usdc.balanceOf(address(escrow)), AMOUNT - CREATOR_FEE);
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
     }
     
@@ -338,7 +344,8 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            CREATOR_FEE
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -358,7 +365,8 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            CREATOR_FEE
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -374,7 +382,7 @@ contract EscrowContractTest is Test {
         
         vm.prank(gasPayer);
         vm.expectRevert("Not disputed");
-        escrow.resolveDispute(buyer);
+        escrow.resolveDispute(100, 0); // 100% to buyer
     }
     
     function testTrustedForwarderConfiguration() public {
@@ -384,7 +392,8 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            CREATOR_FEE
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -411,5 +420,134 @@ contract EscrowContractTest is Test {
         // In a real scenario, the trusted forwarder would call functions
         // on behalf of users by appending the user's address to calldata
         assertEq(escrow.trustedForwarder(), trustedForwarder);
+    }
+    
+    function testCreatorFeeTransferOnDeposit() public {
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description,
+            CREATOR_FEE
+        );
+        
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        
+        // Record initial balances
+        uint256 initialGasPayerBalance = usdc.balanceOf(gasPayer);
+        uint256 initialBuyerBalance = usdc.balanceOf(buyer);
+        
+        // Buyer approves and funds the escrow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        
+        vm.prank(buyer);
+        escrow.depositFunds();
+        
+        // Check that creator fee was transferred to gas payer
+        assertEq(usdc.balanceOf(gasPayer), initialGasPayerBalance + CREATOR_FEE);
+        assertEq(usdc.balanceOf(buyer), initialBuyerBalance - AMOUNT);
+        assertEq(usdc.balanceOf(address(escrow)), AMOUNT - CREATOR_FEE);
+    }
+    
+    function testClaimFundsWithCreatorFee() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Record initial seller balance
+        uint256 initialSellerBalance = usdc.balanceOf(seller);
+        
+        // Fast forward past expiry
+        vm.warp(expiryTimestamp + 1);
+        
+        vm.prank(seller);
+        escrow.claimFunds();
+        
+        // Seller should receive amount minus creator fee
+        assertEq(usdc.balanceOf(seller), initialSellerBalance + (AMOUNT - CREATOR_FEE));
+        assertTrue(escrow.isClaimed());
+    }
+    
+    function testResolveDisputeWithCreatorFee() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Buyer raises dispute
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        
+        // Record initial buyer balance
+        uint256 initialBuyerBalance = usdc.balanceOf(buyer);
+        
+        // Gas payer resolves dispute in favor of buyer
+        vm.prank(gasPayer);
+        escrow.resolveDispute(100, 0); // 100% to buyer
+        
+        // Buyer should receive amount minus creator fee
+        assertEq(usdc.balanceOf(buyer), initialBuyerBalance + (AMOUNT - CREATOR_FEE));
+        assertTrue(escrow.isClaimed());
+    }
+    
+    function testResolveDisputeWithSplit() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Buyer raises dispute
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        
+        // Record initial balances
+        uint256 initialBuyerBalance = usdc.balanceOf(buyer);
+        uint256 initialSellerBalance = usdc.balanceOf(seller);
+        
+        // Gas payer resolves dispute with 60/40 split (buyer/seller)
+        vm.prank(gasPayer);
+        escrow.resolveDispute(60, 40);
+        
+        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
+        uint256 expectedBuyerAmount = (escrowAmount * 60) / 100;
+        uint256 expectedSellerAmount = escrowAmount - expectedBuyerAmount;
+        
+        // Check balances
+        assertEq(usdc.balanceOf(buyer), initialBuyerBalance + expectedBuyerAmount);
+        assertEq(usdc.balanceOf(seller), initialSellerBalance + expectedSellerAmount);
+        assertTrue(escrow.isClaimed());
+    }
+    
+    function testResolveDisputeFullySeller() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Buyer raises dispute
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        
+        // Record initial balances
+        uint256 initialBuyerBalance = usdc.balanceOf(buyer);
+        uint256 initialSellerBalance = usdc.balanceOf(seller);
+        
+        // Gas payer resolves dispute 100% to seller
+        vm.prank(gasPayer);
+        escrow.resolveDispute(0, 100);
+        
+        // Check balances - buyer should get nothing, seller gets all
+        assertEq(usdc.balanceOf(buyer), initialBuyerBalance);
+        assertEq(usdc.balanceOf(seller), initialSellerBalance + (AMOUNT - CREATOR_FEE));
+        assertTrue(escrow.isClaimed());
+    }
+    
+    function testResolveDisputeInvalidPercentages() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Buyer raises dispute
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        
+        // Test percentages that don't sum to 100
+        vm.prank(gasPayer);
+        vm.expectRevert("Percentages must sum to 100");
+        escrow.resolveDispute(50, 40); // Only sums to 90
+        
+        vm.prank(gasPayer);
+        vm.expectRevert("Percentages must sum to 100");
+        escrow.resolveDispute(60, 50); // Sums to 110
     }
 }

@@ -33,11 +33,13 @@ contract EscrowContractFactory is ERC2771Context {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        string memory description
+        string memory description,
+        uint256 creatorFee
     ) external returns (address) {
         require(_msgSender() == OWNER, "Only owner");
         require(buyer != address(0) && seller != address(0), "Invalid addresses");
         require(amount > 0 && expiryTimestamp > block.timestamp, "Invalid params");
+        require(creatorFee < amount, "Creator fee must be less than amount");
         
         bytes32 salt = keccak256(abi.encodePacked(
             buyer,
@@ -57,7 +59,8 @@ contract EscrowContractFactory is ERC2771Context {
             amount,
             expiryTimestamp,
             description,
-            trustedForwarder()
+            trustedForwarder(),
+            creatorFee
         );
         
         EscrowContract newContract = EscrowContract(clone);
