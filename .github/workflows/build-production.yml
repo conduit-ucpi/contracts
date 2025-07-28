@@ -1,0 +1,73 @@
+name: Deploy Smart Contracts
+
+on:
+  push:
+    branches:
+      - build-production
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Create .env file
+        run: |
+          echo "USDC_CONTRACT_ADDRESS=${{ vars.USDC_CONTRACT_ADDRESS }}" >> .env
+          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> .env
+          echo "NETWORK=${{ vars.NETWORK }}" >> .env
+          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> .env
+          echo "INFURA_API_KEY=${{ secrets.INFURA_API_KEY }}" >> .env
+          echo "ETHERSCAN_API_KEY=${{ secrets.ETHERSCAN_API_KEY }}" >> .env
+          echo "AVA_VERIFIER_URL=${{ vars.AVA_VERIFIER_URL }}" >> .env
+          echo "SEPOLIA_RPC_URL=${{ vars.NETWORK_RPC_URL }}${{  secrets.INFURA_API_KEY}}" >> .env
+          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
+
+      - name: Install dependencies
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts --shallow
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+
+      - name: Build contracts
+        run: forge build
+
+      - name: Run tests
+        run: forge test -vvv
+
+      - name: Deploy contracts
+        id: deploy
+        run: |
+          source .env
+          # Deploy with verification, but conditionally set verification parameters
+          if [[ "${{ vars.NETWORK }}" == "avalanche" || "${{ vars.NETWORK }}" == "fuji" ]]; then
+            # Deploy with verification for Avalanche using both Sourcify and native block explorer
+            echo "Deploying to Avalanche network with verification..."
+            forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url ${{ vars.AVA_VERIFIER_URL }} -vvvv 2>&1 | tee deployment_output.txt
+            
+            # Also verify on Sourcify as backup
+            echo "Also verifying on Sourcify..."
+            forge verify-contract $(grep "Factory deployed at:" deployment_output.txt | awk '{print $4}') src/EscrowContractFactory.sol:EscrowContractFactory --verifier sourcify --rpc-url $NETWORK_RPC_URL --constructor-args $(grep "Constructor args:" deployment_output.txt | awk '{print $3}' || echo "0000000000000000000000005425890298aed601595a70ab815c96711a31bc650000000000000000000000001936cad0b758ad8f83ca392ac9138ff2b4ab0b05") || echo "Sourcify verification failed or already verified"
+          else
+            # Deploy with verification using ETHERSCAN_API_KEY for Ethereum networks
+            forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify -vvvv 2>&1 | tee deployment_output.txt
+          fi
+          
+          # Extract factory address from the output
+          FACTORY_ADDRESS=$(grep "Factory deployed at:" deployment_output.txt | awk '{print $4}')
+          
+          # Create a summary with important addresses
+          echo "==================================================="
+          echo "🏭 FACTORY ADDRESS (SAVE THIS FOR UI CONFIG)"
+          echo "==================================================="
+          echo "deployed $FACTORY_ADDRESS"
+          echo "===================================================" 
