@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 
 /**
@@ -50,8 +51,10 @@ import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol"
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
 contract EscrowContract is ERC2771Context {
+    using SafeERC20 for IERC20;
     
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
+    address public immutable FACTORY;  // Factory contract that created this escrow - only it can initialize
     IERC20 public USDC_TOKEN;        // The USDC token contract - immutable after initialization
     address public BUYER;           // ONLY this address can deposit funds and raise disputes
     address public SELLER;          // ONLY this address can receive funds (after expiry or dispute)
@@ -68,7 +71,8 @@ contract EscrowContract is ERC2771Context {
     address private _trustedForwarderOverride; // Technical: For meta-transactions
     
     // 📢 PUBLIC EVENTS: These events prove what happened (recorded permanently on blockchain)
-    event FundsDeposited(address buyer, uint256 amount, uint256 timestamp);
+    event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
+    event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
     event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
@@ -93,6 +97,12 @@ contract EscrowContract is ERC2771Context {
         _;
     }
     
+    // ⚡ INITIALIZATION PROTECTION: Only factory can initialize contracts
+    modifier onlyFactory() {
+        require(_msgSender() == FACTORY, "Only factory can initialize");
+        _;
+    }
+    
     modifier initialized() {
         require(_state != 255, "Not initialized");
         _;
@@ -100,6 +110,7 @@ contract EscrowContract is ERC2771Context {
     
     constructor() ERC2771Context(address(0)) {
         // Implementation contract - disable initialization
+        FACTORY = msg.sender; // Factory address that deployed this implementation
         _state = 255; // Mark as disabled
     }
     
@@ -117,7 +128,7 @@ contract EscrowContract is ERC2771Context {
         string memory _description,
         address _trustedForwarder,
         uint256 _creatorFee
-    ) external {
+    ) external onlyFactory {
         require(_state == 0, "Already initialized");
         
         USDC_TOKEN = IERC20(_usdcToken);
@@ -161,22 +172,18 @@ contract EscrowContract is ERC2771Context {
         _state = 1; // funded - money is now LOCKED in escrow
         
         // 🔒 STEP 1: BUYER's money is transferred to this contract (LOCKED AWAY)
-        require(
-            USDC_TOKEN.transferFrom(_msgSender(), address(this), AMOUNT),
-            "USDC transfer failed"
-        );
+        USDC_TOKEN.safeTransferFrom(_msgSender(), address(this), AMOUNT);
         
         // 💳 STEP 2: Platform gets their fee (transparent and upfront)
         // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
         if (CREATOR_FEE > 0) {
-            require(
-                USDC_TOKEN.transfer(GAS_PAYER, CREATOR_FEE),
-                "Creator fee transfer failed"
-            );
+            USDC_TOKEN.safeTransfer(GAS_PAYER, CREATOR_FEE);
+            emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
         }
         
         // 📝 STEP 3: Record this deposit permanently on the blockchain
-        emit FundsDeposited(_msgSender(), AMOUNT, block.timestamp);
+        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
+        emit FundsDeposited(_msgSender(), escrowAmount, block.timestamp);
         
         // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
     }
@@ -259,18 +266,12 @@ contract EscrowContract is ERC2771Context {
         
         // 🔒 STEP 1: Send BUYER their share (if any) - money can ONLY go to BUYER address
         if (buyerAmount > 0) {
-            require(
-                USDC_TOKEN.transfer(BUYER, buyerAmount),
-                "Buyer transfer failed"
-            );
+            USDC_TOKEN.safeTransfer(BUYER, buyerAmount);
         }
         
         // 🔒 STEP 2: Send SELLER their share (if any) - money can ONLY go to SELLER address  
         if (sellerAmount > 0) {
-            require(
-                USDC_TOKEN.transfer(SELLER, sellerAmount),
-                "Seller transfer failed"
-            );
+            USDC_TOKEN.safeTransfer(SELLER, sellerAmount);
         }
         
         // 📝 STEP 3: Record this resolution permanently on blockchain
@@ -318,10 +319,7 @@ contract EscrowContract is ERC2771Context {
         uint256 escrowAmount = AMOUNT - CREATOR_FEE;
         
         // 🔒 CRITICAL: This money can ONLY go to the SELLER address (nobody else)
-        require(
-            USDC_TOKEN.transfer(SELLER, escrowAmount),
-            "USDC transfer failed"
-        );
+        USDC_TOKEN.safeTransfer(SELLER, escrowAmount);
         
         // 📝 Record this payment permanently on blockchain
         emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
