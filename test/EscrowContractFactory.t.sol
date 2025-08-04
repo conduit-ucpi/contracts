@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.26;
 
 import {Test, console} from "forge-std/Test.sol";
 import {EscrowContractFactory} from "../src/EscrowContractFactory.sol";
@@ -140,7 +140,7 @@ contract EscrowContractFactoryTest is Test {
     function testCreateEscrowValidation() public {
         vm.startPrank(owner);
         
-        vm.expectRevert("Invalid addresses");
+        vm.expectRevert("Invalid buyer address");
         factory.createEscrowContract(
             address(0),
             seller,
@@ -150,10 +150,21 @@ contract EscrowContractFactoryTest is Test {
             CREATOR_FEE
         );
         
-        vm.expectRevert("Invalid addresses");
+        vm.expectRevert("Invalid seller address");
         factory.createEscrowContract(
             buyer,
             address(0),
+            AMOUNT,
+            expiryTimestamp,
+            description,
+            CREATOR_FEE
+        );
+        
+        // Test same buyer and seller
+        vm.expectRevert("Buyer and seller cannot be the same");
+        factory.createEscrowContract(
+            buyer,
+            buyer,
             AMOUNT,
             expiryTimestamp,
             description,
@@ -192,7 +203,7 @@ contract EscrowContractFactoryTest is Test {
         );
         
         // Test with invalid parameters - zero addresses
-        vm.expectRevert("Invalid addresses");
+        vm.expectRevert("Invalid buyer address");
         factory.createEscrowContract(
             address(0),
             seller,

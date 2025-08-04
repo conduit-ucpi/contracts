@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
@@ -48,6 +48,9 @@ contract EscrowContractFactory is ERC2771Context {
     constructor(address _usdcToken, address _owner, address _trustedForwarder) 
         ERC2771Context(_trustedForwarder) 
     {
+        require(_usdcToken != address(0), "Invalid USDC token address");
+        require(_owner != address(0), "Invalid owner address");
+        
         USDC_TOKEN = IERC20(_usdcToken);
         OWNER = _owner;
         IMPLEMENTATION = address(new EscrowContract());
@@ -80,7 +83,9 @@ contract EscrowContractFactory is ERC2771Context {
         uint256 creatorFee
     ) external returns (address) {
         require(_msgSender() == OWNER, "Only owner");
-        require(buyer != address(0) && seller != address(0), "Invalid addresses");
+        require(buyer != address(0), "Invalid buyer address");
+        require(seller != address(0), "Invalid seller address");
+        require(buyer != seller, "Buyer and seller cannot be the same");
         require(amount > 0 && expiryTimestamp > block.timestamp, "Invalid params");
         require(creatorFee < amount, "Creator fee must be less than amount");
         

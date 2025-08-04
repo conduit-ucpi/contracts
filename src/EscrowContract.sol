@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════
@@ -50,7 +51,7 @@ import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol"
  * 
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
-contract EscrowContract is ERC2771Context {
+contract EscrowContract is ERC2771Context, ReentrancyGuard {
     using SafeERC20 for IERC20;
     
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
@@ -130,6 +131,11 @@ contract EscrowContract is ERC2771Context {
         uint256 _creatorFee
     ) external onlyFactory {
         require(_state == 0, "Already initialized");
+        require(_usdcToken != address(0), "Invalid USDC token address");
+        require(_buyer != address(0), "Invalid buyer address");
+        require(_seller != address(0), "Invalid seller address");
+        require(_gasPayer != address(0), "Invalid gas payer address");
+        require(_buyer != _seller, "Buyer and seller cannot be the same");
         
         USDC_TOKEN = IERC20(_usdcToken);
         BUYER = _buyer;
@@ -166,24 +172,26 @@ contract EscrowContract is ERC2771Context {
      * - Platform gets: {CREATOR_FEE} 
      * - Escrowed for BUYER/SELLER: {AMOUNT - CREATOR_FEE}
      */
-    function depositFunds() external onlyBuyer initialized {
+    function depositFunds() external onlyBuyer initialized nonReentrant {
         require(_state == 0, "Already funded or claimed");
         
         _state = 1; // funded - money is now LOCKED in escrow
         
-        // 🔒 STEP 1: BUYER's money is transferred to this contract (LOCKED AWAY)
-        USDC_TOKEN.safeTransferFrom(_msgSender(), address(this), AMOUNT);
-        
-        // 💳 STEP 2: Platform gets their fee (transparent and upfront)
-        // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
+        // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
+        emit FundsDeposited(_msgSender(), escrowAmount, block.timestamp);
         if (CREATOR_FEE > 0) {
-            USDC_TOKEN.safeTransfer(GAS_PAYER, CREATOR_FEE);
             emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
         }
         
-        // 📝 STEP 3: Record this deposit permanently on the blockchain
-        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
-        emit FundsDeposited(_msgSender(), escrowAmount, block.timestamp);
+        // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
+        USDC_TOKEN.safeTransferFrom(_msgSender(), address(this), AMOUNT);
+        
+        // 💳 STEP 3: Platform gets their fee (transparent and upfront)
+        // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
+        if (CREATOR_FEE > 0) {
+            USDC_TOKEN.safeTransfer(GAS_PAYER, CREATOR_FEE);
+        }
         
         // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
     }
@@ -253,7 +261,7 @@ contract EscrowContract is ERC2771Context {
      * Platform gets: 0 (already received CREATOR_FEE during deposit)
      * NOBODY ELSE gets anything = IMPOSSIBLE
      */
-    function resolveDispute(uint256 buyerPercentage, uint256 sellerPercentage) external onlyGasPayer initialized {
+    function resolveDispute(uint256 buyerPercentage, uint256 sellerPercentage) external onlyGasPayer initialized nonReentrant {
         require(_state == 2, "Not disputed");
         require(buyerPercentage + sellerPercentage == 100, "Percentages must sum to 100");
         
@@ -264,21 +272,21 @@ contract EscrowContract is ERC2771Context {
         uint256 buyerAmount = (escrowAmount * buyerPercentage) / 100;
         uint256 sellerAmount = escrowAmount - buyerAmount; // Ensures all money is distributed
         
-        // 🔒 STEP 1: Send BUYER their share (if any) - money can ONLY go to BUYER address
-        if (buyerAmount > 0) {
-            USDC_TOKEN.safeTransfer(BUYER, buyerAmount);
-        }
-        
-        // 🔒 STEP 2: Send SELLER their share (if any) - money can ONLY go to SELLER address  
-        if (sellerAmount > 0) {
-            USDC_TOKEN.safeTransfer(SELLER, sellerAmount);
-        }
-        
-        // 📝 STEP 3: Record this resolution permanently on blockchain
+        // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
         emit DisputeResolved(buyerPercentage, sellerPercentage, block.timestamp);
         emit FundsClaimed(BUYER, buyerAmount, block.timestamp);
         if (sellerAmount > 0) {
             emit FundsClaimed(SELLER, sellerAmount, block.timestamp);
+        }
+        
+        // 🔒 STEP 2: Send BUYER their share (if any) - money can ONLY go to BUYER address
+        if (buyerAmount > 0) {
+            USDC_TOKEN.safeTransfer(BUYER, buyerAmount);
+        }
+        
+        // 🔒 STEP 3: Send SELLER their share (if any) - money can ONLY go to SELLER address  
+        if (sellerAmount > 0) {
+            USDC_TOKEN.safeTransfer(SELLER, sellerAmount);
         }
         
         // ✅ SECURITY VERIFICATION: At this point, 100% of escrowed money has been 
@@ -309,7 +317,7 @@ contract EscrowContract is ERC2771Context {
      * [LOCKED FUNDS] → [SELLER gets 100% of escrowed amount]
      * Platform already got their fee during deposit - they get NOTHING here
      */
-    function claimFunds() external onlySellerOrGasPayer initialized {
+    function claimFunds() external onlySellerOrGasPayer initialized nonReentrant {
         require(_state == 1, "Not funded or already processed");
         require(block.timestamp >= EXPIRY_TIMESTAMP, "Not expired yet");
         
@@ -318,11 +326,11 @@ contract EscrowContract is ERC2771Context {
         // 💰 Calculate amount for SELLER (total minus platform fee that was already paid)
         uint256 escrowAmount = AMOUNT - CREATOR_FEE;
         
-        // 🔒 CRITICAL: This money can ONLY go to the SELLER address (nobody else)
-        USDC_TOKEN.safeTransfer(SELLER, escrowAmount);
-        
-        // 📝 Record this payment permanently on blockchain
+        // 📝 STEP 1: Emit event before external call to prevent event-based reentrancy
         emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
+        
+        // 🔒 STEP 2: This money can ONLY go to the SELLER address (nobody else)
+        USDC_TOKEN.safeTransfer(SELLER, escrowAmount);
         
         // 🎉 TRANSACTION COMPLETE: SELLER got their money, BUYER's time to dispute has passed
     }
