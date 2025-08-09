@@ -224,6 +224,7 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
      */
     function raiseDispute() external onlyBuyer initialized {
         require(_state == 1, "Not funded or already processed");
+        require(block.timestamp < EXPIRY_TIMESTAMP, "Cannot dispute after expiry");
         
         _state = 2; // disputed - money is now frozen until resolution
         
@@ -366,7 +367,7 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
     }
     
     function canDispute() external view initialized returns (bool) {
-        return _state == 1;
+        return _state == 1 && block.timestamp < EXPIRY_TIMESTAMP;
     }
     
     function isFunded() external view initialized returns (bool) {

@@ -295,6 +295,7 @@ contract EscrowContractTest is Test {
         
         vm.warp(expiryTimestamp + 1);
         assertTrue(escrow.isExpired());
+        assertFalse(escrow.canDispute()); // Cannot dispute after expiry
         assertTrue(escrow.canClaim());
     }
     
@@ -549,5 +550,65 @@ contract EscrowContractTest is Test {
         vm.prank(gasPayer);
         vm.expectRevert("Percentages must sum to 100");
         escrow.resolveDispute(60, 50); // Sums to 110
+    }
+    
+    function testCannotDisputeAfterExpiry() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Fast forward past expiry
+        vm.warp(expiryTimestamp + 1);
+        
+        // Verify canDispute returns false
+        assertFalse(escrow.canDispute());
+        
+        // Attempt to raise dispute should fail
+        vm.prank(buyer);
+        vm.expectRevert("Cannot dispute after expiry");
+        escrow.raiseDispute();
+    }
+    
+    function testCanDisputeBeforeExpiry() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Right before expiry
+        vm.warp(expiryTimestamp - 1);
+        
+        // Should still be able to dispute
+        assertTrue(escrow.canDispute());
+        
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        
+        assertTrue(escrow.isDisputed());
+    }
+    
+    function testCannotDisputeAtExactExpiry() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // At exact expiry timestamp
+        vm.warp(expiryTimestamp);
+        
+        // Should not be able to dispute anymore
+        assertFalse(escrow.canDispute());
+        
+        vm.prank(buyer);
+        vm.expectRevert("Cannot dispute after expiry");
+        escrow.raiseDispute();
+    }
+    
+    function testDisputeTimingTransition() public {
+        EscrowContract escrow = createAndFundEscrow();
+        
+        // Just before expiry - should work
+        vm.warp(expiryTimestamp - 1);
+        assertTrue(escrow.canDispute());
+        
+        // At expiry - should not work
+        vm.warp(expiryTimestamp);
+        assertFalse(escrow.canDispute());
+        
+        // After expiry - should not work
+        vm.warp(expiryTimestamp + 1);
+        assertFalse(escrow.canDispute());
     }
 }
