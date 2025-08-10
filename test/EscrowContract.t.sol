@@ -123,6 +123,8 @@ contract EscrowContractTest is Test {
     }
     
     function testSuccessfulDeployment() public {
+        uint256 deploymentTime = block.timestamp;
+        
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
             buyer,
@@ -142,6 +144,7 @@ contract EscrowContractTest is Test {
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         assertEq(escrow.DESCRIPTION(), description);
+        assertEq(escrow.createdAt(), deploymentTime); // Verify createdAt is set to deployment time
         assertFalse(escrow.isDisputed());
         assertFalse(escrow.isClaimed());
         
@@ -267,6 +270,7 @@ contract EscrowContractTest is Test {
     }
     
     function testViewFunctions() public {
+        uint256 creationTime = block.timestamp;
         EscrowContract escrow = createAndFundEscrow();
         
         (
@@ -277,7 +281,8 @@ contract EscrowContractTest is Test {
             string memory _description,
             uint8 _currentState,
             uint256 _currentTimestamp,
-            uint256 _creatorFee
+            uint256 _creatorFee,
+            uint256 _createdAt
         ) = escrow.getContractInfo();
         
         assertEq(_buyer, buyer);
@@ -288,6 +293,7 @@ contract EscrowContractTest is Test {
         assertEq(_currentState, 1); // funded state
         assertEq(_currentTimestamp, block.timestamp);
         assertEq(_creatorFee, CREATOR_FEE);
+        assertEq(_createdAt, creationTime); // Contract created at creation time
         
         assertFalse(escrow.isExpired());
         assertTrue(escrow.canDispute());
@@ -297,6 +303,47 @@ contract EscrowContractTest is Test {
         assertTrue(escrow.isExpired());
         assertFalse(escrow.canDispute()); // Cannot dispute after expiry
         assertTrue(escrow.canClaim());
+    }
+    
+    function testCreatedAtPersistsThroughTime() public {
+        uint256 creationTime = block.timestamp;
+        
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description,
+            CREATOR_FEE
+        );
+        
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        
+        // Check createdAt immediately after deployment
+        assertEq(escrow.createdAt(), creationTime);
+        
+        // Warp time forward and check createdAt hasn't changed
+        vm.warp(block.timestamp + 1 days);
+        assertEq(escrow.createdAt(), creationTime);
+        
+        // Fund the contract
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+        
+        // Check createdAt still hasn't changed after funding
+        assertEq(escrow.createdAt(), creationTime);
+        
+        // Warp to expiry and check createdAt still hasn't changed
+        vm.warp(expiryTimestamp + 1);
+        assertEq(escrow.createdAt(), creationTime);
+        
+        // Claim funds and verify createdAt still hasn't changed
+        vm.prank(seller);
+        escrow.claimFunds();
+        assertEq(escrow.createdAt(), creationTime);
     }
     
     function testDepositFunds() public {

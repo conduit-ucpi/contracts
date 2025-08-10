@@ -66,6 +66,7 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
     uint256 public EXPIRY_TIMESTAMP; // When SELLER can claim funds (if no dispute)
     string public DESCRIPTION;      // Description of the transaction
     uint256 public CREATOR_FEE;     // Small platform fee (deducted from AMOUNT, rest goes to BUYER/SELLER)
+    uint256 public createdAt;       // Timestamp when the contract was created
     
     // 🔐 INTERNAL STATE: Tracks contract progress (cannot be manipulated externally)
     uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
@@ -146,6 +147,7 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
         DESCRIPTION = _description;
         _trustedForwarderOverride = _trustedForwarder;
         CREATOR_FEE = _creatorFee;
+        createdAt = block.timestamp;  // Set the creation timestamp
         require(_creatorFee < _amount, "Creator fee must be less than amount");
         _state = 0; // Set to unfunded state
     }
@@ -344,7 +346,8 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
         string memory _description,
         uint8 _currentState,
         uint256 _currentTimestamp,
-        uint256 _creatorFee
+        uint256 _creatorFee,
+        uint256 _createdAt
     ) {
         return (
             BUYER,
@@ -354,7 +357,8 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
             DESCRIPTION,
             _state,
             block.timestamp,
-            CREATOR_FEE
+            CREATOR_FEE,
+            createdAt
         );
     }
     
