@@ -9,7 +9,6 @@ contract DeploymentScript is Script {
         uint256 deployerPrivateKey = vm.envUint("RELAYER_WALLET_PRIVATE_KEY");
         address usdcAddress = vm.envAddress("USDC_CONTRACT_ADDRESS");
         address relayerAddress = vm.addr(deployerPrivateKey);
-        address trustedForwarder = vm.envOr("TRUSTED_FORWARDER_ADDRESS", address(0));
         uint256 chainId = vm.envUint("CHAIN_ID");
         string memory network = vm.envString("NETWORK");
         
@@ -18,7 +17,6 @@ contract DeploymentScript is Script {
         console.log("Chain ID:", chainId);
         console.log("USDC Contract Address:", usdcAddress);
         console.log("Relayer Address (Owner):", relayerAddress);
-        console.log("Trusted Forwarder Address:", trustedForwarder);
         console.log("Deployer Address:", vm.addr(deployerPrivateKey));
         
         // Verify we're on the expected chain
@@ -28,8 +26,7 @@ contract DeploymentScript is Script {
         
         EscrowContractFactory factory = new EscrowContractFactory(
             usdcAddress,
-            relayerAddress,
-            trustedForwarder
+            relayerAddress
         );
         
         console.log("=================================================");
@@ -43,7 +40,6 @@ contract DeploymentScript is Script {
         console.log("Implementation contract address:", factory.IMPLEMENTATION());
         console.log("USDC token address:", address(factory.USDC_TOKEN()));
         console.log("Factory owner:", factory.OWNER());
-        console.log("Trusted forwarder:", factory.trustedForwarder());
         
         console.log("=================================================");
         console.log("CLONE DEPLOYMENT SUCCESSFUL!");

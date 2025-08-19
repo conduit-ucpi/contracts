@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
-import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 import {EscrowContract} from "./EscrowContract.sol";
 
 /**
@@ -29,7 +28,7 @@ import {EscrowContract} from "./EscrowContract.sol";
  * The factory simply creates secure escrow contracts - it has no power over them afterward.
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
-contract EscrowContractFactory is ERC2771Context {
+contract EscrowContractFactory {
     
     // 🔒 IMMUTABLE FACTORY SETTINGS: These CANNOT be changed after deployment
     IERC20 public immutable USDC_TOKEN;    // USDC token used for all escrow contracts
@@ -45,9 +44,7 @@ contract EscrowContractFactory is ERC2771Context {
         uint256 expiryTimestamp
     );
     
-    constructor(address _usdcToken, address _owner, address _trustedForwarder) 
-        ERC2771Context(_trustedForwarder) 
-    {
+    constructor(address _usdcToken, address _owner) {
         require(_usdcToken != address(0), "Invalid USDC token address");
         require(_owner != address(0), "Invalid owner address");
         
@@ -82,7 +79,7 @@ contract EscrowContractFactory is ERC2771Context {
         string memory description,
         uint256 creatorFee
     ) external returns (address) {
-        require(_msgSender() == OWNER, "Only owner");
+        require(msg.sender == OWNER, "Only owner");
         require(buyer != address(0), "Invalid buyer address");
         require(seller != address(0), "Invalid seller address");
         require(buyer != seller, "Buyer and seller cannot be the same");
@@ -110,7 +107,6 @@ contract EscrowContractFactory is ERC2771Context {
             amount,
             expiryTimestamp,
             description,
-            trustedForwarder(),
             creatorFee       // Platform fee (transparent and upfront)
         );
         

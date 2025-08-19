@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ERC2771Context} from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
@@ -51,7 +50,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * 
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
-contract EscrowContract is ERC2771Context, ReentrancyGuard {
+contract EscrowContract is ReentrancyGuard {
     using SafeERC20 for IERC20;
     
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
@@ -70,7 +69,6 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
     
     // 🔐 INTERNAL STATE: Tracks contract progress (cannot be manipulated externally)
     uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
-    address private _trustedForwarderOverride; // Technical: For meta-transactions
     
     // 📢 PUBLIC EVENTS: These events prove what happened (recorded permanently on blockchain)
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
@@ -83,25 +81,25 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
     
     // ⚡ BUYER PROTECTION: Only the original BUYER can deposit money and raise disputes
     modifier onlyBuyer() {
-        require(_msgSender() == BUYER, "Only buyer can call");
+        require(msg.sender == BUYER, "Only buyer can call");
         _;
     }
     
     // ⚡ DISPUTE RESOLUTION: Only platform can resolve disputes (but money still goes to BUYER/SELLER)
     modifier onlyGasPayer() {
-        require(_msgSender() == GAS_PAYER, "Only gas payer can call");
+        require(msg.sender == GAS_PAYER, "Only gas payer can call");
         _;
     }
     
     // ⚡ CLAIM PROTECTION: Only SELLER can claim expired funds (platform can help with gas)
     modifier onlySellerOrGasPayer() {
-        require(_msgSender() == SELLER || _msgSender() == GAS_PAYER, "Unauthorized");
+        require(msg.sender == SELLER || msg.sender == GAS_PAYER, "Unauthorized");
         _;
     }
     
     // ⚡ INITIALIZATION PROTECTION: Only factory can initialize contracts
     modifier onlyFactory() {
-        require(_msgSender() == FACTORY, "Only factory can initialize");
+        require(msg.sender == FACTORY, "Only factory can initialize");
         _;
     }
     
@@ -110,15 +108,12 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
         _;
     }
     
-    constructor() ERC2771Context(address(0)) {
+    constructor() {
         // Implementation contract - disable initialization
         FACTORY = msg.sender; // Factory address that deployed this implementation
         _state = 255; // Mark as disabled
     }
     
-    function trustedForwarder() public view virtual override returns (address) {
-        return _trustedForwarderOverride != address(0) ? _trustedForwarderOverride : super.trustedForwarder();
-    }
     
     function initialize(
         address _usdcToken,
@@ -128,7 +123,6 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
         uint256 _amount,
         uint256 _expiryTimestamp,
         string memory _description,
-        address _trustedForwarder,
         uint256 _creatorFee
     ) external onlyFactory {
         require(_state == 0, "Already initialized");
@@ -145,7 +139,6 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
         DESCRIPTION = _description;
-        _trustedForwarderOverride = _trustedForwarder;
         CREATOR_FEE = _creatorFee;
         createdAt = block.timestamp;  // Set the creation timestamp
         require(_creatorFee < _amount, "Creator fee must be less than amount");
@@ -181,13 +174,13 @@ contract EscrowContract is ERC2771Context, ReentrancyGuard {
         
         // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
         uint256 escrowAmount = AMOUNT - CREATOR_FEE;
-        emit FundsDeposited(_msgSender(), escrowAmount, block.timestamp);
+        emit FundsDeposited(msg.sender, escrowAmount, block.timestamp);
         if (CREATOR_FEE > 0) {
             emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
         }
         
         // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
-        USDC_TOKEN.safeTransferFrom(_msgSender(), address(this), AMOUNT);
+        USDC_TOKEN.safeTransferFrom(msg.sender, address(this), AMOUNT);
         
         // 💳 STEP 3: Platform gets their fee (transparent and upfront)
         // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
