@@ -9,13 +9,10 @@ via_ir = false
 verbosity = 3
 
 [rpc_endpoints]
-fuji = "https://api.avax-test.network/ext/bc/C/rpc"
-avalanche = "https://api.avax.network/ext/bc/C/rpc"
-sepolia = "${SEPOLIA_RPC_URL}"
+default = "${NETWORK_RPC_URL}"
 
 [etherscan]
-fuji = { key = "${ETHERSCAN_API_KEY}", url = "https://api.routescan.io/v2/network/testnet/evm/43113/etherscan" }
-avalanche = { key = "${ETHERSCAN_API_KEY}", url = "https://api.routescan.io/v2/network/mainnet/evm/43114/etherscan" }
+default = { key = "${VERIFIER_API_KEY}", url = "${VERIFIER_URL}" }
 
 [fuzz]
 runs = 256
