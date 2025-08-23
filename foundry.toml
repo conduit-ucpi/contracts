@@ -11,8 +11,7 @@ verbosity = 3
 [rpc_endpoints]
 default = "${NETWORK_RPC_URL}"
 
-[etherscan]
-default = { key = "${VERIFIER_API_KEY}", url = "${VERIFIER_URL}" }
+# Etherscan config not needed since we pass --etherscan-api-key and --verifier-url directly
 
 [fuzz]
 runs = 256

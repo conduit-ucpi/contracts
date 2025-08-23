@@ -47,7 +47,7 @@ jobs:
         run: |
           source .env
           # Deploy with verification
-          forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify -vvvv 2>&1 | tee deployment_output.txt
+          forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --etherscan-api-key $VERIFIER_API_KEY --verifier-url $VERIFIER_URL -vvvv 2>&1 | tee deployment_output.txt
           
           # Extract factory address from the output
           FACTORY_ADDRESS=$(grep "Factory deployed at:" deployment_output.txt | awk '{print $4}')
