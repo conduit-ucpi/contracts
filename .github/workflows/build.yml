@@ -49,12 +49,46 @@ jobs:
           # Deploy with verification
           forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url $VERIFIER_URL -vvvv 2>&1 | tee deployment_output.txt
           
-          # Extract factory address from the output
+          # Extract addresses from the output
+          IMPLEMENTATION_ADDRESS=$(grep "Implementation deployed at:" deployment_output.txt | awk '{print $4}')
           FACTORY_ADDRESS=$(grep "Factory deployed at:" deployment_output.txt | awk '{print $4}')
+          
+          # Wait for contracts to be indexed
+          echo "Waiting for contracts to be indexed on chain..."
+          sleep 10
+          
+          # Manually verify implementation if automatic verification failed
+          echo "Attempting to verify implementation contract..."
+          forge verify-contract \
+            $IMPLEMENTATION_ADDRESS \
+            src/EscrowContract.sol:EscrowContract \
+            --verifier blockscout \
+            --verifier-url $VERIFIER_URL \
+            --compiler-version 0.8.26 \
+            --num-of-optimizations 200 \
+            --evm-version cancun || echo "Implementation verification may have failed or already verified"
+          
+          # Get relayer address from private key
+          RELAYER_ADDRESS=$(cast wallet address $RELAYER_WALLET_PRIVATE_KEY)
+          
+          # Manually verify factory if automatic verification failed
+          echo "Attempting to verify factory contract..."
+          forge verify-contract \
+            $FACTORY_ADDRESS \
+            src/EscrowContractFactory.sol:EscrowContractFactory \
+            --verifier blockscout \
+            --verifier-url $VERIFIER_URL \
+            --compiler-version 0.8.26 \
+            --num-of-optimizations 200 \
+            --evm-version cancun \
+            --constructor-args $(cast abi-encode "constructor(address,address,address)" $USDC_CONTRACT_ADDRESS $RELAYER_ADDRESS $IMPLEMENTATION_ADDRESS) || echo "Factory verification may have failed or already verified"
           
           # Create a summary with important addresses
           echo "==================================================="
-          echo "🏭 FACTORY ADDRESS (SAVE THIS FOR UI CONFIG)"
+          echo "🏭 DEPLOYMENT COMPLETE"
           echo "==================================================="
-          echo "deployed $FACTORY_ADDRESS"
+          echo "Implementation: $IMPLEMENTATION_ADDRESS"
+          echo "Factory: $FACTORY_ADDRESS"
+          echo "==================================================="
+          echo "FACTORY ADDRESS FOR UI CONFIG: $FACTORY_ADDRESS"
           echo "===================================================" 

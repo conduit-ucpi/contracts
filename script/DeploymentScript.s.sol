@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
 import {EscrowContractFactory} from "../src/EscrowContractFactory.sol";
+import {EscrowContract} from "../src/EscrowContract.sol";
 
 contract DeploymentScript is Script {
     function run() external {
@@ -24,9 +25,15 @@ contract DeploymentScript is Script {
         
         vm.startBroadcast(deployerPrivateKey);
         
+        // Deploy implementation as separate transaction
+        EscrowContract implementation = new EscrowContract();
+        console.log("Implementation deployed at:", address(implementation));
+        
+        // Deploy factory with implementation address
         EscrowContractFactory factory = new EscrowContractFactory(
             usdcAddress,
-            relayerAddress
+            relayerAddress,
+            address(implementation)
         );
         
         console.log("=================================================");

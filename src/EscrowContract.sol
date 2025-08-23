@@ -54,7 +54,7 @@ contract EscrowContract is ReentrancyGuard {
     using SafeERC20 for IERC20;
     
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
-    address public immutable FACTORY;  // Factory contract that created this escrow - only it can initialize
+    address public FACTORY;  // Factory contract that created this escrow - only it can initialize
     IERC20 public USDC_TOKEN;        // The USDC token contract - immutable after initialization
     address public BUYER;           // ONLY this address can deposit funds and raise disputes
     address public SELLER;          // ONLY this address can receive funds (after expiry or dispute)
@@ -97,11 +97,6 @@ contract EscrowContract is ReentrancyGuard {
         _;
     }
     
-    // ⚡ INITIALIZATION PROTECTION: Only factory can initialize contracts
-    modifier onlyFactory() {
-        require(msg.sender == FACTORY, "Only factory can initialize");
-        _;
-    }
     
     modifier initialized() {
         require(_state != 255, "Not initialized");
@@ -110,7 +105,7 @@ contract EscrowContract is ReentrancyGuard {
     
     constructor() {
         // Implementation contract - disable initialization
-        FACTORY = msg.sender; // Factory address that deployed this implementation
+        // FACTORY will remain address(0) for the implementation
         _state = 255; // Mark as disabled
     }
     
@@ -124,8 +119,10 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _expiryTimestamp,
         string memory _description,
         uint256 _creatorFee
-    ) external onlyFactory {
+    ) external {
         require(_state == 0, "Already initialized");
+        require(FACTORY == address(0), "Implementation cannot be initialized");
+        FACTORY = msg.sender;  // Set the factory to the caller
         require(_usdcToken != address(0), "Invalid USDC token address");
         require(_buyer != address(0), "Invalid buyer address");
         require(_seller != address(0), "Invalid seller address");

@@ -44,13 +44,14 @@ contract EscrowContractFactory {
         uint256 expiryTimestamp
     );
     
-    constructor(address _usdcToken, address _owner) {
+    constructor(address _usdcToken, address _owner, address _implementation) {
         require(_usdcToken != address(0), "Invalid USDC token address");
         require(_owner != address(0), "Invalid owner address");
+        require(_implementation != address(0), "Invalid implementation address");
         
         USDC_TOKEN = IERC20(_usdcToken);
         OWNER = _owner;
-        IMPLEMENTATION = address(new EscrowContract());
+        IMPLEMENTATION = _implementation;
     }
     
     /**
