@@ -49,6 +49,7 @@ contract MockERC20 is Test {
 contract EscrowContractFactoryTest is Test {
     EscrowContractFactory public factory;
     MockERC20 public usdc;
+    MockERC20 public dai;
     
     address public owner = address(0x1);
     address public buyer = address(0x2);
@@ -70,38 +71,48 @@ contract EscrowContractFactoryTest is Test {
     
     function setUp() public {
         usdc = new MockERC20();
+        dai = new MockERC20();
         EscrowContract implementation = new EscrowContract();
-        factory = new EscrowContractFactory(address(usdc), owner, address(implementation));
+        factory = new EscrowContractFactory(owner, address(implementation));
         
         expiryTimestamp = block.timestamp + 7 days;
         
         usdc.mint(buyer, AMOUNT * 10);
         usdc.mint(owner, AMOUNT * 10);
+        dai.mint(buyer, AMOUNT * 10);
+        dai.mint(owner, AMOUNT * 10);
         
         vm.prank(buyer);
         usdc.approve(address(factory), AMOUNT * 10);
         
+        vm.prank(buyer);
+        dai.approve(address(factory), AMOUNT * 10);
+        
         vm.prank(owner);
         usdc.approve(address(factory), AMOUNT * 10);
+        
+        vm.prank(owner);
+        dai.approve(address(factory), AMOUNT * 10);
     }
     
     function testConstructorValidation() public {
         // Constructor should accept valid addresses without reverting
         EscrowContract impl = new EscrowContract();
-        EscrowContractFactory testFactory = new EscrowContractFactory(address(usdc), owner, address(impl));
-        assertEq(address(testFactory.USDC_TOKEN()), address(usdc));
+        EscrowContractFactory testFactory = new EscrowContractFactory(owner, address(impl));
         assertEq(testFactory.OWNER(), owner);
+        assertEq(testFactory.IMPLEMENTATION(), address(impl));
     }
     
     function testSuccessfulDeployment() public view {
-        assertEq(address(factory.USDC_TOKEN()), address(usdc));
         assertEq(factory.OWNER(), owner);
+        assertTrue(factory.IMPLEMENTATION() != address(0));
     }
     
     function testCreateEscrowContract() public {
         // Gas-payer (owner) calls factory with buyer and seller addresses
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -125,10 +136,47 @@ contract EscrowContractFactoryTest is Test {
         assertEq(usdc.balanceOf(buyer), AMOUNT * 10); // buyer's balance unchanged
     }
     
+    function testCreateEscrowWithDifferentTokens() public {
+        vm.startPrank(owner);
+        
+        // Create USDC escrow
+        address usdcEscrow = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "USDC escrow",
+            CREATOR_FEE
+        );
+        
+        // Create DAI escrow
+        address daiEscrow = factory.createEscrowContract(
+            address(dai),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "DAI escrow",
+            CREATOR_FEE
+        );
+        
+        assertTrue(usdcEscrow != daiEscrow);
+        
+        EscrowContract usdcContract = EscrowContract(usdcEscrow);
+        EscrowContract daiContract = EscrowContract(daiEscrow);
+        
+        assertEq(address(usdcContract.USDC_TOKEN()), address(usdc));
+        assertEq(address(daiContract.USDC_TOKEN()), address(dai));
+        
+        vm.stopPrank();
+    }
+    
     function testOnlyOwnerCanCreateEscrow() public {
         vm.prank(other);
         vm.expectRevert("Only owner");
         factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -141,8 +189,20 @@ contract EscrowContractFactoryTest is Test {
     function testCreateEscrowValidation() public {
         vm.startPrank(owner);
         
+        vm.expectRevert("Invalid token address");
+        factory.createEscrowContract(
+            address(0),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description,
+            CREATOR_FEE
+        );
+        
         vm.expectRevert("Invalid buyer address");
         factory.createEscrowContract(
+            address(usdc),
             address(0),
             seller,
             AMOUNT,
@@ -153,6 +213,7 @@ contract EscrowContractFactoryTest is Test {
         
         vm.expectRevert("Invalid seller address");
         factory.createEscrowContract(
+            address(usdc),
             buyer,
             address(0),
             AMOUNT,
@@ -164,6 +225,7 @@ contract EscrowContractFactoryTest is Test {
         // Test same buyer and seller
         vm.expectRevert("Buyer and seller cannot be the same");
         factory.createEscrowContract(
+            address(usdc),
             buyer,
             buyer,
             AMOUNT,
@@ -174,6 +236,7 @@ contract EscrowContractFactoryTest is Test {
         
         vm.expectRevert("Invalid params");
         factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             0,
@@ -184,6 +247,7 @@ contract EscrowContractFactoryTest is Test {
         
         vm.expectRevert("Invalid params");
         factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -195,6 +259,7 @@ contract EscrowContractFactoryTest is Test {
         // Test creator fee validation
         vm.expectRevert("Creator fee must be less than amount");
         factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -206,6 +271,7 @@ contract EscrowContractFactoryTest is Test {
         // Test with invalid parameters - zero addresses
         vm.expectRevert("Invalid buyer address");
         factory.createEscrowContract(
+            address(usdc),
             address(0),
             seller,
             AMOUNT,
@@ -229,6 +295,7 @@ contract EscrowContractFactoryTest is Test {
         
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -247,6 +314,7 @@ contract EscrowContractFactoryTest is Test {
         string memory secondDesc = "Second escrow";
         
         address escrow1 = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -256,6 +324,7 @@ contract EscrowContractFactoryTest is Test {
         );
         
         address escrow2 = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT * 2,
@@ -284,6 +353,7 @@ contract EscrowContractFactoryTest is Test {
         
         uint256 creationTime1 = block.timestamp;
         address escrow1 = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -296,6 +366,7 @@ contract EscrowContractFactoryTest is Test {
         
         uint256 creationTime2 = block.timestamp;
         address escrow2 = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -308,6 +379,7 @@ contract EscrowContractFactoryTest is Test {
         
         // Test that the prediction function exists and runs without error
         factory.getContractAddress(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -317,6 +389,7 @@ contract EscrowContractFactoryTest is Test {
         );
         
         factory.getContractAddress(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -331,6 +404,7 @@ contract EscrowContractFactoryTest is Test {
     function testReentrancyProtection() public {
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -349,6 +423,7 @@ contract EscrowContractFactoryTest is Test {
         // Factory no longer transfers funds, so this should succeed
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             poorBuyer,
             seller,
             AMOUNT,
@@ -370,6 +445,7 @@ contract EscrowContractFactoryTest is Test {
         // Factory no longer transfers funds, so creation should succeed
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,

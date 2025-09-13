@@ -8,7 +8,6 @@ import {EscrowContract} from "../src/EscrowContract.sol";
 contract DeploymentScript is Script {
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("RELAYER_WALLET_PRIVATE_KEY");
-        address usdcAddress = vm.envAddress("USDC_CONTRACT_ADDRESS");
         address relayerAddress = vm.addr(deployerPrivateKey);
         uint256 chainId = vm.envUint("CHAIN_ID");
         string memory network = vm.envString("NETWORK");
@@ -16,7 +15,6 @@ contract DeploymentScript is Script {
         console.log("Deploying with the following parameters:");
         console.log("Network:", network);
         console.log("Chain ID:", chainId);
-        console.log("USDC Contract Address:", usdcAddress);
         console.log("Relayer Address (Owner):", relayerAddress);
         console.log("Deployer Address:", vm.addr(deployerPrivateKey));
         
@@ -31,7 +29,6 @@ contract DeploymentScript is Script {
         
         // Deploy factory with implementation address
         EscrowContractFactory factory = new EscrowContractFactory(
-            usdcAddress,
             relayerAddress,
             address(implementation)
         );
@@ -45,7 +42,6 @@ contract DeploymentScript is Script {
         console.log("Deployment completed successfully!");
         console.log("Factory contract address:", address(factory));
         console.log("Implementation contract address:", factory.IMPLEMENTATION());
-        console.log("USDC token address:", address(factory.USDC_TOKEN()));
         console.log("Factory owner:", factory.OWNER());
         
         console.log("=================================================");

@@ -31,7 +31,6 @@ import {EscrowContract} from "./EscrowContract.sol";
 contract EscrowContractFactory {
     
     // 🔒 IMMUTABLE FACTORY SETTINGS: These CANNOT be changed after deployment
-    IERC20 public immutable USDC_TOKEN;    // USDC token used for all escrow contracts
     address public immutable OWNER;       // Platform address - can create contracts but NOT access money
     address public immutable IMPLEMENTATION; // Template contract - ensures all escrows have same security
     
@@ -44,12 +43,10 @@ contract EscrowContractFactory {
         uint256 expiryTimestamp
     );
     
-    constructor(address _usdcToken, address _owner, address _implementation) {
-        require(_usdcToken != address(0), "Invalid USDC token address");
+    constructor(address _owner, address _implementation) {
         require(_owner != address(0), "Invalid owner address");
         require(_implementation != address(0), "Invalid implementation address");
         
-        USDC_TOKEN = IERC20(_usdcToken);
         OWNER = _owner;
         IMPLEMENTATION = _implementation;
     }
@@ -73,6 +70,7 @@ contract EscrowContractFactory {
      * - Platform can only facilitate - never access escrowed funds
      */
     function createEscrowContract(
+        address tokenAddress,
         address buyer,
         address seller,
         uint256 amount,
@@ -81,6 +79,7 @@ contract EscrowContractFactory {
         uint256 creatorFee
     ) external returns (address) {
         require(msg.sender == OWNER, "Only owner");
+        require(tokenAddress != address(0), "Invalid token address");
         require(buyer != address(0), "Invalid buyer address");
         require(seller != address(0), "Invalid seller address");
         require(buyer != seller, "Buyer and seller cannot be the same");
@@ -89,6 +88,7 @@ contract EscrowContractFactory {
         
         // 🔐 Generate unique contract address (deterministic but unpredictable)
         bytes32 salt = keccak256(abi.encodePacked(
+            tokenAddress,
             buyer,
             seller,
             amount,
@@ -101,7 +101,7 @@ contract EscrowContractFactory {
         
         // 🔒 Initialize with IMMUTABLE security settings
         EscrowContract(clone).initialize(
-            address(USDC_TOKEN),
+            tokenAddress,    // ERC20 token to be used for this escrow
             buyer,           // ONLY this address can deposit and dispute
             seller,          // ONLY this address can receive funds (with buyer)
             OWNER,           // Platform - can resolve disputes but NOT take money
@@ -129,6 +129,7 @@ contract EscrowContractFactory {
     }
     
     function getContractAddress(
+        address tokenAddress,
         address buyer,
         address seller,
         uint256 amount,
@@ -137,6 +138,7 @@ contract EscrowContractFactory {
         string memory /* description */
     ) external view returns (address) {
         bytes32 salt = keccak256(abi.encodePacked(
+            tokenAddress,
             buyer,
             seller,
             amount,

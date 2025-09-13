@@ -63,7 +63,7 @@ contract EscrowContractTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         EscrowContract implementation = new EscrowContract();
-        factory = new EscrowContractFactory(address(usdc), gasPayer, address(implementation));
+        factory = new EscrowContractFactory(gasPayer, address(implementation));
         
         expiryTimestamp = block.timestamp + 7 days;
         
@@ -81,6 +81,7 @@ contract EscrowContractTest is Test {
     function createAndFundEscrow() internal returns (EscrowContract) {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -127,6 +128,7 @@ contract EscrowContractTest is Test {
         
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -310,6 +312,7 @@ contract EscrowContractTest is Test {
         
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -349,6 +352,7 @@ contract EscrowContractTest is Test {
     function testDepositFunds() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -388,6 +392,7 @@ contract EscrowContractTest is Test {
     function testOnlyBuyerCanDeposit() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -409,6 +414,7 @@ contract EscrowContractTest is Test {
     function testCannotUseUnfundedContract() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
@@ -439,6 +445,7 @@ contract EscrowContractTest is Test {
     function testCreatorFeeTransferOnDeposit() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
+            address(usdc),
             buyer,
             seller,
             AMOUNT,
