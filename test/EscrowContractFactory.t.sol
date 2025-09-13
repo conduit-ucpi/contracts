@@ -57,7 +57,6 @@ contract EscrowContractFactoryTest is Test {
     address public other = address(0x4);
     
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
-    uint256 public constant CREATOR_FEE = 10 * 10**6; // 10 USDC creator fee
     uint256 public expiryTimestamp;
     string public description = "Test escrow transaction";
     
@@ -117,8 +116,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -146,8 +144,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            "USDC escrow",
-            CREATOR_FEE
+            "USDC escrow"
         );
         
         // Create DAI escrow
@@ -157,8 +154,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            "DAI escrow",
-            CREATOR_FEE
+            "DAI escrow"
         );
         
         assertTrue(usdcEscrow != daiEscrow);
@@ -181,8 +177,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
     }
     
@@ -196,8 +191,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         vm.expectRevert("Invalid buyer address");
@@ -207,8 +201,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         vm.expectRevert("Invalid seller address");
@@ -218,8 +211,7 @@ contract EscrowContractFactoryTest is Test {
             address(0),
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         // Test same buyer and seller
@@ -230,8 +222,7 @@ contract EscrowContractFactoryTest is Test {
             buyer,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         vm.expectRevert("Invalid params");
@@ -241,8 +232,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             0,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         vm.expectRevert("Invalid params");
@@ -252,20 +242,20 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             block.timestamp - 1,
-            description,
-            CREATOR_FEE
+            description
         );
         
-        // Test creator fee validation
-        vm.expectRevert("Creator fee must be less than amount");
+        // Test that amounts equal to minimum fee are rejected
+        // For USDC (6 decimals), minimum fee is 300,000 (30% of 1,000,000)
+        // So amount of exactly 300,000 should be rejected as it can't cover the fee
+        vm.expectRevert("Amount too small to cover minimum fee");
         factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
-            AMOUNT,
+            300000, // 0.3 USDC - exactly equal to minimum fee
             expiryTimestamp,
-            description,
-            AMOUNT // Creator fee equal to amount should fail
+            description
         );
         
         // Test with invalid parameters - zero addresses
@@ -276,8 +266,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         vm.stopPrank();
@@ -300,8 +289,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -319,8 +307,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            firstDesc,
-            CREATOR_FEE
+            firstDesc
         );
         
         address escrow2 = factory.createEscrowContract(
@@ -329,8 +316,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT * 2,
             expiryTimestamp + 1 days,
-            secondDesc,
-            CREATOR_FEE
+            secondDesc
         );
         
         assertTrue(escrow1 != escrow2);
@@ -358,8 +344,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         vm.warp(block.timestamp + 1);
@@ -371,8 +356,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         assertTrue(escrow1 != escrow2);
@@ -384,8 +368,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            creationTime1,
-            description
+            creationTime1
         );
         
         factory.getContractAddress(
@@ -394,11 +377,68 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            creationTime2,
-            description
+            creationTime2
         );
         
         vm.stopPrank();
+    }
+    
+    function testNoFeeThreshold() public {
+        vm.startPrank(owner);
+        
+        // Test amount at no-fee threshold (1/1000 of one unit)
+        // For USDC (6 decimals): 1 unit = 1,000,000, so threshold = 1,000
+        uint256 noFeeAmount = 1000; // 1000 microUSDC = 0.001 USDC
+        
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            noFeeAmount,
+            expiryTimestamp,
+            "No fee test"
+        );
+        
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        assertEq(escrow.CREATOR_FEE(), 0); // Should be 0 fee
+        
+        // Test amount just above threshold - should have minimum fee
+        // For USDC minimum fee is 300,000, so amount must be > 300,000
+        uint256 smallFeeAmount = 400000; // 0.4 USDC - above threshold and minimum fee
+        
+        address escrowAddress2 = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            smallFeeAmount,
+            expiryTimestamp,
+            "Small fee test"
+        );
+        
+        EscrowContract escrow2 = EscrowContract(escrowAddress2);
+        uint256 expectedMinFee = 300000; // 30% of 1,000,000 
+        assertEq(escrow2.CREATOR_FEE(), expectedMinFee); // Should have minimum fee
+        
+        vm.stopPrank();
+    }
+    
+    function testAmountTooSmallForMinFee() public {
+        vm.prank(owner);
+        
+        // Test amount that's above no-fee threshold but below minimum fee
+        // For USDC: no-fee threshold = 1,000, minimum fee = 300,000
+        // So amounts between 1,001 and 300,000 should be rejected
+        uint256 tooSmallAmount = 200000; // 0.2 USDC - above threshold but can't cover 0.3 USDC min fee
+        
+        vm.expectRevert("Amount too small to cover minimum fee");
+        factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            tooSmallAmount,
+            expiryTimestamp,
+            "Too small amount test"
+        );
     }
     
     function testReentrancyProtection() public {
@@ -409,8 +449,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -428,8 +467,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         assertTrue(escrowAddress != address(0));
@@ -450,8 +488,7 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         assertTrue(escrowAddress != address(0));

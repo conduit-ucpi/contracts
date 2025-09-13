@@ -56,7 +56,7 @@ contract EscrowContractTest is Test {
     address public other = address(0x4);
     
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
-    uint256 public constant CREATOR_FEE = 10 * 10**6; // 10 USDC creator fee
+    uint256 public CREATOR_FEE; // Will be calculated as 1% of AMOUNT
     uint256 public expiryTimestamp;
     string public description = "Test escrow transaction";
     
@@ -66,6 +66,9 @@ contract EscrowContractTest is Test {
         factory = new EscrowContractFactory(gasPayer, address(implementation));
         
         expiryTimestamp = block.timestamp + 7 days;
+        
+        // Calculate expected fee: 1% of AMOUNT (since 1% > minimum of 300,000)
+        CREATOR_FEE = AMOUNT / 100; // 10 USDC (1% of 1000 USDC)
         
         // Give USDC to gasPayer so they can create escrow contracts
         usdc.mint(gasPayer, AMOUNT * 10);
@@ -86,8 +89,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -133,8 +135,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -317,8 +318,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -357,8 +357,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -397,8 +396,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -419,8 +417,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -450,8 +447,7 @@ contract EscrowContractTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description,
-            CREATOR_FEE
+            description
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);

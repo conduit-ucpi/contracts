@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {EscrowContract} from "./EscrowContract.sol";
 
@@ -75,8 +76,7 @@ contract EscrowContractFactory {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        string memory description,
-        uint256 creatorFee
+        string memory description
     ) external returns (address) {
         require(msg.sender == OWNER, "Only owner");
         require(tokenAddress != address(0), "Invalid token address");
@@ -84,7 +84,37 @@ contract EscrowContractFactory {
         require(seller != address(0), "Invalid seller address");
         require(buyer != seller, "Buyer and seller cannot be the same");
         require(amount > 0 && expiryTimestamp > block.timestamp, "Invalid params");
-        require(creatorFee < amount, "Creator fee must be less than amount");
+        
+        // 📊 Query token decimals and calculate dynamic fee
+        uint8 decimals = IERC20Metadata(tokenAddress).decimals();
+        
+        // Calculate one unit and special no-fee threshold (1/1000 of one unit)
+        uint256 oneUnit = 10 ** decimals;
+        uint256 noFeeThreshold = oneUnit / 1000;
+        
+        uint256 creatorFee;
+        
+        // Special case: amounts at or below 1/1000 of one unit have no fee
+        if (amount <= noFeeThreshold) {
+            creatorFee = 0;
+        } else {
+            // Calculate minimum fee (30% of one token unit)
+            // For USDC (6 decimals): 1 unit = 1,000,000, so 30% = 300,000
+            // For other tokens: adjust based on decimals
+            uint256 minFee = (oneUnit * 30) / 100;
+            
+            // Reject contracts that can't afford the minimum fee
+            require(amount > minFee, "Amount too small to cover minimum fee");
+            
+            // Calculate 1% of the amount
+            uint256 onePercentFee = amount / 100;
+            
+            // Use the greater of 1% or minimum fee
+            creatorFee = onePercentFee > minFee ? onePercentFee : minFee;
+            
+            // Ensure fee doesn't exceed the amount (should never happen with our logic, but safety check)
+            require(creatorFee < amount, "Creator fee must be less than amount");
+        }
         
         // 🔐 Generate unique contract address (deterministic but unpredictable)
         bytes32 salt = keccak256(abi.encodePacked(
@@ -134,8 +164,7 @@ contract EscrowContractFactory {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        uint256 creationTimestamp,
-        string memory /* description */
+        uint256 creationTimestamp
     ) external view returns (address) {
         bytes32 salt = keccak256(abi.encodePacked(
             tokenAddress,
