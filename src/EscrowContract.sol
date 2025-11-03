@@ -239,7 +239,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
     address public FACTORY;  // Factory contract that created this escrow - only it can initialize
-    IERC20 public USDC_TOKEN;        // The USDC token contract - immutable after initialization
+    IERC20 public tokenAddress;     // The ERC20 token contract (USDC, USDT, DAI, etc.) - immutable after initialization
     address public BUYER;           // ONLY this address can deposit funds and raise disputes
     address public SELLER;          // ONLY this address can receive funds (after expiry or dispute)
     address public GAS_PAYER;       // Platform address - can ONLY resolve disputes, NOT take your money
@@ -295,7 +295,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     
     
     function initialize(
-        address _usdcToken,
+        address _tokenAddress,
         address _buyer,
         address _seller,
         address _gasPayer,
@@ -307,13 +307,13 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         require(_state == 0, "Already initialized");
         require(FACTORY == address(0), "Implementation cannot be initialized");
         FACTORY = msg.sender;  // Set the factory to the caller
-        require(_usdcToken != address(0), "Invalid USDC token address");
+        require(_tokenAddress != address(0), "Invalid token address");
         require(_buyer != address(0), "Invalid buyer address");
         require(_seller != address(0), "Invalid seller address");
         require(_gasPayer != address(0), "Invalid gas payer address");
         require(_buyer != _seller, "Buyer and seller cannot be the same");
-        
-        USDC_TOKEN = IERC20(_usdcToken);
+
+        tokenAddress = IERC20(_tokenAddress);
         BUYER = _buyer;
         SELLER = _seller;
         GAS_PAYER = _gasPayer;
@@ -361,12 +361,12 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         }
         
         // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
-        USDC_TOKEN.safeTransferFrom(msg.sender, address(this), AMOUNT);
+        tokenAddress.safeTransferFrom(msg.sender, address(this), AMOUNT);
         
         // 💳 STEP 3: Platform gets their fee (transparent and upfront)
         // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
         if (CREATOR_FEE > 0) {
-            USDC_TOKEN.safeTransfer(GAS_PAYER, CREATOR_FEE);
+            tokenAddress.safeTransfer(GAS_PAYER, CREATOR_FEE);
         }
         
         // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
@@ -541,12 +541,12 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         
         // 🔒 STEP 2: Send BUYER their share (if any) - money can ONLY go to BUYER address
         if (buyerAmount > 0) {
-            USDC_TOKEN.safeTransfer(BUYER, buyerAmount);
+            tokenAddress.safeTransfer(BUYER, buyerAmount);
         }
         
         // 🔒 STEP 3: Send SELLER their share (if any) - money can ONLY go to SELLER address  
         if (sellerAmount > 0) {
-            USDC_TOKEN.safeTransfer(SELLER, sellerAmount);
+            tokenAddress.safeTransfer(SELLER, sellerAmount);
         }
         
         // ✅ SECURITY VERIFICATION: At this point, 100% of escrowed money has been 
@@ -590,7 +590,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
         
         // 🔒 STEP 2: This money can ONLY go to the SELLER address (nobody else)
-        USDC_TOKEN.safeTransfer(SELLER, escrowAmount);
+        tokenAddress.safeTransfer(SELLER, escrowAmount);
         
         // 🎉 TRANSACTION COMPLETE: SELLER got their money, BUYER's time to dispute has passed
     }
