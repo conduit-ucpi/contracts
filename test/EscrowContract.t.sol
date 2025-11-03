@@ -116,7 +116,7 @@ contract EscrowContractTest is Test {
         EscrowContract testEscrow = createAndFundEscrow();
         
         // Verify all parameters were set correctly
-        assertEq(address(testEscrow.USDC_TOKEN()), address(usdc));
+        assertEq(address(testEscrow.tokenAddress()), address(usdc));
         assertEq(testEscrow.BUYER(), buyer);
         assertEq(testEscrow.SELLER(), seller);
         assertEq(testEscrow.GAS_PAYER(), gasPayer);
@@ -140,7 +140,7 @@ contract EscrowContractTest is Test {
         
         EscrowContract escrow = EscrowContract(escrowAddress);
         
-        assertEq(address(escrow.USDC_TOKEN()), address(usdc));
+        assertEq(address(escrow.tokenAddress()), address(usdc));
         assertEq(escrow.BUYER(), buyer);
         assertEq(escrow.SELLER(), seller);
         assertEq(escrow.GAS_PAYER(), gasPayer);

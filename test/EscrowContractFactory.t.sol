@@ -162,8 +162,8 @@ contract EscrowContractFactoryTest is Test {
         EscrowContract usdcContract = EscrowContract(usdcEscrow);
         EscrowContract daiContract = EscrowContract(daiEscrow);
         
-        assertEq(address(usdcContract.USDC_TOKEN()), address(usdc));
-        assertEq(address(daiContract.USDC_TOKEN()), address(dai));
+        assertEq(address(usdcContract.tokenAddress()), address(usdc));
+        assertEq(address(daiContract.tokenAddress()), address(dai));
         
         vm.stopPrank();
     }
