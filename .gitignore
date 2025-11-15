@@ -31,3 +31,6 @@ deployments/
 # Coverage reports
 coverage/
 lcov.info
+
+# Claude AI files
+.claude/
