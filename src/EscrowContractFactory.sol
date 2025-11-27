@@ -83,7 +83,8 @@ contract EscrowContractFactory {
         require(buyer != address(0), "Invalid buyer address");
         require(seller != address(0), "Invalid seller address");
         require(buyer != seller, "Buyer and seller cannot be the same");
-        require(amount > 0 && expiryTimestamp > block.timestamp, "Invalid params");
+        require(amount > 0, "Amount must be greater than 0");
+        require(expiryTimestamp == 0 || expiryTimestamp > block.timestamp, "Invalid expiry timestamp");
         
         // 📊 Query token decimals and calculate dynamic fee
         uint8 decimals = IERC20Metadata(tokenAddress).decimals();

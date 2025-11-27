@@ -350,26 +350,53 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      */
     function depositFunds() external onlyBuyer initialized nonReentrant {
         require(_state == 0, "Already funded or claimed");
-        
-        _state = 1; // funded - money is now LOCKED in escrow
-        
-        // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+
         uint256 escrowAmount = AMOUNT - CREATOR_FEE;
-        emit FundsDeposited(msg.sender, escrowAmount, block.timestamp);
-        if (CREATOR_FEE > 0) {
-            emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
+
+        // Check if this is an instant transfer (expiry timestamp is 0)
+        bool isInstantTransfer = EXPIRY_TIMESTAMP == 0;
+
+        if (isInstantTransfer) {
+            _state = 4; // claimed - instant transfer complete
+
+            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+            emit FundsDeposited(msg.sender, escrowAmount, block.timestamp);
+            if (CREATOR_FEE > 0) {
+                emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
+            }
+            emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
+
+            // 🔒 STEP 2: BUYER's money is transferred to this contract temporarily
+            tokenAddress.safeTransferFrom(msg.sender, address(this), AMOUNT);
+
+            // 💳 STEP 3: Platform gets their fee (transparent and upfront)
+            if (CREATOR_FEE > 0) {
+                tokenAddress.safeTransfer(GAS_PAYER, CREATOR_FEE);
+            }
+
+            // 💰 STEP 4: Immediately transfer to SELLER (no escrow period)
+            tokenAddress.safeTransfer(SELLER, escrowAmount);
+
+        } else {
+            _state = 1; // funded - money is now LOCKED in escrow
+
+            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+            emit FundsDeposited(msg.sender, escrowAmount, block.timestamp);
+            if (CREATOR_FEE > 0) {
+                emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
+            }
+
+            // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
+            tokenAddress.safeTransferFrom(msg.sender, address(this), AMOUNT);
+
+            // 💳 STEP 3: Platform gets their fee (transparent and upfront)
+            // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
+            if (CREATOR_FEE > 0) {
+                tokenAddress.safeTransfer(GAS_PAYER, CREATOR_FEE);
+            }
+
+            // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
         }
-        
-        // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
-        tokenAddress.safeTransferFrom(msg.sender, address(this), AMOUNT);
-        
-        // 💳 STEP 3: Platform gets their fee (transparent and upfront)
-        // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
-        if (CREATOR_FEE > 0) {
-            tokenAddress.safeTransfer(GAS_PAYER, CREATOR_FEE);
-        }
-        
-        // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
     }
     
     /**
@@ -400,6 +427,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      */
     function raiseDispute() external onlyBuyer initialized {
         require(_state == 1, "Not funded or already processed");
+        require(EXPIRY_TIMESTAMP != 0, "Cannot dispute instant transfer");
         require(block.timestamp < EXPIRY_TIMESTAMP, "Cannot dispute after expiry");
         
         _state = 2; // disputed - money is now frozen until resolution
@@ -579,6 +607,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      */
     function claimFunds() external onlySellerOrGasPayer initialized nonReentrant {
         require(_state == 1, "Not funded or already processed");
+        require(EXPIRY_TIMESTAMP != 0, "Instant transfer already completed");
         require(block.timestamp >= EXPIRY_TIMESTAMP, "Not expired yet");
         
         _state = 4; // claimed - transaction complete
@@ -624,11 +653,11 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     }
     
     function canClaim() external view initialized returns (bool) {
-        return _state == 1 && block.timestamp >= EXPIRY_TIMESTAMP;
+        return _state == 1 && EXPIRY_TIMESTAMP != 0 && block.timestamp >= EXPIRY_TIMESTAMP;
     }
-    
+
     function canDispute() external view initialized returns (bool) {
-        return _state == 1 && block.timestamp < EXPIRY_TIMESTAMP;
+        return _state == 1 && EXPIRY_TIMESTAMP != 0 && block.timestamp < EXPIRY_TIMESTAMP;
     }
     
     function isFunded() external view initialized returns (bool) {

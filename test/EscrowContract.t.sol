@@ -614,17 +614,291 @@ contract EscrowContractTest is Test {
     
     function testDisputeTimingTransition() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         // Just before expiry - should work
         vm.warp(expiryTimestamp - 1);
         assertTrue(escrow.canDispute());
-        
+
         // At expiry - should not work
         vm.warp(expiryTimestamp);
         assertFalse(escrow.canDispute());
-        
+
         // After expiry - should not work
         vm.warp(expiryTimestamp + 1);
         assertFalse(escrow.canDispute());
+    }
+
+    // ========== INSTANT TRANSFER TESTS (EXPIRY TIMESTAMP = 0) ==========
+
+    function testInstantTransferHappyPath() public {
+        // Create instant transfer escrow with expiryTimestamp = 0
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer - expiry = 0
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Record initial balances
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+
+        // Buyer deposits funds
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Verify funds went directly to seller (minus fee)
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
+
+        // Verify platform got fee
+        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+
+        // Verify buyer paid full amount
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
+
+        // Verify no funds left in escrow
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+
+        // Verify state is claimed (4)
+        assertTrue(escrow.isClaimed());
+        assertTrue(escrow.isFunded()); // State >= 1
+    }
+
+    function testInstantTransferCannotDispute() public {
+        // Create instant transfer escrow
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Fund the escrow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Verify cannot dispute
+        assertFalse(escrow.canDispute());
+
+        vm.prank(buyer);
+        vm.expectRevert("Not funded or already processed");
+        escrow.raiseDispute();
+    }
+
+    function testInstantTransferCannotDisputeBeforeDeposit() public {
+        // Create instant transfer escrow
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Verify canDispute returns false even before deposit
+        assertFalse(escrow.canDispute());
+
+        // Attempt to dispute before deposit should fail
+        vm.prank(buyer);
+        vm.expectRevert("Not funded or already processed");
+        escrow.raiseDispute();
+    }
+
+    function testInstantTransferCannotClaim() public {
+        // Create instant transfer escrow
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Fund the escrow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Verify cannot claim (already transferred)
+        assertFalse(escrow.canClaim());
+
+        vm.prank(seller);
+        vm.expectRevert("Not funded or already processed");
+        escrow.claimFunds();
+    }
+
+    function testInstantTransferViewFunctions() public {
+        // Create instant transfer escrow
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Before deposit
+        assertFalse(escrow.isFunded());
+        assertFalse(escrow.isDisputed());
+        assertFalse(escrow.isClaimed());
+        assertTrue(escrow.canDeposit());
+        assertFalse(escrow.canDispute());
+        assertFalse(escrow.canClaim());
+
+        // Fund the escrow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // After instant transfer
+        assertTrue(escrow.isFunded());
+        assertFalse(escrow.isDisputed());
+        assertTrue(escrow.isClaimed());
+        assertFalse(escrow.canDeposit());
+        assertFalse(escrow.canDispute());
+        assertFalse(escrow.canClaim());
+    }
+
+    function testInstantTransferGetContractInfo() public {
+        // Create instant transfer escrow
+        uint256 creationTime = block.timestamp;
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        (
+            address _buyer,
+            address _seller,
+            uint256 _amount,
+            uint256 _expiryTimestamp,
+            string memory _description,
+            uint8 _currentState,
+            uint256 _currentTimestamp,
+            uint256 _creatorFee,
+            uint256 _createdAt
+        ) = escrow.getContractInfo();
+
+        // Verify expiry is 0
+        assertEq(_expiryTimestamp, 0);
+
+        // Verify other fields
+        assertEq(_buyer, buyer);
+        assertEq(_seller, seller);
+        assertEq(_amount, AMOUNT);
+        assertEq(_currentState, 0); // unfunded state
+        assertEq(_creatorFee, CREATOR_FEE);
+        assertEq(_createdAt, creationTime);
+
+        // Fund the escrow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Check state after deposit
+        (, , , , , _currentState, , , ) = escrow.getContractInfo();
+        assertEq(_currentState, 4); // claimed state after instant transfer
+    }
+
+    function testInstantTransferStateTransitions() public {
+        // Create instant transfer escrow
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Before deposit - state should be 0 (unfunded)
+        (, , , , , uint8 stateBefore, , , ) = escrow.getContractInfo();
+        assertEq(stateBefore, 0);
+
+        // Fund the escrow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // After deposit - state should be 4 (claimed) for instant transfer
+        (, , , , , uint8 stateAfter, , , ) = escrow.getContractInfo();
+        assertEq(stateAfter, 4);
+
+        // Verify contract is in claimed state
+        assertTrue(escrow.isClaimed());
+    }
+
+    function testInstantTransferWithZeroFee() public {
+        // Create a very small amount contract (below fee threshold)
+        uint256 smallAmount = 500; // 0.0005 USDC (below 1/1000 threshold)
+
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            smallAmount,
+            0, // Instant transfer
+            description
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Mint small amount to buyer
+        usdc.mint(buyer, smallAmount);
+
+        // Record initial balances
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+
+        // Fund the escrow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), smallAmount);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Verify seller got full amount (no fee)
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + smallAmount);
+        assertEq(escrow.CREATOR_FEE(), 0);
     }
 }

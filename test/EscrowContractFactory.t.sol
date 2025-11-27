@@ -225,7 +225,7 @@ contract EscrowContractFactoryTest is Test {
             description
         );
         
-        vm.expectRevert("Invalid params");
+        vm.expectRevert("Amount must be greater than 0");
         factory.createEscrowContract(
             address(usdc),
             buyer,
@@ -234,14 +234,17 @@ contract EscrowContractFactoryTest is Test {
             expiryTimestamp,
             description
         );
-        
-        vm.expectRevert("Invalid params");
+
+        // Warp forward so block.timestamp > 1, then test with past timestamp
+        vm.warp(block.timestamp + 100);
+
+        vm.expectRevert("Invalid expiry timestamp");
         factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
-            block.timestamp - 1,
+            block.timestamp - 1, // This will be 100, which is less than current 101
             description
         );
         
