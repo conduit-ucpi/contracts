@@ -275,7 +275,7 @@ contract EscrowContractTest is Test {
     function testViewFunctions() public {
         uint256 creationTime = block.timestamp;
         EscrowContract escrow = createAndFundEscrow();
-        
+
         (
             address _buyer,
             address _seller,
@@ -285,9 +285,10 @@ contract EscrowContractTest is Test {
             uint8 _currentState,
             uint256 _currentTimestamp,
             uint256 _creatorFee,
-            uint256 _createdAt
+            uint256 _createdAt,
+            address _tokenAddress
         ) = escrow.getContractInfo();
-        
+
         assertEq(_buyer, buyer);
         assertEq(_seller, seller);
         assertEq(_amount, AMOUNT);
@@ -297,6 +298,7 @@ contract EscrowContractTest is Test {
         assertEq(_currentTimestamp, block.timestamp);
         assertEq(_creatorFee, CREATOR_FEE);
         assertEq(_createdAt, creationTime); // Contract created at creation time
+        assertEq(_tokenAddress, address(usdc)); // Verify token address
         
         assertFalse(escrow.isExpired());
         assertTrue(escrow.canDispute());
@@ -812,7 +814,8 @@ contract EscrowContractTest is Test {
             uint8 _currentState,
             uint256 _currentTimestamp,
             uint256 _creatorFee,
-            uint256 _createdAt
+            uint256 _createdAt,
+            address _tokenAddress
         ) = escrow.getContractInfo();
 
         // Verify expiry is 0
@@ -833,7 +836,7 @@ contract EscrowContractTest is Test {
         escrow.depositFunds();
 
         // Check state after deposit
-        (, , , , , _currentState, , , ) = escrow.getContractInfo();
+        (, , , , , _currentState, , , , ) = escrow.getContractInfo();
         assertEq(_currentState, 4); // claimed state after instant transfer
     }
 
@@ -852,7 +855,7 @@ contract EscrowContractTest is Test {
         EscrowContract escrow = EscrowContract(escrowAddress);
 
         // Before deposit - state should be 0 (unfunded)
-        (, , , , , uint8 stateBefore, , , ) = escrow.getContractInfo();
+        (, , , , , uint8 stateBefore, , , , ) = escrow.getContractInfo();
         assertEq(stateBefore, 0);
 
         // Fund the escrow
@@ -862,7 +865,7 @@ contract EscrowContractTest is Test {
         escrow.depositFunds();
 
         // After deposit - state should be 4 (claimed) for instant transfer
-        (, , , , , uint8 stateAfter, , , ) = escrow.getContractInfo();
+        (, , , , , uint8 stateAfter, , , , ) = escrow.getContractInfo();
         assertEq(stateAfter, 4);
 
         // Verify contract is in claimed state
