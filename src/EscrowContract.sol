@@ -633,7 +633,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         uint8 _currentState,
         uint256 _currentTimestamp,
         uint256 _creatorFee,
-        uint256 _createdAt
+        uint256 _createdAt,
+        address _tokenAddress
     ) {
         return (
             BUYER,
@@ -644,7 +645,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             _state,
             block.timestamp,
             CREATOR_FEE,
-            createdAt
+            createdAt,
+            address(tokenAddress)
         );
     }
     
