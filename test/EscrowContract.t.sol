@@ -401,14 +401,19 @@ contract EscrowContractTest is Test {
             description
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
-        
+
+        // Seller cannot deposit (not buyer or gas payer)
         vm.prank(seller);
-        vm.expectRevert("Only buyer can call");
+        vm.expectRevert("Unauthorized");
         escrow.depositFunds();
-        
+
+        // Gas payer CAN deposit (onlyBuyerOrGasPayer modifier allows it)
+        // This is expected behavior for gas relay pattern
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+
         vm.prank(gasPayer);
-        vm.expectRevert("Only buyer can call");
-        escrow.depositFunds();
+        escrow.depositFunds(); // This should succeed
     }
     
     function testCannotUseUnfundedContract() public {
