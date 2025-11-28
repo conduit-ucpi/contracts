@@ -280,8 +280,14 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         require(msg.sender == SELLER || msg.sender == GAS_PAYER, "Unauthorized");
         _;
     }
-    
-    
+
+    // ⚡ DEPOSIT PROTECTION: Only BUYER can deposit funds (platform can help with gas)
+    modifier onlyBuyerOrGasPayer() {
+        require(msg.sender == BUYER || msg.sender == GAS_PAYER, "Unauthorized");
+        _;
+    }
+
+
     modifier initialized() {
         require(_state != 255, "Not initialized");
         _;
@@ -328,27 +334,28 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     
     /**
      * 💰 BUYER DEPOSITS MONEY - THE ESCROW BEGINS
-     * 
-     * 🔒 SECURITY GUARANTEE: This function can ONLY be called by the BUYER
-     * 
-     * What happens when BUYER deposits:
+     *
+     * 🔒 SECURITY GUARANTEE: This function can be called by the BUYER or GAS_PAYER (platform)
+     *
+     * What happens when funds are deposited:
      * 1. BUYER's money is LOCKED in this contract (not sent to SELLER yet)
-     * 2. Platform gets their small fee immediately (shown upfront)  
+     * 2. Platform gets their small fee immediately (shown upfront)
      * 3. The remaining money stays LOCKED until expiry or dispute resolution
      * 4. SELLER cannot access the money until the time expires (unless dispute happens)
-     * 
+     *
      * 🛡️ MONEY PROTECTION:
      * ✅ Money is safe from everyone (even the platform) except BUYER and SELLER
      * ✅ SELLER must wait for expiry time to get paid
      * ✅ BUYER can dispute at any time to get protection
      * ✅ Platform fee is transparent and fixed upfront
-     * 
+     * ✅ Funds always come from BUYER's wallet (even if GAS_PAYER initiates)
+     *
      * After this function:
      * - Total deposited: {AMOUNT}
-     * - Platform gets: {CREATOR_FEE} 
+     * - Platform gets: {CREATOR_FEE}
      * - Escrowed for BUYER/SELLER: {AMOUNT - CREATOR_FEE}
      */
-    function depositFunds() external onlyBuyer initialized nonReentrant {
+    function depositFunds() external onlyBuyerOrGasPayer initialized nonReentrant {
         require(_state == 0, "Already funded or claimed");
 
         uint256 escrowAmount = AMOUNT - CREATOR_FEE;
@@ -360,14 +367,14 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             _state = 4; // claimed - instant transfer complete
 
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
-            emit FundsDeposited(msg.sender, escrowAmount, block.timestamp);
+            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
             if (CREATOR_FEE > 0) {
                 emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
             }
             emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
 
             // 🔒 STEP 2: BUYER's money is transferred to this contract temporarily
-            tokenAddress.safeTransferFrom(msg.sender, address(this), AMOUNT);
+            tokenAddress.safeTransferFrom(BUYER, address(this), AMOUNT);
 
             // 💳 STEP 3: Platform gets their fee (transparent and upfront)
             if (CREATOR_FEE > 0) {
@@ -381,13 +388,13 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             _state = 1; // funded - money is now LOCKED in escrow
 
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
-            emit FundsDeposited(msg.sender, escrowAmount, block.timestamp);
+            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
             if (CREATOR_FEE > 0) {
                 emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
             }
 
             // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
-            tokenAddress.safeTransferFrom(msg.sender, address(this), AMOUNT);
+            tokenAddress.safeTransferFrom(BUYER, address(this), AMOUNT);
 
             // 💳 STEP 3: Platform gets their fee (transparent and upfront)
             // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
