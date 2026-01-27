@@ -190,36 +190,45 @@ contract EscrowContractTest is Test {
         escrow.raiseDispute();
     }
     
-    function testResolveDispute() public {
+    function testResolveDisputeViaVoting() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         vm.prank(buyer);
         escrow.raiseDispute();
-        
+
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
-        
+
+        // Buyer and admin vote for 100% to buyer
+        vm.prank(buyer);
+        escrow.submitResolutionVote(100);
+
         vm.prank(gasPayer);
-        escrow.resolveDispute(100, 0); // 100% to buyer
-        
+        escrow.submitResolutionVote(100);
+
         assertTrue(escrow.isClaimed());
-        assertTrue(escrow.isClaimed());
+        assertTrue(escrow.consensusReached());
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore + (AMOUNT - CREATOR_FEE));
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
-    
-    function testOnlyGasPayerCanResolveDispute() public {
+
+    function testAllPartiesCanVote() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         vm.prank(buyer);
         escrow.raiseDispute();
-        
+
+        // All parties can vote
         vm.prank(buyer);
-        vm.expectRevert("Only gas payer can call");
-        escrow.resolveDispute(100, 0); // 100% to buyer
-        
+        escrow.submitResolutionVote(60);
+
         vm.prank(seller);
-        vm.expectRevert("Only gas payer can call");
-        escrow.resolveDispute(100, 0); // 100% to buyer
+        escrow.submitResolutionVote(40);
+
+        vm.prank(gasPayer);
+        escrow.submitResolutionVote(50);
+
+        // No consensus yet since all votes differ
+        assertFalse(escrow.consensusReached());
     }
     
     function testClaimFundsAfterExpiry() public {
@@ -439,8 +448,8 @@ contract EscrowContractTest is Test {
         escrow.claimFunds();
         
         vm.prank(gasPayer);
-        vm.expectRevert("Not disputed");
-        escrow.resolveDispute(100, 0); // 100% to buyer
+        vm.expectRevert("Contract must be disputed");
+        escrow.submitResolutionVote(100);
     }
     
     
@@ -495,18 +504,21 @@ contract EscrowContractTest is Test {
     
     function testResolveDisputeWithCreatorFee() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         // Buyer raises dispute
         vm.prank(buyer);
         escrow.raiseDispute();
-        
+
         // Record initial buyer balance
         uint256 initialBuyerBalance = usdc.balanceOf(buyer);
-        
-        // Gas payer resolves dispute in favor of buyer
+
+        // Resolve dispute via voting (buyer and admin vote for 100% to buyer)
+        vm.prank(buyer);
+        escrow.submitResolutionVote(100);
+
         vm.prank(gasPayer);
-        escrow.resolveDispute(100, 0); // 100% to buyer
-        
+        escrow.submitResolutionVote(100);
+
         // Buyer should receive amount minus creator fee
         assertEq(usdc.balanceOf(buyer), initialBuyerBalance + (AMOUNT - CREATOR_FEE));
         assertTrue(escrow.isClaimed());
@@ -514,65 +526,67 @@ contract EscrowContractTest is Test {
     
     function testResolveDisputeWithSplit() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         // Buyer raises dispute
         vm.prank(buyer);
         escrow.raiseDispute();
-        
+
         // Record initial balances
         uint256 initialBuyerBalance = usdc.balanceOf(buyer);
         uint256 initialSellerBalance = usdc.balanceOf(seller);
-        
-        // Gas payer resolves dispute with 60/40 split (buyer/seller)
-        vm.prank(gasPayer);
-        escrow.resolveDispute(60, 40);
-        
+
+        // Resolve via voting with 60/40 split (buyer and seller agree)
+        vm.prank(buyer);
+        escrow.submitResolutionVote(60);
+
+        vm.prank(seller);
+        escrow.submitResolutionVote(60);
+
         uint256 escrowAmount = AMOUNT - CREATOR_FEE;
         uint256 expectedBuyerAmount = (escrowAmount * 60) / 100;
         uint256 expectedSellerAmount = escrowAmount - expectedBuyerAmount;
-        
+
         // Check balances
         assertEq(usdc.balanceOf(buyer), initialBuyerBalance + expectedBuyerAmount);
         assertEq(usdc.balanceOf(seller), initialSellerBalance + expectedSellerAmount);
         assertTrue(escrow.isClaimed());
     }
-    
+
     function testResolveDisputeFullySeller() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         // Buyer raises dispute
         vm.prank(buyer);
         escrow.raiseDispute();
-        
+
         // Record initial balances
         uint256 initialBuyerBalance = usdc.balanceOf(buyer);
         uint256 initialSellerBalance = usdc.balanceOf(seller);
-        
-        // Gas payer resolves dispute 100% to seller
+
+        // Resolve via voting 0% to buyer (100% to seller)
+        vm.prank(seller);
+        escrow.submitResolutionVote(0);
+
         vm.prank(gasPayer);
-        escrow.resolveDispute(0, 100);
-        
+        escrow.submitResolutionVote(0);
+
         // Check balances - buyer should get nothing, seller gets all
         assertEq(usdc.balanceOf(buyer), initialBuyerBalance);
         assertEq(usdc.balanceOf(seller), initialSellerBalance + (AMOUNT - CREATOR_FEE));
         assertTrue(escrow.isClaimed());
     }
-    
-    function testResolveDisputeInvalidPercentages() public {
+
+    function testVoteInvalidPercentage() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         // Buyer raises dispute
         vm.prank(buyer);
         escrow.raiseDispute();
-        
-        // Test percentages that don't sum to 100
-        vm.prank(gasPayer);
-        vm.expectRevert("Percentages must sum to 100");
-        escrow.resolveDispute(50, 40); // Only sums to 90
-        
-        vm.prank(gasPayer);
-        vm.expectRevert("Percentages must sum to 100");
-        escrow.resolveDispute(60, 50); // Sums to 110
+
+        // Test invalid percentage > 100
+        vm.prank(buyer);
+        vm.expectRevert("Invalid percentage");
+        escrow.submitResolutionVote(101);
     }
     
     function testCannotDisputeAfterExpiry() public {

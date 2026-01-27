@@ -253,13 +253,24 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     
     // 🔐 INTERNAL STATE: Tracks contract progress (cannot be manipulated externally)
     uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
-    
+
+    // ⚖️  VOTING STATE: 2-of-3 voting resolution system
+    struct ResolutionVote {
+        uint256 buyerPercentage;  // 0-100: % of funds to refund to buyer
+        bool hasVoted;
+        uint256 timestamp;
+    }
+
+    mapping(address => ResolutionVote) public resolutionVotes;
+    bool public consensusReached;
+
     // 📢 PUBLIC EVENTS: These events prove what happened (recorded permanently on blockchain)
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
     event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
     event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
+    event VoteSubmitted(address indexed voter, uint256 buyerPercentage);
     
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
     
@@ -448,143 +459,136 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     }
     
 /**
- * ⚖️  DISPUTE RESOLUTION - NEGOTIATION FIRST, MEDIATION IF NEEDED
- * 
- * 🎯 THIS IS THE INTENDED DESIGN - NOT A COMPROMISE
- * 
- * This contract uses trusted mediation BY DESIGN because it provides the best
- * real-world user experience for the vast majority of escrow transactions.
- * 
+ * ⚖️  DISPUTE RESOLUTION - 2-OF-3 VOTING SYSTEM
+ *
+ * 🎯 DECENTRALIZED DISPUTE RESOLUTION THROUGH VOTING
+ *
+ * This contract uses a 2-of-3 voting mechanism where buyer, seller, and admin
+ * can each vote on the resolution percentage. When any 2 votes agree, the
+ * resolution executes automatically.
+ *
  * 🔐 WHAT THE CODE GUARANTEES (mathematically enforced):
  * ✅ Platform CANNOT take disputed funds for themselves
- * ✅ Platform CANNOT send funds to addresses other than buyer/seller  
+ * ✅ Platform CANNOT send funds to addresses other than buyer/seller
  * ✅ Platform CANNOT change buyer/seller addresses
- * ✅ Percentages MUST sum to exactly 100%
+ * ✅ Percentages MUST be <= 100%
  * ✅ All escrowed funds MUST be distributed to buyer and/or seller
  * ✅ Platform gets ZERO extra payment from disputes (only initial fee)
- * 
- * 🤝 HOW DISPUTE RESOLUTION WORKS:
- * 
+ * ✅ Votes are immutable once consensus is reached
+ *
+ * 🤝 HOW VOTING WORKS:
+ *
  * STEP 1 - Buyer Raises Dispute (On-Chain):
- * ✅ Buyer calls raiseDispute() - funds are now frozen
- * ✅ Seller cannot claim until dispute is resolved
+ * ✅ Buyer calls raiseDispute() → funds are now frozen
+ * ✅ Seller cannot claim until resolved
  * ✅ This protects buyer from seller taking money for undelivered goods
- * 
- * STEP 2 - Off-Chain Negotiation (FREE - No Gas Costs):
- * ✅ Platform provides dispute interface where both parties can communicate
- * ✅ Buyer suggests refund amount (e.g., "Give me back 80%, keep 20%")
- * ✅ Seller can accept, reject, or counter-offer (e.g., "No, 40% refund is fair")
- * ✅ This goes back and forth until they reach agreement
- * ✅ Most disputes resolve here - no gas fees, fast resolution
- * 
- * STEP 3A - Mutual Agreement Reached:
- * ✅ Both parties agree on the split (e.g., 60% buyer, 40% seller)
- * ✅ Platform executes the AGREED-UPON split by calling this function
- * ✅ Contract distributes funds according to their agreement
- * 
- * STEP 3B - Mediation Needed (If Negotiation Fails):
- * ✅ If parties cannot agree after reasonable negotiation period
- * ✅ If one party ghosts or refuses to negotiate in good faith
- * ✅ Platform reviews evidence submitted by both parties
- * ✅ Platform makes fair determination based on:
- *    - Published dispute resolution policies
- *    - Evidence (screenshots, tracking, messages, etc.)
- *    - Terms of the original agreement
- *    - Platform's experience with similar cases
- * ✅ Platform calls this function with the mediated split
- * ✅ Contract enforces the split immediately
- * 
+ *
+ * STEP 2 - Voting Phase:
+ * ✅ Buyer, seller, and admin can each submit their vote
+ * ✅ All parties vote on: "What % of funds should be refunded to buyer?"
+ * ✅ Votes can be changed until 2 votes match (then consensus is reached)
+ * ✅ Admin is trusted and can vote anytime
+ *
+ * STEP 3 - Consensus & Execution:
+ * ✅ When any 2 votes agree (buyer+seller, buyer+admin, or seller+admin)
+ * ✅ Consensus is reached and votes become immutable
+ * ✅ Resolution executes automatically with the agreed percentage
+ * ✅ Funds distributed immediately
+ *
  * 🛡️ WHY THIS DESIGN:
- * 
- * ✅ PRACTICAL: Most users WANT "someone to call" when there's a problem
- * ✅ EFFICIENT: Free negotiation off-chain, only pay gas for final resolution
- * ✅ FAIR: Encourages parties to negotiate (platform prefers mutual agreement)
- * ✅ FAMILIAR: Works like PayPal, eBay, Stripe - proven user experience
+ *
+ * ✅ PRACTICAL: Encourages parties to negotiate and agree
+ * ✅ FAIR: Admin cannot force resolution alone (needs 1 party agreement)
  * ✅ FLEXIBLE: Handles nuanced situations (partial delivery, quality issues)
- * ✅ DEADLOCK-FREE: Guarantees resolution even if one party disappears
- * 
- * ❌ WHY NOT PURE ON-CHAIN NEGOTIATION:
- * • High gas costs for every offer/counter-offer (expensive for users)
- * • Vulnerable to griefing attacks (bad actor spams lowball offers)
- * • Funds stuck forever if one party ghosts (no resolution mechanism)
- * • No human judgment for complex "he-said-she-said" situations
- * • Poor UX compared to traditional escrow services
- * 
- * ❌ WHY NOT FULLY DECENTRALIZED (Kleros/Aragon):
- * • Excellent for trustless scenarios, but adds complexity and cost
- * • Slower resolution (jury selection, voting periods, appeals)
- * • Higher costs (jury fees + gas for multiple voting transactions)
- * • Overkill for simple "item not delivered" disputes
- * • We optimize for the 95% of cases that are straightforward
- * 
- * ⚖️ WHAT PLATFORM CAN DO (requires trust in platform):
- * 🤝 Decide split percentage when negotiation fails
- *    - Reviews evidence from both parties
- *    - Applies published dispute policies
- *    - Makes judgment call on fair outcome
- *    - Can favor buyer (100% refund) if seller clearly wrong
- *    - Can favor seller (100% payment) if buyer clearly wrong  
- *    - Can split (e.g., 70/30) if both parties partly at fault
- * 
- * ⚠️  TRUST ASSUMPTION:
- * This system works best when:
- * ✓ Platform has published, transparent dispute policies
- * ✓ Platform has track record of fair dispute resolutions
- * ✓ Platform encourages mutual agreement (doesn't want to mediate everything)
- * ✓ Users can verify platform's dispute history before transacting
- * 
- * Users should check:
- * • Platform's dispute resolution policy (clear and public?)
- * • Historical dispute outcomes (consistently fair?)
- * • Platform operator reputation (established identity?)
- * • User reviews and testimonials (happy customers?)
- * 
+ * ✅ TRANSPARENT: All votes visible on-chain
+ * ✅ DEADLOCK-FREE: Admin can break deadlock by agreeing with one party
+ *
  * 💰 DISTRIBUTION MATH (enforced by code):
  * Total escrowed = (AMOUNT - CREATOR_FEE)
- * Buyer receives = (Total × buyerPercentage) ÷ 100
- * Seller receives = (Total × sellerPercentage) ÷ 100
+ * Buyer receives = (Total × agreedPercentage) ÷ 100
+ * Seller receives = Total - Buyer amount
  * Platform receives = 0 (already got CREATOR_FEE at deposit)
- * Sum = 100% (enforced by require statement)
- * 
+ *
  * This approach combines BLOCKCHAIN SECURITY (code-guaranteed fund safety)
- * with PRACTICAL UX (human judgment when needed). It's honest about trade-offs
- * and optimized for real-world escrow use cases.
+ * with PRACTICAL UX (voting-based resolution). It's transparent and fair.
  */
-    function resolveDispute(uint256 buyerPercentage, uint256 sellerPercentage) external onlyGasPayer initialized nonReentrant {
-        require(_state == 2, "Not disputed");
-        require(buyerPercentage + sellerPercentage == 100, "Percentages must sum to 100");
+    function submitResolutionVote(uint256 _buyerPercentage) external initialized {
+        require(_state == 2, "Contract must be disputed");
+        require(!consensusReached, "Consensus already reached");
+        require(_buyerPercentage <= 100, "Invalid percentage");
+        require(
+            msg.sender == BUYER || msg.sender == SELLER || msg.sender == GAS_PAYER,
+            "Not authorized to vote"
+        );
 
-        // 🔐 CRITICAL SECURITY NOTE: This function can ONLY be called if the BUYER raised a dispute.
-        //    The admin cannot initiate disputes or interfere with non-disputed transactions.
-        //    Therefore, the primary risk is NOT "admin colludes with seller to steal from buyer"
-        //    but rather "admin colludes with dishonest buyer to deny legitimate seller payment."
-        //    SELLERS bear more trust risk in this system than BUYERS.
-        
+        // All parties can vote anytime - votes can be changed until consensus
+        resolutionVotes[msg.sender] = ResolutionVote({
+            buyerPercentage: _buyerPercentage,
+            hasVoted: true,
+            timestamp: block.timestamp
+        });
+
+        emit VoteSubmitted(msg.sender, _buyerPercentage);
+
+        _checkAndExecuteConsensus();
+    }
+
+    function _checkAndExecuteConsensus() internal {
+        uint256 buyerVote = resolutionVotes[BUYER].buyerPercentage;
+        uint256 sellerVote = resolutionVotes[SELLER].buyerPercentage;
+        uint256 adminVote = resolutionVotes[GAS_PAYER].buyerPercentage;
+
+        bool buyerVoted = resolutionVotes[BUYER].hasVoted;
+        bool sellerVoted = resolutionVotes[SELLER].hasVoted;
+        bool adminVoted = resolutionVotes[GAS_PAYER].hasVoted;
+
+        uint256 agreedPercentage;
+        bool hasConsensus = false;
+
+        // Check all 2-of-3 combinations
+        if (buyerVoted && sellerVoted && buyerVote == sellerVote) {
+            agreedPercentage = buyerVote;
+            hasConsensus = true;
+        } else if (buyerVoted && adminVoted && buyerVote == adminVote) {
+            agreedPercentage = buyerVote;
+            hasConsensus = true;
+        } else if (sellerVoted && adminVoted && sellerVote == adminVote) {
+            agreedPercentage = sellerVote;
+            hasConsensus = true;
+        }
+
+        if (hasConsensus) {
+            consensusReached = true;
+            _executeResolution(agreedPercentage);
+        }
+    }
+
+    function _executeResolution(uint256 _buyerPercentage) internal nonReentrant {
         _state = 4; // claimed (resolved) - dispute is now final
-        
+
         // 💰 Calculate the total money available for BUYER and SELLER
         uint256 escrowAmount = AMOUNT - CREATOR_FEE;
-        uint256 buyerAmount = (escrowAmount * buyerPercentage) / 100;
+        uint256 buyerAmount = (escrowAmount * _buyerPercentage) / 100;
         uint256 sellerAmount = escrowAmount - buyerAmount; // Ensures all money is distributed
-        
+
         // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
-        emit DisputeResolved(buyerPercentage, sellerPercentage, block.timestamp);
+        emit DisputeResolved(_buyerPercentage, 100 - _buyerPercentage, block.timestamp);
         emit FundsClaimed(BUYER, buyerAmount, block.timestamp);
         if (sellerAmount > 0) {
             emit FundsClaimed(SELLER, sellerAmount, block.timestamp);
         }
-        
+
         // 🔒 STEP 2: Send BUYER their share (if any) - money can ONLY go to BUYER address
         if (buyerAmount > 0) {
             tokenAddress.safeTransfer(BUYER, buyerAmount);
         }
-        
-        // 🔒 STEP 3: Send SELLER their share (if any) - money can ONLY go to SELLER address  
+
+        // 🔒 STEP 3: Send SELLER their share (if any) - money can ONLY go to SELLER address
         if (sellerAmount > 0) {
             tokenAddress.safeTransfer(SELLER, sellerAmount);
         }
-        
-        // ✅ SECURITY VERIFICATION: At this point, 100% of escrowed money has been 
+
+        // ✅ SECURITY VERIFICATION: At this point, 100% of escrowed money has been
         //    distributed to BUYER and SELLER. Platform cannot access any of it.
     }
     
