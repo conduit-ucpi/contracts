@@ -111,10 +111,8 @@ contract VotingResolutionTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(60);
 
-        (uint256 percentage, bool hasVoted, uint256 timestamp) = escrow.resolutionVotes(buyer);
+        uint8 percentage = escrow.resolutionVotes(buyer);
         assertEq(percentage, 60);
-        assertTrue(hasVoted);
-        assertEq(timestamp, block.timestamp);
     }
 
     function testSellerCanVote() public {
@@ -123,10 +121,8 @@ contract VotingResolutionTest is Test {
         vm.prank(seller);
         escrow.submitResolutionVote(40);
 
-        (uint256 percentage, bool hasVoted, uint256 timestamp) = escrow.resolutionVotes(seller);
+        uint8 percentage = escrow.resolutionVotes(seller);
         assertEq(percentage, 40);
-        assertTrue(hasVoted);
-        assertEq(timestamp, block.timestamp);
     }
 
     function testAdminCanVote() public {
@@ -135,10 +131,8 @@ contract VotingResolutionTest is Test {
         vm.prank(admin);
         escrow.submitResolutionVote(50);
 
-        (uint256 percentage, bool hasVoted, uint256 timestamp) = escrow.resolutionVotes(admin);
+        uint8 percentage = escrow.resolutionVotes(admin);
         assertEq(percentage, 50);
-        assertTrue(hasVoted);
-        assertEq(timestamp, block.timestamp);
     }
 
     function testUnauthorizedCannotVote() public {
@@ -303,14 +297,14 @@ contract VotingResolutionTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(80);
 
-        (uint256 percentage1, , ) = escrow.resolutionVotes(buyer);
+        uint8 percentage1 = escrow.resolutionVotes(buyer);
         assertEq(percentage1, 80);
 
         // Buyer changes vote to 60%
         vm.prank(buyer);
         escrow.submitResolutionVote(60);
 
-        (uint256 percentage2, , ) = escrow.resolutionVotes(buyer);
+        uint8 percentage2 = escrow.resolutionVotes(buyer);
         assertEq(percentage2, 60);
 
         // Seller agrees with new vote
@@ -345,7 +339,8 @@ contract VotingResolutionTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(80);
 
-        (, , uint256 timestamp1) = escrow.resolutionVotes(buyer);
+        uint8 percentage1 = escrow.resolutionVotes(buyer);
+        assertEq(percentage1, 80);
 
         // Warp time forward
         vm.warp(block.timestamp + 1 hours);
@@ -354,9 +349,9 @@ contract VotingResolutionTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(60);
 
-        (, , uint256 timestamp2) = escrow.resolutionVotes(buyer);
-
-        assertGt(timestamp2, timestamp1);
+        uint8 percentage2 = escrow.resolutionVotes(buyer);
+        assertEq(percentage2, 60);
+        // Note: Timestamp tracking removed in gas optimization, but vote changes still work
     }
 
     // ========== RESOLUTION EXECUTION TESTS ==========
@@ -507,9 +502,9 @@ contract VotingResolutionTest is Test {
         assertTrue(escrow.consensusReached());
         assertTrue(escrow.isClaimed());
 
-        // Seller never voted
-        (, bool sellerVoted, ) = escrow.resolutionVotes(seller);
-        assertFalse(sellerVoted);
+        // Seller never voted (will be 255 = not voted)
+        uint8 sellerVote = escrow.resolutionVotes(seller);
+        assertEq(sellerVote, 255);
     }
 
     function testVotingWithZeroAmount() public {
@@ -519,9 +514,8 @@ contract VotingResolutionTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(0);
 
-        (uint256 percentage, bool hasVoted, ) = escrow.resolutionVotes(buyer);
+        uint8 percentage = escrow.resolutionVotes(buyer);
         assertEq(percentage, 0);
-        assertTrue(hasVoted);
     }
 
     function testVotingWith100Percent() public {
@@ -531,9 +525,8 @@ contract VotingResolutionTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(100);
 
-        (uint256 percentage, bool hasVoted, ) = escrow.resolutionVotes(buyer);
+        uint8 percentage = escrow.resolutionVotes(buyer);
         assertEq(percentage, 100);
-        assertTrue(hasVoted);
     }
 
     // ========== COMPREHENSIVE INTEGRATION TEST ==========
