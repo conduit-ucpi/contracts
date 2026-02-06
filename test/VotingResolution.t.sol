@@ -139,7 +139,7 @@ contract VotingResolutionTest is Test {
         EscrowContract escrow = createDisputedEscrow();
 
         vm.prank(unauthorized);
-        vm.expectRevert("Not authorized to vote");
+        vm.expectRevert(EscrowContract.NotAuthorizedToVote.selector);
         escrow.submitResolutionVote(50);
     }
 
@@ -164,7 +164,7 @@ contract VotingResolutionTest is Test {
 
         // Try to vote without dispute
         vm.prank(buyer);
-        vm.expectRevert("Contract must be disputed");
+        vm.expectRevert(EscrowContract.ContractMustBeDisputed.selector);
         escrow.submitResolutionVote(60);
     }
 
@@ -172,7 +172,7 @@ contract VotingResolutionTest is Test {
         EscrowContract escrow = createDisputedEscrow();
 
         vm.prank(buyer);
-        vm.expectRevert("Invalid percentage");
+        vm.expectRevert(EscrowContract.InvalidPercentage.selector);
         escrow.submitResolutionVote(101);
     }
 
@@ -328,7 +328,7 @@ contract VotingResolutionTest is Test {
 
         // Try to change vote after consensus - state is now "claimed" (4) not "disputed" (2)
         vm.prank(buyer);
-        vm.expectRevert("Contract must be disputed");
+        vm.expectRevert(EscrowContract.ContractMustBeDisputed.selector);
         escrow.submitResolutionVote(80);
     }
 
@@ -485,7 +485,7 @@ contract VotingResolutionTest is Test {
 
         // Admin can't vote after consensus - state is now "claimed" (4)
         vm.prank(admin);
-        vm.expectRevert("Contract must be disputed");
+        vm.expectRevert(EscrowContract.ContractMustBeDisputed.selector);
         escrow.submitResolutionVote(55);
     }
 

@@ -65,7 +65,8 @@ contract EscrowContractFactoryTest is Test {
         address indexed buyer,
         address indexed seller,
         uint256 amount,
-        uint256 expiryTimestamp
+        uint256 expiryTimestamp,
+        string description
     );
     
     function setUp() public {
@@ -127,8 +128,8 @@ contract EscrowContractFactoryTest is Test {
         assertEq(escrow.GAS_PAYER(), owner); // owner is the gas payer
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
-        assertEq(escrow.DESCRIPTION(), description);
-        
+        // Description no longer stored in contract (emitted in events only to save gas)
+
         // Contract starts unfunded - no USDC transferred yet
         assertEq(usdc.balanceOf(escrowAddress), 0);
         assertEq(usdc.balanceOf(buyer), AMOUNT * 10); // buyer's balance unchanged
@@ -170,7 +171,7 @@ contract EscrowContractFactoryTest is Test {
     
     function testOnlyOwnerCanCreateEscrow() public {
         vm.prank(other);
-        vm.expectRevert("Only owner");
+        vm.expectRevert(EscrowContractFactory.OnlyOwner.selector);
         factory.createEscrowContract(
             address(usdc),
             buyer,
@@ -183,8 +184,8 @@ contract EscrowContractFactoryTest is Test {
     
     function testCreateEscrowValidation() public {
         vm.startPrank(owner);
-        
-        vm.expectRevert("Invalid token address");
+
+        vm.expectRevert(EscrowContractFactory.InvalidTokenAddress.selector);
         factory.createEscrowContract(
             address(0),
             buyer,
@@ -193,8 +194,8 @@ contract EscrowContractFactoryTest is Test {
             expiryTimestamp,
             description
         );
-        
-        vm.expectRevert("Invalid buyer address");
+
+        vm.expectRevert(EscrowContractFactory.InvalidBuyerAddress.selector);
         factory.createEscrowContract(
             address(usdc),
             address(0),
@@ -203,8 +204,8 @@ contract EscrowContractFactoryTest is Test {
             expiryTimestamp,
             description
         );
-        
-        vm.expectRevert("Invalid seller address");
+
+        vm.expectRevert(EscrowContractFactory.InvalidSellerAddress.selector);
         factory.createEscrowContract(
             address(usdc),
             buyer,
@@ -213,9 +214,9 @@ contract EscrowContractFactoryTest is Test {
             expiryTimestamp,
             description
         );
-        
+
         // Test same buyer and seller
-        vm.expectRevert("Buyer and seller cannot be the same");
+        vm.expectRevert(EscrowContractFactory.BuyerSellerMustBeDifferent.selector);
         factory.createEscrowContract(
             address(usdc),
             buyer,
@@ -224,8 +225,8 @@ contract EscrowContractFactoryTest is Test {
             expiryTimestamp,
             description
         );
-        
-        vm.expectRevert("Amount must be greater than 0");
+
+        vm.expectRevert(EscrowContractFactory.AmountMustBeGreaterThanZero.selector);
         factory.createEscrowContract(
             address(usdc),
             buyer,
@@ -238,7 +239,7 @@ contract EscrowContractFactoryTest is Test {
         // Warp forward so block.timestamp > 1, then test with past timestamp
         vm.warp(block.timestamp + 100);
 
-        vm.expectRevert("Invalid expiry timestamp");
+        vm.expectRevert(EscrowContractFactory.InvalidExpiryTimestamp.selector);
         factory.createEscrowContract(
             address(usdc),
             buyer,
@@ -247,11 +248,11 @@ contract EscrowContractFactoryTest is Test {
             block.timestamp - 1, // This will be 100, which is less than current 101
             description
         );
-        
+
         // Test that amounts equal to minimum fee are rejected
         // For USDC (6 decimals), minimum fee is 300,000 (30% of 1,000,000)
         // So amount of exactly 300,000 should be rejected as it can't cover the fee
-        vm.expectRevert("Amount too small to cover minimum fee");
+        vm.expectRevert(EscrowContractFactory.AmountTooSmallForMinFee.selector);
         factory.createEscrowContract(
             address(usdc),
             buyer,
@@ -262,7 +263,7 @@ contract EscrowContractFactoryTest is Test {
         );
         
         // Test with invalid parameters - zero addresses
-        vm.expectRevert("Invalid buyer address");
+        vm.expectRevert(EscrowContractFactory.InvalidBuyerAddress.selector);
         factory.createEscrowContract(
             address(usdc),
             address(0),
@@ -282,9 +283,10 @@ contract EscrowContractFactoryTest is Test {
             buyer,
             seller,
             AMOUNT,
-            expiryTimestamp
+            expiryTimestamp,
+            description
         );
-        
+
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
@@ -328,12 +330,11 @@ contract EscrowContractFactoryTest is Test {
         
         EscrowContract contract1 = EscrowContract(escrow1);
         EscrowContract contract2 = EscrowContract(escrow2);
-        
+
         assertEq(contract1.AMOUNT(), AMOUNT);
         assertEq(contract2.AMOUNT(), AMOUNT * 2);
-        assertEq(contract1.DESCRIPTION(), firstDesc);
-        assertEq(contract2.DESCRIPTION(), secondDesc);
-        
+        // Description no longer stored in contract (emitted in events only to save gas)
+
         vm.stopPrank();
     }
     
@@ -432,8 +433,8 @@ contract EscrowContractFactoryTest is Test {
         // For USDC: no-fee threshold = 1,000, minimum fee = 300,000
         // So amounts between 1,001 and 300,000 should be rejected
         uint256 tooSmallAmount = 200000; // 0.2 USDC - above threshold but can't cover 0.3 USDC min fee
-        
-        vm.expectRevert("Amount too small to cover minimum fee");
+
+        vm.expectRevert(EscrowContractFactory.AmountTooSmallForMinFee.selector);
         factory.createEscrowContract(
             address(usdc),
             buyer,

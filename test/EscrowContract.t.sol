@@ -109,7 +109,7 @@ contract EscrowContractTest is Test {
         EscrowContract implementation = new EscrowContract();
         
         // Implementation should be disabled (state 255)
-        vm.expectRevert("Not initialized");
+        vm.expectRevert(EscrowContract.NotInitialized.selector);
         implementation.isFunded();
         
         // Test cloned contract initialization
@@ -122,7 +122,7 @@ contract EscrowContractTest is Test {
         assertEq(testEscrow.GAS_PAYER(), gasPayer);
         assertEq(testEscrow.AMOUNT(), AMOUNT);
         assertEq(testEscrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
-        assertEq(testEscrow.DESCRIPTION(), description);
+        // Description no longer stored in contract (emitted in events only to save gas)
     }
     
     function testSuccessfulDeployment() public {
@@ -146,7 +146,7 @@ contract EscrowContractTest is Test {
         assertEq(escrow.GAS_PAYER(), gasPayer);
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
-        assertEq(escrow.DESCRIPTION(), description);
+        // Description no longer stored in contract (emitted in events only to save gas)
         assertEq(escrow.createdAt(), deploymentTime); // Verify createdAt is set to deployment time
         assertFalse(escrow.isDisputed());
         assertFalse(escrow.isClaimed());
@@ -171,11 +171,11 @@ contract EscrowContractTest is Test {
         EscrowContract escrow = createAndFundEscrow();
         
         vm.prank(seller);
-        vm.expectRevert("Only buyer can call");
+        vm.expectRevert(EscrowContract.OnlyBuyer.selector);
         escrow.raiseDispute();
         
         vm.prank(gasPayer);
-        vm.expectRevert("Only buyer can call");
+        vm.expectRevert(EscrowContract.OnlyBuyer.selector);
         escrow.raiseDispute();
     }
     
@@ -186,7 +186,7 @@ contract EscrowContractTest is Test {
         escrow.raiseDispute();
         
         vm.prank(buyer);
-        vm.expectRevert("Not funded or already processed");
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.raiseDispute();
     }
     
@@ -264,7 +264,7 @@ contract EscrowContractTest is Test {
         EscrowContract escrow = createAndFundEscrow();
         
         vm.prank(seller);
-        vm.expectRevert("Not expired yet");
+        vm.expectRevert(EscrowContract.NotExpiredYet.selector);
         escrow.claimFunds();
     }
     
@@ -277,7 +277,7 @@ contract EscrowContractTest is Test {
         vm.warp(expiryTimestamp + 1);
         
         vm.prank(seller);
-        vm.expectRevert("Not funded or already processed");
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.claimFunds();
     }
     
@@ -290,7 +290,6 @@ contract EscrowContractTest is Test {
             address _seller,
             uint256 _amount,
             uint256 _expiryTimestamp,
-            string memory _description,
             uint8 _currentState,
             uint256 _currentTimestamp,
             uint256 _creatorFee,
@@ -302,7 +301,7 @@ contract EscrowContractTest is Test {
         assertEq(_seller, seller);
         assertEq(_amount, AMOUNT);
         assertEq(_expiryTimestamp, expiryTimestamp);
-        assertEq(keccak256(abi.encodePacked(_description)), keccak256(abi.encodePacked(description)));
+        // Description no longer stored in contract (emitted in events only to save gas)
         assertEq(_currentState, 1); // funded state
         assertEq(_currentTimestamp, block.timestamp);
         assertEq(_creatorFee, CREATOR_FEE);
@@ -395,7 +394,7 @@ contract EscrowContractTest is Test {
         usdc.approve(address(escrow), AMOUNT);
         
         vm.prank(buyer);
-        vm.expectRevert("Already funded or claimed");
+        vm.expectRevert(EscrowContract.AlreadyFundedOrClaimed.selector);
         escrow.depositFunds();
     }
     
@@ -413,7 +412,7 @@ contract EscrowContractTest is Test {
 
         // Seller cannot deposit (not buyer or gas payer)
         vm.prank(seller);
-        vm.expectRevert("Unauthorized");
+        vm.expectRevert(EscrowContract.OnlyBuyerOrGasPayer.selector);
         escrow.depositFunds();
 
         // Gas payer CAN deposit (onlyBuyerOrGasPayer modifier allows it)
@@ -438,17 +437,17 @@ contract EscrowContractTest is Test {
         EscrowContract escrow = EscrowContract(escrowAddress);
         
         vm.prank(buyer);
-        vm.expectRevert("Not funded or already processed");
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.raiseDispute();
         
         vm.warp(expiryTimestamp + 1);
         
         vm.prank(seller);
-        vm.expectRevert("Not funded or already processed");
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.claimFunds();
         
         vm.prank(gasPayer);
-        vm.expectRevert("Contract must be disputed");
+        vm.expectRevert(EscrowContract.ContractMustBeDisputed.selector);
         escrow.submitResolutionVote(100);
     }
     
@@ -585,7 +584,7 @@ contract EscrowContractTest is Test {
 
         // Test invalid percentage > 100
         vm.prank(buyer);
-        vm.expectRevert("Invalid percentage");
+        vm.expectRevert(EscrowContract.InvalidPercentage.selector);
         escrow.submitResolutionVote(101);
     }
     
@@ -600,7 +599,7 @@ contract EscrowContractTest is Test {
         
         // Attempt to raise dispute should fail
         vm.prank(buyer);
-        vm.expectRevert("Cannot dispute after expiry");
+        vm.expectRevert(EscrowContract.CannotDisputeAfterExpiry.selector);
         escrow.raiseDispute();
     }
     
@@ -629,7 +628,7 @@ contract EscrowContractTest is Test {
         assertFalse(escrow.canDispute());
         
         vm.prank(buyer);
-        vm.expectRevert("Cannot dispute after expiry");
+        vm.expectRevert(EscrowContract.CannotDisputeAfterExpiry.selector);
         escrow.raiseDispute();
     }
     
@@ -717,7 +716,7 @@ contract EscrowContractTest is Test {
         assertFalse(escrow.canDispute());
 
         vm.prank(buyer);
-        vm.expectRevert("Not funded or already processed");
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.raiseDispute();
     }
 
@@ -740,7 +739,7 @@ contract EscrowContractTest is Test {
 
         // Attempt to dispute before deposit should fail
         vm.prank(buyer);
-        vm.expectRevert("Not funded or already processed");
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.raiseDispute();
     }
 
@@ -768,7 +767,7 @@ contract EscrowContractTest is Test {
         assertFalse(escrow.canClaim());
 
         vm.prank(seller);
-        vm.expectRevert("Not funded or already processed");
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.claimFunds();
     }
 
@@ -829,7 +828,6 @@ contract EscrowContractTest is Test {
             address _seller,
             uint256 _amount,
             uint256 _expiryTimestamp,
-            string memory _description,
             uint8 _currentState,
             uint256 _currentTimestamp,
             uint256 _creatorFee,
@@ -855,7 +853,7 @@ contract EscrowContractTest is Test {
         escrow.depositFunds();
 
         // Check state after deposit
-        (, , , , , _currentState, , , , ) = escrow.getContractInfo();
+        (, , , , _currentState, , , , ) = escrow.getContractInfo();
         assertEq(_currentState, 4); // claimed state after instant transfer
     }
 
@@ -874,7 +872,7 @@ contract EscrowContractTest is Test {
         EscrowContract escrow = EscrowContract(escrowAddress);
 
         // Before deposit - state should be 0 (unfunded)
-        (, , , , , uint8 stateBefore, , , , ) = escrow.getContractInfo();
+        (, , , , uint8 stateBefore, , , , ) = escrow.getContractInfo();
         assertEq(stateBefore, 0);
 
         // Fund the escrow
@@ -884,7 +882,7 @@ contract EscrowContractTest is Test {
         escrow.depositFunds();
 
         // After deposit - state should be 4 (claimed) for instant transfer
-        (, , , , , uint8 stateAfter, , , , ) = escrow.getContractInfo();
+        (, , , , uint8 stateAfter, , , , ) = escrow.getContractInfo();
         assertEq(stateAfter, 4);
 
         // Verify contract is in claimed state

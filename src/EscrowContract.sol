@@ -236,7 +236,32 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  */
  contract EscrowContract is ReentrancyGuard {
     using SafeERC20 for IERC20;
-    
+
+    // Custom errors (saves gas compared to require strings)
+    error AlreadyInitialized();
+    error ImplementationCannotBeInitialized();
+    error InvalidTokenAddress();
+    error InvalidBuyerAddress();
+    error InvalidSellerAddress();
+    error InvalidGasPayerAddress();
+    error BuyerSellerMustBeDifferent();
+    error CreatorFeeMustBeLessThanAmount();
+    error NotInitialized();
+    error OnlyBuyer();
+    error OnlyGasPayer();
+    error OnlySellerOrGasPayer();
+    error OnlyBuyerOrGasPayer();
+    error AlreadyFundedOrClaimed();
+    error CannotDisputeInstantTransfer();
+    error CannotDisputeAfterExpiry();
+    error NotFundedOrAlreadyProcessed();
+    error InstantTransferAlreadyCompleted();
+    error NotExpiredYet();
+    error ConsensusAlreadyReached();
+    error InvalidPercentage();
+    error NotAuthorizedToVote();
+    error ContractMustBeDisputed();
+
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
     address public FACTORY;  // Factory contract that created this escrow - only it can initialize
     IERC20 public tokenAddress;     // The ERC20 token contract (USDC, USDT, DAI, etc.) - immutable after initialization
@@ -247,7 +272,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
     uint256 public AMOUNT;          // Total amount BUYER must deposit (includes platform fee)
     uint256 public EXPIRY_TIMESTAMP; // When SELLER can claim funds (if no dispute)
-    string public DESCRIPTION;      // Description of the transaction
+    // Description stored in events only (not in storage) to save ~20k gas
     uint256 public CREATOR_FEE;     // Small platform fee (deducted from AMOUNT, rest goes to BUYER/SELLER)
     uint256 public createdAt;       // Timestamp when the contract was created
     
@@ -276,31 +301,31 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     
     // ⚡ BUYER PROTECTION: Only the original BUYER can deposit money and raise disputes
     modifier onlyBuyer() {
-        require(msg.sender == BUYER, "Only buyer can call");
+        if (msg.sender != BUYER) revert OnlyBuyer();
         _;
     }
-    
+
     // ⚡ DISPUTE RESOLUTION: Only platform can resolve disputes (but money still goes to BUYER/SELLER)
     modifier onlyGasPayer() {
-        require(msg.sender == GAS_PAYER, "Only gas payer can call");
+        if (msg.sender != GAS_PAYER) revert OnlyGasPayer();
         _;
     }
-    
+
     // ⚡ CLAIM PROTECTION: Only SELLER can claim expired funds (platform can help with gas)
     modifier onlySellerOrGasPayer() {
-        require(msg.sender == SELLER || msg.sender == GAS_PAYER, "Unauthorized");
+        if (msg.sender != SELLER && msg.sender != GAS_PAYER) revert OnlySellerOrGasPayer();
         _;
     }
 
     // ⚡ DEPOSIT PROTECTION: Only BUYER can deposit funds (platform can help with gas)
     modifier onlyBuyerOrGasPayer() {
-        require(msg.sender == BUYER || msg.sender == GAS_PAYER, "Unauthorized");
+        if (msg.sender != BUYER && msg.sender != GAS_PAYER) revert OnlyBuyerOrGasPayer();
         _;
     }
 
 
     modifier initialized() {
-        require(_state != 255, "Not initialized");
+        if (_state == 255) revert NotInitialized();
         _;
     }
     
@@ -318,17 +343,16 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         address _gasPayer,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        string memory _description,
         uint256 _creatorFee
     ) external {
-        require(_state == 0, "Already initialized");
-        require(FACTORY == address(0), "Implementation cannot be initialized");
+        if (_state != 0) revert AlreadyInitialized();
+        if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
         FACTORY = msg.sender;  // Set the factory to the caller
-        require(_tokenAddress != address(0), "Invalid token address");
-        require(_buyer != address(0), "Invalid buyer address");
-        require(_seller != address(0), "Invalid seller address");
-        require(_gasPayer != address(0), "Invalid gas payer address");
-        require(_buyer != _seller, "Buyer and seller cannot be the same");
+        if (_tokenAddress == address(0)) revert InvalidTokenAddress();
+        if (_buyer == address(0)) revert InvalidBuyerAddress();
+        if (_seller == address(0)) revert InvalidSellerAddress();
+        if (_gasPayer == address(0)) revert InvalidGasPayerAddress();
+        if (_buyer == _seller) revert BuyerSellerMustBeDifferent();
 
         tokenAddress = IERC20(_tokenAddress);
         BUYER = _buyer;
@@ -336,10 +360,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         GAS_PAYER = _gasPayer;
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
-        DESCRIPTION = _description;
         CREATOR_FEE = _creatorFee;
         createdAt = block.timestamp;  // Set the creation timestamp
-        require(_creatorFee < _amount, "Creator fee must be less than amount");
+        if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
         _state = 0; // Set to unfunded state
 
         // Initialize votes as "not voted" (255)
@@ -372,9 +395,13 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      * - Escrowed for BUYER/SELLER: {AMOUNT - CREATOR_FEE}
      */
     function depositFunds() external onlyBuyerOrGasPayer initialized nonReentrant {
-        require(_state == 0, "Already funded or claimed");
+        if (_state != 0) revert AlreadyFundedOrClaimed();
 
-        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
+        uint256 escrowAmount;
+        unchecked {
+            // Safe: CREATOR_FEE < AMOUNT is checked in initialize
+            escrowAmount = AMOUNT - CREATOR_FEE;
+        }
 
         // Check if this is an instant transfer (expiry timestamp is 0)
         bool isInstantTransfer = EXPIRY_TIMESTAMP == 0;
@@ -449,9 +476,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      *          SELLER must wait for resolution.
      */
     function raiseDispute() external onlyBuyer initialized {
-        require(_state == 1, "Not funded or already processed");
-        require(EXPIRY_TIMESTAMP != 0, "Cannot dispute instant transfer");
-        require(block.timestamp < EXPIRY_TIMESTAMP, "Cannot dispute after expiry");
+        if (_state != 1) revert NotFundedOrAlreadyProcessed();
+        if (EXPIRY_TIMESTAMP == 0) revert CannotDisputeInstantTransfer();
+        if (block.timestamp >= EXPIRY_TIMESTAMP) revert CannotDisputeAfterExpiry();
         
         _state = 2; // disputed - money is now frozen until resolution
         
@@ -518,13 +545,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * with PRACTICAL UX (voting-based resolution). It's transparent and fair.
  */
     function submitResolutionVote(uint256 _buyerPercentage) external initialized {
-        require(_state == 2, "Contract must be disputed");
-        require(!consensusReached, "Consensus already reached");
-        require(_buyerPercentage <= 100, "Invalid percentage");
-        require(
-            msg.sender == BUYER || msg.sender == SELLER || msg.sender == GAS_PAYER,
-            "Not authorized to vote"
-        );
+        if (_state != 2) revert ContractMustBeDisputed();
+        if (consensusReached) revert ConsensusAlreadyReached();
+        if (_buyerPercentage > 100) revert InvalidPercentage();
+        if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != GAS_PAYER) revert NotAuthorizedToVote();
 
         // All parties can vote anytime - votes can be changed until consensus
         resolutionVotes[msg.sender].buyerPercentage = uint8(_buyerPercentage);
@@ -570,9 +594,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         _state = 4; // claimed (resolved) - dispute is now final
 
         // 💰 Calculate the total money available for BUYER and SELLER
-        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
-        uint256 buyerAmount = (escrowAmount * _buyerPercentage) / 100;
-        uint256 sellerAmount = escrowAmount - buyerAmount; // Ensures all money is distributed
+        uint256 escrowAmount;
+        uint256 buyerAmount;
+        uint256 sellerAmount;
+
+        unchecked {
+            // Safe: CREATOR_FEE < AMOUNT is checked in initialize
+            escrowAmount = AMOUNT - CREATOR_FEE;
+            buyerAmount = (escrowAmount * _buyerPercentage) / 100;
+            // Safe: buyerAmount <= escrowAmount by math (percentage <= 100)
+            sellerAmount = escrowAmount - buyerAmount;
+        }
 
         // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
         emit DisputeResolved(_buyerPercentage, 100 - _buyerPercentage, block.timestamp);
@@ -620,14 +652,18 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      * Platform already got their fee during deposit - they get NOTHING here
      */
     function claimFunds() external onlySellerOrGasPayer initialized nonReentrant {
-        require(_state == 1, "Not funded or already processed");
-        require(EXPIRY_TIMESTAMP != 0, "Instant transfer already completed");
-        require(block.timestamp >= EXPIRY_TIMESTAMP, "Not expired yet");
+        if (_state != 1) revert NotFundedOrAlreadyProcessed();
+        if (EXPIRY_TIMESTAMP == 0) revert InstantTransferAlreadyCompleted();
+        if (block.timestamp < EXPIRY_TIMESTAMP) revert NotExpiredYet();
         
         _state = 4; // claimed - transaction complete
-        
+
         // 💰 Calculate amount for SELLER (total minus platform fee that was already paid)
-        uint256 escrowAmount = AMOUNT - CREATOR_FEE;
+        uint256 escrowAmount;
+        unchecked {
+            // Safe: CREATOR_FEE < AMOUNT is checked in initialize
+            escrowAmount = AMOUNT - CREATOR_FEE;
+        }
         
         // 📝 STEP 1: Emit event before external call to prevent event-based reentrancy
         emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
@@ -643,7 +679,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         address _seller,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        string memory _description,
         uint8 _currentState,
         uint256 _currentTimestamp,
         uint256 _creatorFee,
@@ -655,7 +690,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             SELLER,
             AMOUNT,
             EXPIRY_TIMESTAMP,
-            DESCRIPTION,
             _state,
             block.timestamp,
             CREATOR_FEE,

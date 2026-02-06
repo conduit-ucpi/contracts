@@ -30,24 +30,39 @@ import {EscrowContract} from "./EscrowContract.sol";
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
 contract EscrowContractFactory {
-    
+
+    // Custom errors (saves gas compared to require strings)
+    error InvalidOwnerAddress();
+    error InvalidImplementationAddress();
+    error OnlyOwner();
+    error InvalidTokenAddress();
+    error InvalidBuyerAddress();
+    error InvalidSellerAddress();
+    error BuyerSellerMustBeDifferent();
+    error AmountMustBeGreaterThanZero();
+    error InvalidExpiryTimestamp();
+    error AmountTooSmallForMinFee();
+    error CreatorFeeMustBeLessThanAmount();
+
     // 🔒 IMMUTABLE FACTORY SETTINGS: These CANNOT be changed after deployment
     address public immutable OWNER;       // Platform address - can create contracts but NOT access money
     address public immutable IMPLEMENTATION; // Template contract - ensures all escrows have same security
     
     // 📢 PUBLIC EVENT: Records every escrow contract creation (permanent blockchain record)
+    // Description stored here instead of contract storage to save ~20k gas per deployment
     event ContractCreated(
         address indexed contractAddress,
         address indexed buyer,
         address indexed seller,
         uint256 amount,
-        uint256 expiryTimestamp
+        uint256 expiryTimestamp,
+        string description
     );
     
     constructor(address _owner, address _implementation) {
-        require(_owner != address(0), "Invalid owner address");
-        require(_implementation != address(0), "Invalid implementation address");
-        
+        if (_owner == address(0)) revert InvalidOwnerAddress();
+        if (_implementation == address(0)) revert InvalidImplementationAddress();
+
         OWNER = _owner;
         IMPLEMENTATION = _implementation;
     }
@@ -78,13 +93,13 @@ contract EscrowContractFactory {
         uint256 expiryTimestamp,
         string memory description
     ) external returns (address) {
-        require(msg.sender == OWNER, "Only owner");
-        require(tokenAddress != address(0), "Invalid token address");
-        require(buyer != address(0), "Invalid buyer address");
-        require(seller != address(0), "Invalid seller address");
-        require(buyer != seller, "Buyer and seller cannot be the same");
-        require(amount > 0, "Amount must be greater than 0");
-        require(expiryTimestamp == 0 || expiryTimestamp > block.timestamp, "Invalid expiry timestamp");
+        if (msg.sender != OWNER) revert OnlyOwner();
+        if (tokenAddress == address(0)) revert InvalidTokenAddress();
+        if (buyer == address(0)) revert InvalidBuyerAddress();
+        if (seller == address(0)) revert InvalidSellerAddress();
+        if (buyer == seller) revert BuyerSellerMustBeDifferent();
+        if (amount == 0) revert AmountMustBeGreaterThanZero();
+        if (expiryTimestamp != 0 && expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
         
         // 📊 Query token decimals and calculate dynamic fee
         uint8 decimals = IERC20Metadata(tokenAddress).decimals();
@@ -105,16 +120,16 @@ contract EscrowContractFactory {
             uint256 minFee = (oneUnit * 30) / 100;
             
             // Reject contracts that can't afford the minimum fee
-            require(amount > minFee, "Amount too small to cover minimum fee");
-            
+            if (amount <= minFee) revert AmountTooSmallForMinFee();
+
             // Calculate 1% of the amount
             uint256 onePercentFee = amount / 100;
-            
+
             // Use the greater of 1% or minimum fee
             creatorFee = onePercentFee > minFee ? onePercentFee : minFee;
-            
+
             // Ensure fee doesn't exceed the amount (should never happen with our logic, but safety check)
-            require(creatorFee < amount, "Creator fee must be less than amount");
+            if (creatorFee >= amount) revert CreatorFeeMustBeLessThanAmount();
         }
         
         // 🔐 Generate unique contract address (deterministic but unpredictable)
@@ -138,9 +153,9 @@ contract EscrowContractFactory {
             OWNER,           // Platform - can resolve disputes but NOT take money
             amount,
             expiryTimestamp,
-            description,
             creatorFee       // Platform fee (transparent and upfront)
         );
+        // Description is still emitted in ContractCreated event below (not stored in contract)
         
         EscrowContract newContract = EscrowContract(clone);
         
@@ -150,7 +165,8 @@ contract EscrowContractFactory {
             buyer,
             seller,
             amount,
-            expiryTimestamp
+            expiryTimestamp,
+            description
         );
         
         return address(newContract);
