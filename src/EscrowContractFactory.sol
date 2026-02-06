@@ -146,6 +146,7 @@ contract EscrowContractFactory {
         address clone = Clones.cloneDeterministic(IMPLEMENTATION, salt);
         
         // 🔒 Initialize with IMMUTABLE security settings
+        // Note: description is NOT passed to initialize - only emitted in event below
         EscrowContract(clone).initialize(
             tokenAddress,    // ERC20 token to be used for this escrow
             buyer,           // ONLY this address can deposit and dispute
@@ -155,7 +156,6 @@ contract EscrowContractFactory {
             expiryTimestamp,
             creatorFee       // Platform fee (transparent and upfront)
         );
-        // Description is still emitted in ContractCreated event below (not stored in contract)
         
         EscrowContract newContract = EscrowContract(clone);
         
