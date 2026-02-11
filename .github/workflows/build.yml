@@ -29,6 +29,10 @@ jobs:
           echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
           echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> .env
           echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> .env
+          # Only add FEE_RECIPIENT_ADDRESS if it's set
+          if [ -n "${{ secrets.FEE_RECIPIENT_ADDRESS }}" ]; then
+            echo "FEE_RECIPIENT_ADDRESS=${{ secrets.FEE_RECIPIENT_ADDRESS }}" >> .env
+          fi
 
       - name: Install dependencies
         run: |
