@@ -28,9 +28,11 @@ contract DeploymentScript is Script {
         console.log("Implementation deployed at:", address(implementation));
         
         // Deploy factory with implementation address
+        // feeRecipient defaults to relayerAddress (address(0) means use owner)
         EscrowContractFactory factory = new EscrowContractFactory(
             relayerAddress,
-            address(implementation)
+            address(implementation),
+            address(0) // feeRecipient defaults to owner
         );
         
         console.log("=================================================");

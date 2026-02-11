@@ -268,6 +268,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     address public BUYER;           // ONLY this address can deposit funds and raise disputes
     address public SELLER;          // ONLY this address can receive funds (after expiry or dispute)
     address public GAS_PAYER;       // Platform address - can ONLY resolve disputes, NOT take your money
+    address public FEE_RECIPIENT;   // Address that receives the platform fee
     
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
     uint256 public AMOUNT;          // Total amount BUYER must deposit (includes platform fee)
@@ -343,7 +344,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         address _gasPayer,
         uint256 _amount,
         uint256 _expiryTimestamp,
-        uint256 _creatorFee
+        uint256 _creatorFee,
+        address _feeRecipient
     ) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
@@ -358,6 +360,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         BUYER = _buyer;
         SELLER = _seller;
         GAS_PAYER = _gasPayer;
+        FEE_RECIPIENT = _feeRecipient;
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
         CREATOR_FEE = _creatorFee;
@@ -412,7 +415,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
             emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
             if (CREATOR_FEE > 0) {
-                emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
+                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
             }
             emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
 
@@ -421,7 +424,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
             // 💳 STEP 3: Platform gets their fee (transparent and upfront)
             if (CREATOR_FEE > 0) {
-                tokenAddress.safeTransfer(GAS_PAYER, CREATOR_FEE);
+                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
             }
 
             // 💰 STEP 4: Immediately transfer to SELLER (no escrow period)
@@ -433,7 +436,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
             emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
             if (CREATOR_FEE > 0) {
-                emit PlatformFeeCollected(GAS_PAYER, CREATOR_FEE, block.timestamp);
+                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
             }
 
             // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
@@ -442,7 +445,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             // 💳 STEP 3: Platform gets their fee (transparent and upfront)
             // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
             if (CREATOR_FEE > 0) {
-                tokenAddress.safeTransfer(GAS_PAYER, CREATOR_FEE);
+                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
             }
 
             // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER

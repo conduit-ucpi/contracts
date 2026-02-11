@@ -63,7 +63,7 @@ contract EscrowContractTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         EscrowContract implementation = new EscrowContract();
-        factory = new EscrowContractFactory(gasPayer, address(implementation));
+        factory = new EscrowContractFactory(gasPayer, address(implementation), address(0));
         
         expiryTimestamp = block.timestamp + 7 days;
         

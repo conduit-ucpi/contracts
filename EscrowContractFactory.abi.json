@@ -11,9 +11,27 @@
         "name": "_implementation",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "_feeRecipient",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "FEE_RECIPIENT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -162,9 +180,35 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      },
+      {
+        "name": "description",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
       }
     ],
     "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AmountMustBeGreaterThanZero",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AmountTooSmallForMinFee",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BuyerSellerMustBeDifferent",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "CreatorFeeMustBeLessThanAmount",
+    "inputs": []
   },
   {
     "type": "error",
@@ -186,5 +230,40 @@
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidBuyerAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidExpiryTimestamp",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidImplementationAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidOwnerAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSellerAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidTokenAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OnlyOwner",
+    "inputs": []
   }
 ]

@@ -47,6 +47,7 @@ contract EscrowContractFactory {
     // 🔒 IMMUTABLE FACTORY SETTINGS: These CANNOT be changed after deployment
     address public immutable OWNER;       // Platform address - can create contracts but NOT access money
     address public immutable IMPLEMENTATION; // Template contract - ensures all escrows have same security
+    address public immutable FEE_RECIPIENT; // Address that receives platform fees (defaults to OWNER if not set)
     
     // 📢 PUBLIC EVENT: Records every escrow contract creation (permanent blockchain record)
     // Description stored here instead of contract storage to save ~20k gas per deployment
@@ -59,12 +60,14 @@ contract EscrowContractFactory {
         string description
     );
     
-    constructor(address _owner, address _implementation) {
+    constructor(address _owner, address _implementation, address _feeRecipient) {
         if (_owner == address(0)) revert InvalidOwnerAddress();
         if (_implementation == address(0)) revert InvalidImplementationAddress();
 
         OWNER = _owner;
         IMPLEMENTATION = _implementation;
+        // Default to OWNER if feeRecipient not specified
+        FEE_RECIPIENT = _feeRecipient == address(0) ? _owner : _feeRecipient;
     }
     
     /**
@@ -154,7 +157,8 @@ contract EscrowContractFactory {
             OWNER,           // Platform - can resolve disputes but NOT take money
             amount,
             expiryTimestamp,
-            creatorFee       // Platform fee (transparent and upfront)
+            creatorFee,      // Platform fee (transparent and upfront)
+            FEE_RECIPIENT    // Address that receives the platform fee
         );
         
         EscrowContract newContract = EscrowContract(clone);

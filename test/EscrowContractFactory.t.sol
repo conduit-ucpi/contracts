@@ -73,7 +73,7 @@ contract EscrowContractFactoryTest is Test {
         usdc = new MockERC20();
         dai = new MockERC20();
         EscrowContract implementation = new EscrowContract();
-        factory = new EscrowContractFactory(owner, address(implementation));
+        factory = new EscrowContractFactory(owner, address(implementation), address(0)); // feeRecipient defaults to owner
         
         expiryTimestamp = block.timestamp + 7 days;
         
@@ -98,14 +98,16 @@ contract EscrowContractFactoryTest is Test {
     function testConstructorValidation() public {
         // Constructor should accept valid addresses without reverting
         EscrowContract impl = new EscrowContract();
-        EscrowContractFactory testFactory = new EscrowContractFactory(owner, address(impl));
+        EscrowContractFactory testFactory = new EscrowContractFactory(owner, address(impl), address(0));
         assertEq(testFactory.OWNER(), owner);
         assertEq(testFactory.IMPLEMENTATION(), address(impl));
+        assertEq(testFactory.FEE_RECIPIENT(), owner); // Should default to owner
     }
     
     function testSuccessfulDeployment() public view {
         assertEq(factory.OWNER(), owner);
         assertTrue(factory.IMPLEMENTATION() != address(0));
+        assertEq(factory.FEE_RECIPIENT(), owner); // Should default to owner
     }
     
     function testCreateEscrowContract() public {
@@ -126,6 +128,7 @@ contract EscrowContractFactoryTest is Test {
         assertEq(escrow.BUYER(), buyer); // buyer is the actual buyer
         assertEq(escrow.SELLER(), seller);
         assertEq(escrow.GAS_PAYER(), owner); // owner is the gas payer
+        assertEq(escrow.FEE_RECIPIENT(), owner); // owner is the fee recipient (default)
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         // Description no longer stored in contract (emitted in events only to save gas)
@@ -507,5 +510,126 @@ contract EscrowContractFactoryTest is Test {
         vm.prank(buyer);
         vm.expectRevert("Insufficient allowance");
         escrow.depositFunds();
+    }
+
+    function testCustomFeeRecipientInFactory() public {
+        // Test factory with custom fee recipient address
+        address customFeeRecipient = address(0x999);
+
+        EscrowContract impl = new EscrowContract();
+        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient);
+
+        assertEq(customFactory.OWNER(), owner);
+        assertEq(customFactory.FEE_RECIPIENT(), customFeeRecipient); // Should use custom fee recipient
+
+        // Create escrow contract and verify it inherits custom fee recipient
+        vm.prank(owner);
+        address escrowAddress = customFactory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "Custom fee recipient test"
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        assertEq(escrow.FEE_RECIPIENT(), customFeeRecipient); // Escrow should inherit custom fee recipient
+        assertEq(escrow.BUYER(), buyer);
+        assertEq(escrow.SELLER(), seller);
+        assertEq(escrow.GAS_PAYER(), owner); // GAS_PAYER remains the owner
+    }
+
+    function testDefaultFeeRecipientWhenAddressZero() public {
+        // Test that address(0) defaults to OWNER
+        EscrowContract impl = new EscrowContract();
+        EscrowContractFactory defaultFactory = new EscrowContractFactory(owner, address(impl), address(0));
+
+        assertEq(defaultFactory.FEE_RECIPIENT(), owner); // Should default to owner
+
+        // Create escrow contract and verify it uses owner as fee recipient
+        vm.prank(owner);
+        address escrowAddress = defaultFactory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "Default fee recipient test"
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        assertEq(escrow.FEE_RECIPIENT(), owner); // Escrow should use owner as fee recipient
+    }
+
+    function testAllEscrowsInheritSameFeeRecipient() public {
+        // Test that all escrows from same factory inherit same fee recipient
+        address customFeeRecipient = address(0x888);
+
+        EscrowContract impl = new EscrowContract();
+        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient);
+
+        vm.startPrank(owner);
+
+        // Create multiple escrow contracts
+        address escrow1 = customFactory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "First escrow"
+        );
+
+        address escrow2 = customFactory.createEscrowContract(
+            address(usdc),
+            address(0x7),
+            address(0x8),
+            AMOUNT * 2,
+            expiryTimestamp + 1 days,
+            "Second escrow"
+        );
+
+        vm.stopPrank();
+
+        // Both should have same fee recipient
+        assertEq(EscrowContract(escrow1).FEE_RECIPIENT(), customFeeRecipient);
+        assertEq(EscrowContract(escrow2).FEE_RECIPIENT(), customFeeRecipient);
+    }
+
+    function testFeeRecipientReceivesFee() public {
+        // Test that custom fee recipient actually receives the fee
+        address customFeeRecipient = address(0x777);
+
+        EscrowContract impl = new EscrowContract();
+        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient);
+
+        vm.prank(owner);
+        address escrowAddress = customFactory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "Fee test"
+        );
+
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        uint256 expectedFee = escrow.CREATOR_FEE();
+
+        // Approve escrow to spend buyer's tokens
+        vm.prank(buyer);
+        usdc.approve(escrowAddress, AMOUNT);
+
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(customFeeRecipient);
+
+        // Deposit funds as buyer
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        uint256 feeRecipientBalanceAfter = usdc.balanceOf(customFeeRecipient);
+
+        // Verify fee recipient received the fee
+        assertEq(feeRecipientBalanceAfter - feeRecipientBalanceBefore, expectedFee);
     }
 }

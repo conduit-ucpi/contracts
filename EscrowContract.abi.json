@@ -45,19 +45,6 @@
   },
   {
     "type": "function",
-    "name": "DESCRIPTION",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "string",
-        "internalType": "string"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "EXPIRY_TIMESTAMP",
     "inputs": [],
     "outputs": [
@@ -72,6 +59,19 @@
   {
     "type": "function",
     "name": "FACTORY",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "FEE_RECIPIENT",
     "inputs": [],
     "outputs": [
       {
@@ -104,19 +104,6 @@
         "name": "",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "USDC_TOKEN",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract IERC20"
       }
     ],
     "stateMutability": "view"
@@ -169,6 +156,19 @@
   },
   {
     "type": "function",
+    "name": "consensusReached",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "createdAt",
     "inputs": [],
     "outputs": [
@@ -213,11 +213,6 @@
         "internalType": "uint256"
       },
       {
-        "name": "_description",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
         "name": "_currentState",
         "type": "uint8",
         "internalType": "uint8"
@@ -236,6 +231,11 @@
         "name": "_createdAt",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "_tokenAddress",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -245,7 +245,7 @@
     "name": "initialize",
     "inputs": [
       {
-        "name": "_usdcToken",
+        "name": "_tokenAddress",
         "type": "address",
         "internalType": "address"
       },
@@ -275,14 +275,14 @@
         "internalType": "uint256"
       },
       {
-        "name": "_description",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
         "name": "_creatorFee",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "_feeRecipient",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -349,21 +349,48 @@
   },
   {
     "type": "function",
-    "name": "resolveDispute",
+    "name": "resolutionVotes",
     "inputs": [
       {
-        "name": "buyerPercentage",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
       {
-        "name": "sellerPercentage",
+        "name": "buyerPercentage",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "submitResolutionVote",
+    "inputs": [
+      {
+        "name": "_buyerPercentage",
         "type": "uint256",
         "internalType": "uint256"
       }
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "tokenAddress",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IERC20"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "event",
@@ -477,6 +504,140 @@
       }
     ],
     "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "VoteSubmitted",
+    "inputs": [
+      {
+        "name": "voter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "buyerPercentage",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AlreadyFundedOrClaimed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BuyerSellerMustBeDifferent",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "CannotDisputeAfterExpiry",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "CannotDisputeInstantTransfer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ConsensusAlreadyReached",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ContractMustBeDisputed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "CreatorFeeMustBeLessThanAmount",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ImplementationCannotBeInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InstantTransferAlreadyCompleted",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidBuyerAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidGasPayerAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidPercentage",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSellerAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidTokenAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotAuthorizedToVote",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotExpiredYet",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotFundedOrAlreadyProcessed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotInitialized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OnlyBuyer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OnlyBuyerOrGasPayer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OnlyGasPayer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OnlySellerOrGasPayer",
+    "inputs": []
   },
   {
     "type": "error",
