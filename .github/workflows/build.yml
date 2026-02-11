@@ -59,10 +59,12 @@ jobs:
           echo "Implementation: $IMPLEMENTATION_ADDRESS"
           echo "Factory: $FACTORY_ADDRESS"
 
-          # Get fee recipient for summary
-          FEE_RECIPIENT="${{ vars.FEE_RECIPIENT_ADDRESS }}"
+          # Get fee recipient for summary (from secrets now)
+          FEE_RECIPIENT="${{ secrets.FEE_RECIPIENT_ADDRESS }}"
           if [ -z "$FEE_RECIPIENT" ]; then
-            FEE_RECIPIENT="Not set (defaults to OWNER)"
+            FEE_RECIPIENT_DISPLAY="Default (OWNER)"
+          else
+            FEE_RECIPIENT_DISPLAY="From secret"
           fi
 
           # Create a summary with important addresses
@@ -71,7 +73,7 @@ jobs:
           echo "==================================================="
           echo "Implementation: $IMPLEMENTATION_ADDRESS"
           echo "Factory: $FACTORY_ADDRESS"
-          echo "Fee Recipient: $FEE_RECIPIENT"
+          echo "Fee Recipient: $FEE_RECIPIENT_DISPLAY"
           echo "==================================================="
           echo "FACTORY ADDRESS FOR UI CONFIG: $FACTORY_ADDRESS"
           echo "===================================================" 
