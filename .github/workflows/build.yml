@@ -71,6 +71,15 @@ jobs:
           # Get relayer address from private key
           RELAYER_ADDRESS=$(cast wallet address $RELAYER_WALLET_PRIVATE_KEY)
           
+          # Get fee recipient (defaults to relayer if not set)
+          FEE_RECIPIENT="${{ vars.FEE_RECIPIENT_ADDRESS }}"
+          if [ -z "$FEE_RECIPIENT" ]; then
+            FEE_RECIPIENT="0x0000000000000000000000000000000000000000"
+            echo "No FEE_RECIPIENT_ADDRESS set, will default to OWNER in contract"
+          else
+            echo "Using custom FEE_RECIPIENT_ADDRESS: $FEE_RECIPIENT"
+          fi
+
           # Manually verify factory if automatic verification failed
           echo "Attempting to verify factory contract..."
           forge verify-contract \
@@ -81,7 +90,7 @@ jobs:
             --compiler-version 0.8.26 \
             --num-of-optimizations 200 \
             --evm-version cancun \
-            --constructor-args $(cast abi-encode "constructor(address,address,address)" $USDC_CONTRACT_ADDRESS $RELAYER_ADDRESS $IMPLEMENTATION_ADDRESS) || echo "Factory verification may have failed or already verified"
+            --constructor-args $(cast abi-encode "constructor(address,address,address)" $RELAYER_ADDRESS $IMPLEMENTATION_ADDRESS $FEE_RECIPIENT) || echo "Factory verification may have failed or already verified"
           
           # Create a summary with important addresses
           echo "==================================================="
