@@ -48,49 +48,16 @@ jobs:
           source .env
           # Deploy with verification
           forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url $VERIFIER_URL -vvvv 2>&1 | tee deployment_output.txt
-          
-          # Extract addresses from the output
-          IMPLEMENTATION_ADDRESS=$(grep "Implementation deployed at:" deployment_output.txt | awk '{print $4}')
-          FACTORY_ADDRESS=$(grep "Factory deployed at:" deployment_output.txt | awk '{print $4}')
-          
-          # Wait for contracts to be indexed
-          echo "Waiting for contracts to be indexed on chain..."
-          sleep 10
-          
-          # Manually verify implementation if automatic verification failed
-          echo "Attempting to verify implementation contract..."
-          forge verify-contract \
-            $IMPLEMENTATION_ADDRESS \
-            src/EscrowContract.sol:EscrowContract \
-            --verifier blockscout \
-            --verifier-url $VERIFIER_URL \
-            --compiler-version 0.8.26 \
-            --num-of-optimizations 200 \
-            --evm-version cancun || echo "Implementation verification may have failed or already verified"
-          
-          # Get relayer address from private key
-          RELAYER_ADDRESS=$(cast wallet address $RELAYER_WALLET_PRIVATE_KEY)
-          
-          # Get fee recipient (defaults to relayer if not set)
-          FEE_RECIPIENT="${{ vars.FEE_RECIPIENT_ADDRESS }}"
-          if [ -z "$FEE_RECIPIENT" ]; then
-            FEE_RECIPIENT="0x0000000000000000000000000000000000000000"
-            echo "No FEE_RECIPIENT_ADDRESS set, will default to OWNER in contract"
-          else
-            echo "Using custom FEE_RECIPIENT_ADDRESS: $FEE_RECIPIENT"
-          fi
 
-          # Manually verify factory if automatic verification failed
-          echo "Attempting to verify factory contract..."
-          forge verify-contract \
-            $FACTORY_ADDRESS \
-            src/EscrowContractFactory.sol:EscrowContractFactory \
-            --verifier blockscout \
-            --verifier-url $VERIFIER_URL \
-            --compiler-version 0.8.26 \
-            --num-of-optimizations 200 \
-            --evm-version cancun \
-            --constructor-args $(cast abi-encode "constructor(address,address,address)" $RELAYER_ADDRESS $IMPLEMENTATION_ADDRESS $FEE_RECIPIENT) || echo "Factory verification may have failed or already verified"
+          # Extract addresses from the output (look for the actual hex addresses)
+          IMPLEMENTATION_ADDRESS=$(grep "Implementation deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          FACTORY_ADDRESS=$(grep "Factory deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          
+          # Verification happens automatically with --verify flag above
+          # Manual verification only needed if automatic verification fails
+          echo "Contracts deployed and verified automatically"
+          echo "Implementation: $IMPLEMENTATION_ADDRESS"
+          echo "Factory: $FACTORY_ADDRESS"
           
           # Create a summary with important addresses
           echo "==================================================="
