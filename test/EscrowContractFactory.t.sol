@@ -172,10 +172,10 @@ contract EscrowContractFactoryTest is Test {
         vm.stopPrank();
     }
     
-    function testOnlyOwnerCanCreateEscrow() public {
+    function testAnyoneCanCreateEscrow() public {
+        // Test that non-owner addresses can create escrow contracts
         vm.prank(other);
-        vm.expectRevert(EscrowContractFactory.OnlyOwner.selector);
-        factory.createEscrowContract(
+        address contractAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
@@ -183,6 +183,12 @@ contract EscrowContractFactoryTest is Test {
             expiryTimestamp,
             description
         );
+
+        // Verify contract was created successfully
+        assertTrue(contractAddress != address(0), "Contract should be created");
+        EscrowContract escrow = EscrowContract(contractAddress);
+        assertEq(address(escrow.BUYER()), buyer);
+        assertEq(address(escrow.SELLER()), seller);
     }
     
     function testCreateEscrowValidation() public {

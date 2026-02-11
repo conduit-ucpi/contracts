@@ -96,7 +96,6 @@ contract EscrowContractFactory {
         uint256 expiryTimestamp,
         string memory description
     ) external returns (address) {
-        if (msg.sender != OWNER) revert OnlyOwner();
         if (tokenAddress == address(0)) revert InvalidTokenAddress();
         if (buyer == address(0)) revert InvalidBuyerAddress();
         if (seller == address(0)) revert InvalidSellerAddress();
