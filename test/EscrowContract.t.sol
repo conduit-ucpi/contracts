@@ -398,7 +398,7 @@ contract EscrowContractTest is Test {
         escrow.depositFunds();
     }
     
-    function testOnlyBuyerCanDeposit() public {
+    function testAnyoneCanDeposit() public {
         vm.prank(gasPayer);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
@@ -410,18 +410,18 @@ contract EscrowContractTest is Test {
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
-        // Seller cannot deposit (not buyer or gas payer)
-        vm.prank(seller);
-        vm.expectRevert(EscrowContract.OnlyBuyerOrGasPayer.selector);
-        escrow.depositFunds();
-
-        // Gas payer CAN deposit (onlyBuyerOrGasPayer modifier allows it)
-        // This is expected behavior for gas relay pattern
+        // Buyer approves the contract to spend tokens
         vm.prank(buyer);
         usdc.approve(address(escrow), AMOUNT);
 
-        vm.prank(gasPayer);
+        // Anyone can call depositFunds (seller in this case)
+        // The tokens still come from the BUYER who approved them
+        vm.prank(seller);
         escrow.depositFunds(); // This should succeed
+
+        // Verify contract is now funded
+        (,,,,uint8 state,,,,) = escrow.getContractInfo();
+        assertEq(state, 1, "Contract should be ACTIVE");
     }
     
     function testCannotUseUnfundedContract() public {

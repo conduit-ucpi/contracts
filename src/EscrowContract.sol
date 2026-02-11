@@ -397,7 +397,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      * - Platform gets: {CREATOR_FEE}
      * - Escrowed for BUYER/SELLER: {AMOUNT - CREATOR_FEE}
      */
-    function depositFunds() external onlyBuyerOrGasPayer initialized nonReentrant {
+    function depositFunds() external initialized nonReentrant {
         if (_state != 0) revert AlreadyFundedOrClaimed();
 
         uint256 escrowAmount;

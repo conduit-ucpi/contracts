@@ -153,7 +153,7 @@ contract EscrowContractFactory {
             tokenAddress,    // ERC20 token to be used for this escrow
             buyer,           // ONLY this address can deposit and dispute
             seller,          // ONLY this address can receive funds (with buyer)
-            OWNER,           // Platform - can resolve disputes but NOT take money
+            msg.sender,      // Contract creator - can resolve disputes but NOT take money
             amount,
             expiryTimestamp,
             creatorFee,      // Platform fee (transparent and upfront)
