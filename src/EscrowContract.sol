@@ -262,6 +262,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     error NotAuthorizedToVote();
     error ContractMustBeDisputed();
     error InsufficientDirectPayment();
+    error CannotSweepEscrowToken();
+    error NoTokensToSweep();
 
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
     address public FACTORY;  // Factory contract that created this escrow - only it can initialize
@@ -298,6 +300,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
     event VoteSubmitted(address indexed voter, uint256 buyerPercentage);
+    event TokensSwept(address indexed token, address indexed recipient, uint256 amount);
     
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
     
@@ -521,6 +524,28 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
             // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
         }
+    }
+
+    /**
+     * 🧹 SWEEP WRONG TOKENS - EMERGENCY RECOVERY
+     *
+     * If someone accidentally sends the wrong ERC20 token to this contract,
+     * this function sends the entire balance of that token to the BUYER.
+     *
+     * 🔒 SECURITY:
+     * ✅ Cannot sweep the escrow token (tokenAddress) - escrowed funds are protected
+     * ✅ Only BUYER or GAS_PAYER can call this
+     * ✅ Funds always go to BUYER (the depositor)
+     */
+    function sweepToken(address _token) external onlyBuyerOrGasPayer initialized nonReentrant {
+        if (_token == address(tokenAddress)) revert CannotSweepEscrowToken();
+
+        uint256 balance = IERC20(_token).balanceOf(address(this));
+        if (balance == 0) revert NoTokensToSweep();
+
+        emit TokensSwept(_token, BUYER, balance);
+
+        IERC20(_token).safeTransfer(BUYER, balance);
     }
 
     /**

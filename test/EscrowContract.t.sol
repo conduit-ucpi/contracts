@@ -1313,4 +1313,139 @@ contract EscrowContractTest is Test {
         assertEq(state, 1, "Contract should be in funded state after top-up");
         assertTrue(escrow.isFunded());
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  SWEEP TOKEN TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    function createUnfundedEscrow() internal returns (EscrowContract) {
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Approve so depositFunds can be called later if needed
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+
+        return escrow;
+    }
+
+    function testSweepTokenByBuyer() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        // Deploy a different token and send it to the escrow by mistake
+        MockERC20 wrongToken = new MockERC20();
+        uint256 wrongAmount = 500 * 10**6;
+        wrongToken.transfer(address(escrow), wrongAmount);
+
+        uint256 buyerBalanceBefore = wrongToken.balanceOf(buyer);
+
+        // Buyer sweeps the wrong token
+        vm.prank(buyer);
+        escrow.sweepToken(address(wrongToken));
+
+        assertEq(wrongToken.balanceOf(address(escrow)), 0, "Escrow should have 0 wrong tokens");
+        assertEq(wrongToken.balanceOf(buyer), buyerBalanceBefore + wrongAmount, "Buyer should receive swept tokens");
+    }
+
+    function testSweepTokenByGasPayer() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        MockERC20 wrongToken = new MockERC20();
+        uint256 wrongAmount = 500 * 10**6;
+        wrongToken.transfer(address(escrow), wrongAmount);
+
+        uint256 buyerBalanceBefore = wrongToken.balanceOf(buyer);
+
+        // GasPayer sweeps the wrong token — funds still go to buyer
+        vm.prank(gasPayer);
+        escrow.sweepToken(address(wrongToken));
+
+        assertEq(wrongToken.balanceOf(address(escrow)), 0);
+        assertEq(wrongToken.balanceOf(buyer), buyerBalanceBefore + wrongAmount, "Buyer should receive swept tokens");
+    }
+
+    function testSweepTokenCannotSweepEscrowToken() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        // Fund the escrow normally
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Try to sweep the escrow token — should revert
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.CannotSweepEscrowToken.selector);
+        escrow.sweepToken(address(usdc));
+    }
+
+    function testSweepTokenNoTokensToSweep() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        MockERC20 wrongToken = new MockERC20();
+
+        // Try to sweep when there's nothing there
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.NoTokensToSweep.selector);
+        escrow.sweepToken(address(wrongToken));
+    }
+
+    function testSweepTokenUnauthorized() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        MockERC20 wrongToken = new MockERC20();
+        wrongToken.transfer(address(escrow), 100);
+
+        // Seller cannot sweep
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.OnlyBuyerOrGasPayer.selector);
+        escrow.sweepToken(address(wrongToken));
+
+        // Random address cannot sweep
+        vm.prank(other);
+        vm.expectRevert(EscrowContract.OnlyBuyerOrGasPayer.selector);
+        escrow.sweepToken(address(wrongToken));
+    }
+
+    function testSweepTokenEmitsEvent() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        MockERC20 wrongToken = new MockERC20();
+        uint256 wrongAmount = 200 * 10**6;
+        wrongToken.transfer(address(escrow), wrongAmount);
+
+        vm.prank(buyer);
+        vm.expectEmit(true, true, false, true);
+        emit EscrowContract.TokensSwept(address(wrongToken), buyer, wrongAmount);
+        escrow.sweepToken(address(wrongToken));
+    }
+
+    function testSweepTokenWhileEscrowFunded() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        // Fund the escrow normally
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Send a wrong token to the funded escrow
+        MockERC20 wrongToken = new MockERC20();
+        uint256 wrongAmount = 300 * 10**6;
+        wrongToken.transfer(address(escrow), wrongAmount);
+
+        // Should still be able to sweep the wrong token
+        vm.prank(buyer);
+        escrow.sweepToken(address(wrongToken));
+
+        assertEq(wrongToken.balanceOf(address(escrow)), 0);
+        assertEq(wrongToken.balanceOf(buyer), wrongAmount);
+
+        // Escrow token should be untouched
+        assertTrue(escrow.isFunded());
+    }
 }
