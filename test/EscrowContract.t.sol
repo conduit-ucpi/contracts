@@ -921,4 +921,396 @@ contract EscrowContractTest is Test {
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + smallAmount);
         assertEq(escrow.CREATOR_FEE(), 0);
     }
+
+    // ========== CHECK AND ACTIVATE TESTS ==========
+
+    function testCheckAndActivateHappyPath() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Buyer transfers USDC directly to the contract address
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+
+        // Call checkAndActivate
+        escrow.checkAndActivate();
+
+        // Verify state == 1 (funded)
+        (,,,,uint8 state,,,,) = escrow.getContractInfo();
+        assertEq(state, 1, "Contract should be in funded state");
+        assertTrue(escrow.isFunded());
+    }
+
+    function testCheckAndActivateInsufficientBalance() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Call checkAndActivate without transferring any tokens
+        vm.expectRevert(EscrowContract.InsufficientDirectPayment.selector);
+        escrow.checkAndActivate();
+    }
+
+    function testCheckAndActivateOverpayment() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Transfer more than AMOUNT to the contract
+        uint256 overpayment = AMOUNT + 500 * 10**6; // 500 USDC extra
+        usdc.mint(buyer, overpayment);
+
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, overpayment);
+
+        // Call checkAndActivate - should succeed
+        escrow.checkAndActivate();
+
+        // Verify state == 1 (funded)
+        (,,,,uint8 state,,,,) = escrow.getContractInfo();
+        assertEq(state, 1, "Contract should be in funded state");
+
+        // Excess stays in contract (overpayment - CREATOR_FEE = remaining in contract)
+        // Contract had overpayment, fee was sent out, so remaining = overpayment - CREATOR_FEE
+        assertEq(usdc.balanceOf(escrowAddress), overpayment - CREATOR_FEE);
+    }
+
+    function testCheckAndActivateAlreadyFunded() public {
+        // Create and fund escrow via normal depositFunds flow
+        EscrowContract escrow = createAndFundEscrow();
+
+        // Transfer tokens to contract (even though already funded)
+        usdc.mint(buyer, AMOUNT);
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT);
+
+        // Try checkAndActivate - should revert
+        vm.expectRevert(EscrowContract.AlreadyFundedOrClaimed.selector);
+        escrow.checkAndActivate();
+    }
+
+    function testCheckAndActivateAlreadyActivated() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Transfer tokens and activate
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+        escrow.checkAndActivate();
+
+        // Mint more tokens and transfer to contract for second attempt
+        usdc.mint(buyer, AMOUNT);
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+
+        // Try checkAndActivate again - should revert
+        vm.expectRevert(EscrowContract.AlreadyFundedOrClaimed.selector);
+        escrow.checkAndActivate();
+    }
+
+    function testCheckAndActivateInstantTransfer() public {
+        // Create instant transfer escrow with expiry=0
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            0, // Instant transfer
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Record initial balances
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+
+        // Transfer tokens directly to contract
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+
+        // Call checkAndActivate
+        escrow.checkAndActivate();
+
+        // Verify state == 4 (claimed)
+        (,,,,uint8 state,,,,) = escrow.getContractInfo();
+        assertEq(state, 4, "Contract should be in claimed state for instant transfer");
+        assertTrue(escrow.isClaimed());
+
+        // Verify funds went to seller immediately (minus fee)
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
+
+        // Verify platform got fee
+        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+
+        // Verify no funds left in escrow
+        assertEq(usdc.balanceOf(escrowAddress), 0);
+    }
+
+    function testCheckAndActivateFeeDistribution() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Record initial balances
+        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+
+        // Transfer tokens directly to contract
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+
+        // Call checkAndActivate
+        escrow.checkAndActivate();
+
+        // Verify CREATOR_FEE sent to FEE_RECIPIENT (gasPayer in this test setup)
+        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+
+        // Verify remainder locked in contract
+        assertEq(usdc.balanceOf(escrowAddress), AMOUNT - CREATOR_FEE);
+    }
+
+    function testCheckAndActivateZeroFee() public {
+        // Create a very small amount contract (below fee threshold for no-fee zone)
+        uint256 smallAmount = 500; // 0.0005 USDC (below 1/1000 threshold)
+
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            smallAmount,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Verify zero fee
+        assertEq(escrow.CREATOR_FEE(), 0);
+
+        // Mint and transfer tokens directly to contract
+        usdc.mint(buyer, smallAmount);
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, smallAmount);
+
+        // Call checkAndActivate
+        escrow.checkAndActivate();
+
+        // Verify state == 1 (funded)
+        (,,,,uint8 state,,,,) = escrow.getContractInfo();
+        assertEq(state, 1, "Contract should be in funded state");
+
+        // Verify all tokens locked in contract (no fee deducted)
+        assertEq(usdc.balanceOf(escrowAddress), smallAmount);
+    }
+
+    function testCheckAndActivateCallableByAnyone() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Transfer tokens directly to contract
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+
+        // Call checkAndActivate from a random address (not buyer, seller, or gasPayer)
+        address randomCaller = address(0x999);
+        vm.prank(randomCaller);
+        escrow.checkAndActivate();
+
+        // Verify it succeeded
+        (,,,,uint8 state,,,,) = escrow.getContractInfo();
+        assertEq(state, 1, "Contract should be in funded state");
+        assertTrue(escrow.isFunded());
+    }
+
+    function testCheckAndActivateThenDispute() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Transfer tokens and activate
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+        escrow.checkAndActivate();
+
+        // Verify funded state
+        assertTrue(escrow.isFunded());
+        assertTrue(escrow.canDispute());
+
+        // Buyer raises dispute
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        // Verify disputed state
+        assertTrue(escrow.isDisputed());
+        assertFalse(escrow.canClaim());
+        assertFalse(escrow.canDispute());
+    }
+
+    function testCheckAndActivateThenClaim() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Transfer tokens and activate
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+        escrow.checkAndActivate();
+
+        // Warp past expiry
+        vm.warp(expiryTimestamp + 1);
+
+        // Record seller balance before claim
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+
+        // Seller claims funds
+        vm.prank(seller);
+        escrow.claimFunds();
+
+        // Verify claimed state
+        assertTrue(escrow.isClaimed());
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
+        assertEq(usdc.balanceOf(escrowAddress), 0);
+    }
+
+    function testDepositFundsStillWorks() public {
+        // Verify existing approve+deposit flow still works unchanged after adding checkAndActivate
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
+        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+
+        // Standard approve+deposit flow
+        vm.prank(buyer);
+        usdc.approve(address(escrow), AMOUNT);
+        vm.prank(buyer);
+        escrow.depositFunds();
+
+        // Verify everything works as before
+        assertTrue(escrow.isFunded());
+        assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
+        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+        assertEq(usdc.balanceOf(escrowAddress), AMOUNT - CREATOR_FEE);
+
+        // Verify full lifecycle still works
+        vm.warp(expiryTimestamp + 1);
+        uint256 sellerBalanceBefore = usdc.balanceOf(seller);
+        vm.prank(seller);
+        escrow.claimFunds();
+        assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
+    }
+
+    function testPartialPaymentThenTopUp() public {
+        // Create escrow contract
+        vm.prank(gasPayer);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            description
+        );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+
+        // Send partial amount
+        uint256 partialAmount = AMOUNT / 2;
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, partialAmount);
+
+        // checkAndActivate should fail with partial payment
+        vm.expectRevert(EscrowContract.InsufficientDirectPayment.selector);
+        escrow.checkAndActivate();
+
+        // Verify contract is still unfunded
+        assertFalse(escrow.isFunded());
+
+        // Send remaining amount to reach full AMOUNT
+        uint256 remaining = AMOUNT - partialAmount;
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, remaining);
+
+        // checkAndActivate should now succeed
+        escrow.checkAndActivate();
+
+        // Verify contract is now funded
+        (,,,,uint8 state,,,,) = escrow.getContractInfo();
+        assertEq(state, 1, "Contract should be in funded state after top-up");
+        assertTrue(escrow.isFunded());
+    }
 }

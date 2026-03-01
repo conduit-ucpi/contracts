@@ -261,6 +261,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     error InvalidPercentage();
     error NotAuthorizedToVote();
     error ContractMustBeDisputed();
+    error InsufficientDirectPayment();
 
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
     address public FACTORY;  // Factory contract that created this escrow - only it can initialize
@@ -452,6 +453,76 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         }
     }
     
+    /**
+     * 💰 CHECK AND ACTIVATE - DIRECT TRANSFER FUNDING
+     *
+     * 🔒 SECURITY GUARANTEE: This function can be called by ANYONE - this is safe because
+     *    it only distributes funds to immutable addresses (BUYER, SELLER, FEE_RECIPIENT).
+     *
+     * What happens when checkAndActivate is called:
+     * 1. Checks if tokens were already sent directly to this contract address
+     * 2. If balance >= AMOUNT, activates the escrow
+     * 3. Platform gets their small fee immediately (shown upfront)
+     * 4. For instant transfers (EXPIRY_TIMESTAMP == 0): funds go directly to SELLER
+     * 5. For normal escrow: remaining money stays LOCKED until expiry or dispute resolution
+     *
+     * 🛡️ USE CASE:
+     * ✅ Supports funding via direct token transfer (e.g., exchange withdrawals)
+     * ✅ No approval needed - buyer sends tokens directly to contract address
+     * ✅ Anyone can call to activate after tokens arrive
+     */
+    function checkAndActivate() external initialized nonReentrant {
+        if (_state != 0) revert AlreadyFundedOrClaimed();
+
+        uint256 balance = tokenAddress.balanceOf(address(this));
+        if (balance < AMOUNT) revert InsufficientDirectPayment();
+
+        uint256 escrowAmount;
+        unchecked {
+            // Safe: CREATOR_FEE < AMOUNT is checked in initialize
+            escrowAmount = AMOUNT - CREATOR_FEE;
+        }
+
+        // Check if this is an instant transfer (expiry timestamp is 0)
+        bool isInstantTransfer = EXPIRY_TIMESTAMP == 0;
+
+        if (isInstantTransfer) {
+            _state = 4; // claimed - instant transfer complete
+
+            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
+            if (CREATOR_FEE > 0) {
+                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
+            }
+            emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
+
+            // 💳 STEP 2: Platform gets their fee (transparent and upfront)
+            if (CREATOR_FEE > 0) {
+                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
+            }
+
+            // 💰 STEP 3: Immediately transfer to SELLER (no escrow period)
+            tokenAddress.safeTransfer(SELLER, escrowAmount);
+
+        } else {
+            _state = 1; // funded - money is now LOCKED in escrow
+
+            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
+            if (CREATOR_FEE > 0) {
+                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
+            }
+
+            // 💳 STEP 2: Platform gets their fee (transparent and upfront)
+            // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
+            if (CREATOR_FEE > 0) {
+                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
+            }
+
+            // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
+        }
+    }
+
     /**
      * 🚨 BUYER PROTECTION - RAISE A DISPUTE
      * 
