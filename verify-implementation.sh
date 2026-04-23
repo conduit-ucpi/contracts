@@ -3,7 +3,7 @@
   # Set your environment variables
   NETWORK_RPC_URL="https://mainnet.base.org"
   VERIFIER_URL="https://base.blockscout.com/api"
-  IMPLEMENTATION_ADDRESS="0x693601e2A572245fd6eF27585674BBA94b6A63F2"
+  IMPLEMENTATION_ADDRESS="0x0a9cC884C36Da6643c29d7fb31CF8CC52c181D1a"
 
   # Verify the implementation contract
   forge verify-contract \

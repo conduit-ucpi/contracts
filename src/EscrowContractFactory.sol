@@ -94,7 +94,8 @@ contract EscrowContractFactory {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        string memory description
+        string memory description,
+        address arbiter
     ) external returns (address) {
         if (tokenAddress == address(0)) revert InvalidTokenAddress();
         if (buyer == address(0)) revert InvalidBuyerAddress();
@@ -102,38 +103,13 @@ contract EscrowContractFactory {
         if (buyer == seller) revert BuyerSellerMustBeDifferent();
         if (amount == 0) revert AmountMustBeGreaterThanZero();
         if (expiryTimestamp != 0 && expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
-        
-        // 📊 Query token decimals and calculate dynamic fee
-        uint8 decimals = IERC20Metadata(tokenAddress).decimals();
-        
-        // Calculate one unit and special no-fee threshold (1/1000 of one unit)
-        uint256 oneUnit = 10 ** decimals;
-        uint256 noFeeThreshold = oneUnit / 1000;
-        
-        uint256 creatorFee;
-        
-        // Special case: amounts at or below 1/1000 of one unit have no fee
-        if (amount <= noFeeThreshold) {
-            creatorFee = 0;
-        } else {
-            // Calculate minimum fee (30% of one token unit)
-            // For USDC (6 decimals): 1 unit = 1,000,000, so 30% = 300,000
-            // For other tokens: adjust based on decimals
-            uint256 minFee = (oneUnit * 30) / 100;
-            
-            // Reject contracts that can't afford the minimum fee
-            if (amount <= minFee) revert AmountTooSmallForMinFee();
 
-            // Calculate 1% of the amount
-            uint256 onePercentFee = amount / 100;
+        // Default arbiter to the caller when not specified
+        if (arbiter == address(0)) arbiter = msg.sender;
 
-            // Use the greater of 1% or minimum fee
-            creatorFee = onePercentFee > minFee ? onePercentFee : minFee;
+        uint256 creatorFee = _calculateCreatorFee(tokenAddress, amount);
 
-            // Ensure fee doesn't exceed the amount (should never happen with our logic, but safety check)
-            if (creatorFee >= amount) revert CreatorFeeMustBeLessThanAmount();
-        }
-        
+
         // 🔐 Generate unique contract address (deterministic but unpredictable)
         bytes32 salt = keccak256(abi.encodePacked(
             tokenAddress,
@@ -153,7 +129,7 @@ contract EscrowContractFactory {
             tokenAddress,    // ERC20 token to be used for this escrow
             buyer,           // ONLY this address can deposit and dispute
             seller,          // ONLY this address can receive funds (with buyer)
-            msg.sender,      // Contract creator - can resolve disputes but NOT take money
+            arbiter,         // Arbiter - can vote on disputes but NOT take money
             amount,
             expiryTimestamp,
             creatorFee,      // Platform fee (transparent and upfront)
@@ -178,6 +154,28 @@ contract EscrowContractFactory {
         //    described in EscrowContract.sol. Factory has no further control over it.
     }
     
+    /**
+     * Calculates the creator fee for a given token and amount.
+     * - Amounts at or below 1/1000 of one token unit: zero fee.
+     * - Otherwise: max(1% of amount, 30% of one token unit).
+     *   Reverts if the amount is too small to cover the minimum fee.
+     */
+    function _calculateCreatorFee(address tokenAddress, uint256 amount) internal view returns (uint256) {
+        uint256 oneUnit = 10 ** IERC20Metadata(tokenAddress).decimals();
+        uint256 noFeeThreshold = oneUnit / 1000;
+
+        if (amount <= noFeeThreshold) return 0;
+
+        uint256 minFee = (oneUnit * 30) / 100;
+        if (amount <= minFee) revert AmountTooSmallForMinFee();
+
+        uint256 onePercentFee = amount / 100;
+        uint256 fee = onePercentFee > minFee ? onePercentFee : minFee;
+
+        if (fee >= amount) revert CreatorFeeMustBeLessThanAmount();
+        return fee;
+    }
+
     function getContractAddress(
         address tokenAddress,
         address buyer,

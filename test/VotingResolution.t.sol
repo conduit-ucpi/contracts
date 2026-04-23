@@ -85,7 +85,8 @@ contract VotingResolutionTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -152,7 +153,8 @@ contract VotingResolutionTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);

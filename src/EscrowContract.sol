@@ -243,14 +243,12 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     error InvalidTokenAddress();
     error InvalidBuyerAddress();
     error InvalidSellerAddress();
-    error InvalidGasPayerAddress();
+    error InvalidArbiterAddress();
     error BuyerSellerMustBeDifferent();
     error CreatorFeeMustBeLessThanAmount();
     error NotInitialized();
     error OnlyBuyer();
-    error OnlyGasPayer();
-    error OnlySellerOrGasPayer();
-    error OnlyBuyerOrGasPayer();
+    error OnlyArbiter();
     error AlreadyFundedOrClaimed();
     error CannotDisputeInstantTransfer();
     error CannotDisputeAfterExpiry();
@@ -270,7 +268,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     IERC20 public tokenAddress;     // The ERC20 token contract (USDC, USDT, DAI, etc.) - immutable after initialization
     address public BUYER;           // ONLY this address can deposit funds and raise disputes
     address public SELLER;          // ONLY this address can receive funds (after expiry or dispute)
-    address public GAS_PAYER;       // Platform address - can ONLY resolve disputes, NOT take your money
+    address public ARBITER;         // Arbiter address - can ONLY vote on disputes, NOT take your money
     address public FEE_RECIPIENT;   // Address that receives the platform fee
     
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
@@ -303,28 +301,16 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     event TokensSwept(address indexed token, address indexed recipient, uint256 amount);
     
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
-    
-    // ⚡ BUYER PROTECTION: Only the original BUYER can deposit money and raise disputes
+
+    // ⚡ BUYER PROTECTION: Only the original BUYER can raise disputes
     modifier onlyBuyer() {
         if (msg.sender != BUYER) revert OnlyBuyer();
         _;
     }
 
-    // ⚡ DISPUTE RESOLUTION: Only platform can resolve disputes (but money still goes to BUYER/SELLER)
-    modifier onlyGasPayer() {
-        if (msg.sender != GAS_PAYER) revert OnlyGasPayer();
-        _;
-    }
-
-    // ⚡ CLAIM PROTECTION: Only SELLER can claim expired funds (platform can help with gas)
-    modifier onlySellerOrGasPayer() {
-        if (msg.sender != SELLER && msg.sender != GAS_PAYER) revert OnlySellerOrGasPayer();
-        _;
-    }
-
-    // ⚡ DEPOSIT PROTECTION: Only BUYER can deposit funds (platform can help with gas)
-    modifier onlyBuyerOrGasPayer() {
-        if (msg.sender != BUYER && msg.sender != GAS_PAYER) revert OnlyBuyerOrGasPayer();
+    // ⚡ DISPUTE RESOLUTION: Only arbiter can resolve disputes (but money still goes to BUYER/SELLER)
+    modifier onlyArbiter() {
+        if (msg.sender != ARBITER) revert OnlyArbiter();
         _;
     }
 
@@ -345,7 +331,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         address _tokenAddress,
         address _buyer,
         address _seller,
-        address _gasPayer,
+        address _arbiter,
         uint256 _amount,
         uint256 _expiryTimestamp,
         uint256 _creatorFee,
@@ -357,13 +343,13 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         if (_tokenAddress == address(0)) revert InvalidTokenAddress();
         if (_buyer == address(0)) revert InvalidBuyerAddress();
         if (_seller == address(0)) revert InvalidSellerAddress();
-        if (_gasPayer == address(0)) revert InvalidGasPayerAddress();
+        if (_arbiter == address(0)) revert InvalidArbiterAddress();
         if (_buyer == _seller) revert BuyerSellerMustBeDifferent();
 
         tokenAddress = IERC20(_tokenAddress);
         BUYER = _buyer;
         SELLER = _seller;
-        GAS_PAYER = _gasPayer;
+        ARBITER = _arbiter;
         FEE_RECIPIENT = _feeRecipient;
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
@@ -375,13 +361,15 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         // Initialize votes as "not voted" (255)
         resolutionVotes[_buyer].buyerPercentage = 255;
         resolutionVotes[_seller].buyerPercentage = 255;
-        resolutionVotes[_gasPayer].buyerPercentage = 255;
+        resolutionVotes[_arbiter].buyerPercentage = 255;
     }
     
     /**
      * 💰 BUYER DEPOSITS MONEY - THE ESCROW BEGINS
      *
-     * 🔒 SECURITY GUARANTEE: This function can be called by the BUYER or GAS_PAYER (platform)
+     * 🔒 SECURITY GUARANTEE: Callable by anyone. Funds always come from BUYER's wallet
+     *    via safeTransferFrom, which requires BUYER's prior approval - so no other
+     *    address can cause funds to leave BUYER's wallet without their consent.
      *
      * What happens when funds are deposited:
      * 1. BUYER's money is LOCKED in this contract (not sent to SELLER yet)
@@ -394,7 +382,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      * ✅ SELLER must wait for expiry time to get paid
      * ✅ BUYER can dispute at any time to get protection
      * ✅ Platform fee is transparent and fixed upfront
-     * ✅ Funds always come from BUYER's wallet (even if GAS_PAYER initiates)
+     * ✅ Funds always come from BUYER's wallet (BUYER must have approved this contract)
      *
      * After this function:
      * - Total deposited: {AMOUNT}
@@ -534,10 +522,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      *
      * 🔒 SECURITY:
      * ✅ Cannot sweep the escrow token (tokenAddress) - escrowed funds are protected
-     * ✅ Only BUYER or GAS_PAYER can call this
+     * ✅ Callable by anyone - funds always go to BUYER regardless of caller
      * ✅ Funds always go to BUYER (the depositor)
      */
-    function sweepToken(address _token) external onlyBuyerOrGasPayer initialized nonReentrant {
+    function sweepToken(address _token) external initialized nonReentrant {
         if (_token == address(tokenAddress)) revert CannotSweepEscrowToken();
 
         uint256 balance = IERC20(_token).balanceOf(address(this));
@@ -647,7 +635,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         if (_state != 2) revert ContractMustBeDisputed();
         if (consensusReached) revert ConsensusAlreadyReached();
         if (_buyerPercentage > 100) revert InvalidPercentage();
-        if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != GAS_PAYER) revert NotAuthorizedToVote();
+        if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != ARBITER) revert NotAuthorizedToVote();
 
         // All parties can vote anytime - votes can be changed until consensus
         resolutionVotes[msg.sender].buyerPercentage = uint8(_buyerPercentage);
@@ -661,7 +649,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         // Read votes (each is 1 byte, super cheap)
         uint8 buyerVote = resolutionVotes[BUYER].buyerPercentage;
         uint8 sellerVote = resolutionVotes[SELLER].buyerPercentage;
-        uint8 adminVote = resolutionVotes[GAS_PAYER].buyerPercentage;
+        uint8 adminVote = resolutionVotes[ARBITER].buyerPercentage;
 
         // 255 means "not voted" (since valid votes are 0-100)
         bool buyerVoted = (buyerVote != 255);
@@ -742,15 +730,16 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
      * 
      * 🔐 SECURITY MECHANISMS:
      * ✅ IMPOSSIBLE for anyone except SELLER to receive this money
-     * ✅ Platform cannot intercept or redirect these funds  
+     * ✅ Platform cannot intercept or redirect these funds
      * ✅ Time must have expired (BUYER had protection period)
      * ✅ No disputes pending (BUYER approved by not disputing)
-     * 
+     * ✅ Callable by anyone - funds always go to SELLER regardless of caller
+     *
      * 💰 MONEY FLOW:
      * [LOCKED FUNDS] → [SELLER gets 100% of escrowed amount]
      * Platform already got their fee during deposit - they get NOTHING here
      */
-    function claimFunds() external onlySellerOrGasPayer initialized nonReentrant {
+    function claimFunds() external initialized nonReentrant {
         if (_state != 1) revert NotFundedOrAlreadyProcessed();
         if (EXPIRY_TIMESTAMP == 0) revert InstantTransferAlreadyCompleted();
         if (block.timestamp < EXPIRY_TIMESTAMP) revert NotExpiredYet();

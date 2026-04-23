@@ -52,7 +52,7 @@ contract EscrowContractTest is Test {
     
     address public buyer = address(0x1);
     address public seller = address(0x2);
-    address public gasPayer = address(0x3);
+    address public arbiter = address(0x3);
     address public other = address(0x4);
     
     uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
@@ -63,18 +63,18 @@ contract EscrowContractTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         EscrowContract implementation = new EscrowContract();
-        factory = new EscrowContractFactory(gasPayer, address(implementation), address(0));
+        factory = new EscrowContractFactory(arbiter, address(implementation), address(0));
         
         expiryTimestamp = block.timestamp + 7 days;
         
         // Calculate expected fee: 1% of AMOUNT (since 1% > minimum of 300,000)
         CREATOR_FEE = AMOUNT / 100; // 10 USDC (1% of 1000 USDC)
         
-        // Give USDC to gasPayer so they can create escrow contracts
-        usdc.mint(gasPayer, AMOUNT * 10);
+        // Give USDC to arbiter so they can create escrow contracts
+        usdc.mint(arbiter, AMOUNT * 10);
         usdc.mint(buyer, AMOUNT * 10);
         
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         usdc.approve(address(factory), AMOUNT * 10);
         
         vm.prank(buyer);
@@ -82,14 +82,15 @@ contract EscrowContractTest is Test {
     }
     
     function createAndFundEscrow() internal returns (EscrowContract) {
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -119,7 +120,7 @@ contract EscrowContractTest is Test {
         assertEq(address(testEscrow.tokenAddress()), address(usdc));
         assertEq(testEscrow.BUYER(), buyer);
         assertEq(testEscrow.SELLER(), seller);
-        assertEq(testEscrow.GAS_PAYER(), gasPayer);
+        assertEq(testEscrow.ARBITER(), arbiter);
         assertEq(testEscrow.AMOUNT(), AMOUNT);
         assertEq(testEscrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         // Description no longer stored in contract (emitted in events only to save gas)
@@ -128,14 +129,15 @@ contract EscrowContractTest is Test {
     function testSuccessfulDeployment() public {
         uint256 deploymentTime = block.timestamp;
         
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -143,7 +145,7 @@ contract EscrowContractTest is Test {
         assertEq(address(escrow.tokenAddress()), address(usdc));
         assertEq(escrow.BUYER(), buyer);
         assertEq(escrow.SELLER(), seller);
-        assertEq(escrow.GAS_PAYER(), gasPayer);
+        assertEq(escrow.ARBITER(), arbiter);
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         // Description no longer stored in contract (emitted in events only to save gas)
@@ -174,7 +176,7 @@ contract EscrowContractTest is Test {
         vm.expectRevert(EscrowContract.OnlyBuyer.selector);
         escrow.raiseDispute();
         
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         vm.expectRevert(EscrowContract.OnlyBuyer.selector);
         escrow.raiseDispute();
     }
@@ -202,7 +204,7 @@ contract EscrowContractTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(100);
 
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         escrow.submitResolutionVote(100);
 
         assertTrue(escrow.isClaimed());
@@ -224,7 +226,7 @@ contract EscrowContractTest is Test {
         vm.prank(seller);
         escrow.submitResolutionVote(40);
 
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         escrow.submitResolutionVote(50);
 
         // No consensus yet since all votes differ
@@ -246,16 +248,17 @@ contract EscrowContractTest is Test {
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
     
-    function testGasPayerCanClaimFunds() public {
+    function testAnyoneCanClaimFunds() public {
         EscrowContract escrow = createAndFundEscrow();
-        
+
         vm.warp(expiryTimestamp + 1);
-        
+
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
-        
-        vm.prank(gasPayer);
+
+        // Random address triggers claim; funds still go to seller
+        vm.prank(other);
         escrow.claimFunds();
-        
+
         assertTrue(escrow.isClaimed());
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
     }
@@ -321,14 +324,15 @@ contract EscrowContractTest is Test {
     function testCreatedAtPersistsThroughTime() public {
         uint256 creationTime = block.timestamp;
         
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -360,14 +364,15 @@ contract EscrowContractTest is Test {
     }
     
     function testDepositFunds() public {
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -399,14 +404,15 @@ contract EscrowContractTest is Test {
     }
     
     function testAnyoneCanDeposit() public {
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -425,14 +431,15 @@ contract EscrowContractTest is Test {
     }
     
     function testCannotUseUnfundedContract() public {
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
         
@@ -446,7 +453,7 @@ contract EscrowContractTest is Test {
         vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.claimFunds();
         
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         vm.expectRevert(EscrowContract.ContractMustBeDisputed.selector);
         escrow.submitResolutionVote(100);
     }
@@ -455,20 +462,21 @@ contract EscrowContractTest is Test {
     
     
     function testCreatorFeeTransferOnDeposit() public {
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         
         EscrowContract escrow = EscrowContract(escrowAddress);
         
         // Record initial balances
-        uint256 initialGasPayerBalance = usdc.balanceOf(gasPayer);
+        uint256 initialArbiterBalance = usdc.balanceOf(arbiter);
         uint256 initialBuyerBalance = usdc.balanceOf(buyer);
         
         // Buyer approves and funds the escrow
@@ -479,7 +487,7 @@ contract EscrowContractTest is Test {
         escrow.depositFunds();
         
         // Check that creator fee was transferred to gas payer
-        assertEq(usdc.balanceOf(gasPayer), initialGasPayerBalance + CREATOR_FEE);
+        assertEq(usdc.balanceOf(arbiter), initialArbiterBalance + CREATOR_FEE);
         assertEq(usdc.balanceOf(buyer), initialBuyerBalance - AMOUNT);
         assertEq(usdc.balanceOf(address(escrow)), AMOUNT - CREATOR_FEE);
     }
@@ -515,7 +523,7 @@ contract EscrowContractTest is Test {
         vm.prank(buyer);
         escrow.submitResolutionVote(100);
 
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         escrow.submitResolutionVote(100);
 
         // Buyer should receive amount minus creator fee
@@ -566,7 +574,7 @@ contract EscrowContractTest is Test {
         vm.prank(seller);
         escrow.submitResolutionVote(0);
 
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         escrow.submitResolutionVote(0);
 
         // Check balances - buyer should get nothing, seller gets all
@@ -652,14 +660,15 @@ contract EscrowContractTest is Test {
 
     function testInstantTransferHappyPath() public {
         // Create instant transfer escrow with expiryTimestamp = 0
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer - expiry = 0
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -667,7 +676,7 @@ contract EscrowContractTest is Test {
         // Record initial balances
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
-        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+        uint256 arbiterBalanceBefore = usdc.balanceOf(arbiter);
 
         // Buyer deposits funds
         vm.prank(buyer);
@@ -679,7 +688,7 @@ contract EscrowContractTest is Test {
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
 
         // Verify platform got fee
-        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
 
         // Verify buyer paid full amount
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
@@ -694,14 +703,15 @@ contract EscrowContractTest is Test {
 
     function testInstantTransferCannotDispute() public {
         // Create instant transfer escrow
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -722,14 +732,15 @@ contract EscrowContractTest is Test {
 
     function testInstantTransferCannotDisputeBeforeDeposit() public {
         // Create instant transfer escrow
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -745,14 +756,15 @@ contract EscrowContractTest is Test {
 
     function testInstantTransferCannotClaim() public {
         // Create instant transfer escrow
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -773,14 +785,15 @@ contract EscrowContractTest is Test {
 
     function testInstantTransferViewFunctions() public {
         // Create instant transfer escrow
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -811,14 +824,15 @@ contract EscrowContractTest is Test {
     function testInstantTransferGetContractInfo() public {
         // Create instant transfer escrow
         uint256 creationTime = block.timestamp;
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -859,14 +873,15 @@ contract EscrowContractTest is Test {
 
     function testInstantTransferStateTransitions() public {
         // Create instant transfer escrow
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -893,14 +908,15 @@ contract EscrowContractTest is Test {
         // Create a very small amount contract (below fee threshold)
         uint256 smallAmount = 500; // 0.0005 USDC (below 1/1000 threshold)
 
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             smallAmount,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -926,14 +942,15 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateHappyPath() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -952,14 +969,15 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateInsufficientBalance() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -970,14 +988,15 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateOverpayment() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1016,14 +1035,15 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateAlreadyActivated() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1044,20 +1064,21 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateInstantTransfer() public {
         // Create instant transfer escrow with expiry=0
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             0, // Instant transfer
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
         // Record initial balances
         uint256 sellerBalanceBefore = usdc.balanceOf(seller);
-        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+        uint256 arbiterBalanceBefore = usdc.balanceOf(arbiter);
 
         // Transfer tokens directly to contract
         vm.prank(buyer);
@@ -1075,7 +1096,7 @@ contract EscrowContractTest is Test {
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
 
         // Verify platform got fee
-        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
 
         // Verify no funds left in escrow
         assertEq(usdc.balanceOf(escrowAddress), 0);
@@ -1083,19 +1104,20 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateFeeDistribution() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
         // Record initial balances
-        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+        uint256 arbiterBalanceBefore = usdc.balanceOf(arbiter);
 
         // Transfer tokens directly to contract
         vm.prank(buyer);
@@ -1104,8 +1126,8 @@ contract EscrowContractTest is Test {
         // Call checkAndActivate
         escrow.checkAndActivate();
 
-        // Verify CREATOR_FEE sent to FEE_RECIPIENT (gasPayer in this test setup)
-        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+        // Verify CREATOR_FEE sent to FEE_RECIPIENT (arbiter in this test setup)
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
 
         // Verify remainder locked in contract
         assertEq(usdc.balanceOf(escrowAddress), AMOUNT - CREATOR_FEE);
@@ -1115,14 +1137,15 @@ contract EscrowContractTest is Test {
         // Create a very small amount contract (below fee threshold for no-fee zone)
         uint256 smallAmount = 500; // 0.0005 USDC (below 1/1000 threshold)
 
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             smallAmount,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1147,14 +1170,15 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateCallableByAnyone() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1162,7 +1186,7 @@ contract EscrowContractTest is Test {
         vm.prank(buyer);
         usdc.transfer(escrowAddress, AMOUNT);
 
-        // Call checkAndActivate from a random address (not buyer, seller, or gasPayer)
+        // Call checkAndActivate from a random address (not buyer, seller, or arbiter)
         address randomCaller = address(0x999);
         vm.prank(randomCaller);
         escrow.checkAndActivate();
@@ -1175,14 +1199,15 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateThenDispute() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1207,14 +1232,15 @@ contract EscrowContractTest is Test {
 
     function testCheckAndActivateThenClaim() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1241,19 +1267,20 @@ contract EscrowContractTest is Test {
 
     function testDepositFundsStillWorks() public {
         // Verify existing approve+deposit flow still works unchanged after adding checkAndActivate
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
-        uint256 gasPayerBalanceBefore = usdc.balanceOf(gasPayer);
+        uint256 arbiterBalanceBefore = usdc.balanceOf(arbiter);
 
         // Standard approve+deposit flow
         vm.prank(buyer);
@@ -1264,7 +1291,7 @@ contract EscrowContractTest is Test {
         // Verify everything works as before
         assertTrue(escrow.isFunded());
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
-        assertEq(usdc.balanceOf(gasPayer), gasPayerBalanceBefore + CREATOR_FEE);
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
         assertEq(usdc.balanceOf(escrowAddress), AMOUNT - CREATOR_FEE);
 
         // Verify full lifecycle still works
@@ -1277,14 +1304,15 @@ contract EscrowContractTest is Test {
 
     function testPartialPaymentThenTopUp() public {
         // Create escrow contract
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1319,14 +1347,15 @@ contract EscrowContractTest is Test {
     // ═══════════════════════════════════════════════════════════════
 
     function createUnfundedEscrow() internal returns (EscrowContract) {
-        vm.prank(gasPayer);
+        vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc),
             buyer,
             seller,
             AMOUNT,
             expiryTimestamp,
-            description
+            description,
+            address(0)
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1355,7 +1384,7 @@ contract EscrowContractTest is Test {
         assertEq(wrongToken.balanceOf(buyer), buyerBalanceBefore + wrongAmount, "Buyer should receive swept tokens");
     }
 
-    function testSweepTokenByGasPayer() public {
+    function testSweepTokenByArbiter() public {
         EscrowContract escrow = createUnfundedEscrow();
 
         MockERC20 wrongToken = new MockERC20();
@@ -1364,8 +1393,8 @@ contract EscrowContractTest is Test {
 
         uint256 buyerBalanceBefore = wrongToken.balanceOf(buyer);
 
-        // GasPayer sweeps the wrong token — funds still go to buyer
-        vm.prank(gasPayer);
+        // Arbiter sweeps the wrong token — funds still go to buyer
+        vm.prank(arbiter);
         escrow.sweepToken(address(wrongToken));
 
         assertEq(wrongToken.balanceOf(address(escrow)), 0);
@@ -1396,21 +1425,21 @@ contract EscrowContractTest is Test {
         escrow.sweepToken(address(wrongToken));
     }
 
-    function testSweepTokenUnauthorized() public {
+    function testSweepTokenCallableByAnyone() public {
         EscrowContract escrow = createUnfundedEscrow();
 
         MockERC20 wrongToken = new MockERC20();
-        wrongToken.transfer(address(escrow), 100);
+        uint256 wrongAmount = 100;
+        wrongToken.transfer(address(escrow), wrongAmount);
 
-        // Seller cannot sweep
-        vm.prank(seller);
-        vm.expectRevert(EscrowContract.OnlyBuyerOrGasPayer.selector);
-        escrow.sweepToken(address(wrongToken));
+        uint256 buyerBalanceBefore = wrongToken.balanceOf(buyer);
 
-        // Random address cannot sweep
+        // Random address can sweep; funds still go to buyer
         vm.prank(other);
-        vm.expectRevert(EscrowContract.OnlyBuyerOrGasPayer.selector);
         escrow.sweepToken(address(wrongToken));
+
+        assertEq(wrongToken.balanceOf(address(escrow)), 0);
+        assertEq(wrongToken.balanceOf(buyer), buyerBalanceBefore + wrongAmount);
     }
 
     function testSweepTokenEmitsEvent() public {
