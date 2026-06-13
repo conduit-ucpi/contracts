@@ -26,6 +26,7 @@ contract CompletionEscrowContractFactory {
     error InvalidBuyerAddress();
     error InvalidSellerAddress();
     error BuyerSellerMustBeDifferent();
+    error VerifierCannotBeSeller();
     error InvalidRecipientAddress();
     error RecipientsMustBeDifferent();
     error InvalidRecipientSplit();
@@ -49,6 +50,7 @@ contract CompletionEscrowContractFactory {
         address recipient1,
         address recipient2,
         uint256 recipient1Bps,
+        address verifier,
         string description
     );
 
@@ -77,12 +79,15 @@ contract CompletionEscrowContractFactory {
         address recipient1,
         address recipient2,
         uint256 recipient1Bps,
+        address verifier,
         string memory description
     ) external returns (address) {
         if (tokenAddress == address(0)) revert InvalidTokenAddress();
         if (buyer == address(0)) revert InvalidBuyerAddress();
         if (seller == address(0)) revert InvalidSellerAddress();
         if (buyer == seller) revert BuyerSellerMustBeDifferent();
+        // A nominated verifier acts for the buyer - it must never be the supplier
+        if (verifier == seller) revert VerifierCannotBeSeller();
         if (amount == 0) revert AmountMustBeGreaterThanZero();
         // This variant has no instant transfer - expiry must be a real future timestamp
         if (expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
@@ -106,6 +111,7 @@ contract CompletionEscrowContractFactory {
             recipient1: recipient1,
             recipient2: recipient2,
             recipient1Bps: recipient1Bps,
+            verifier: verifier,
             creatorFee: _calculateCreatorFee(tokenAddress, amount)
         });
 
@@ -120,6 +126,7 @@ contract CompletionEscrowContractFactory {
             recipient1,
             recipient2,
             recipient1Bps,
+            verifier,
             description
         );
 
@@ -136,6 +143,7 @@ contract CompletionEscrowContractFactory {
         address recipient1;
         address recipient2;
         uint256 recipient1Bps;
+        address verifier;
         uint256 creatorFee;
     }
 
@@ -145,7 +153,13 @@ contract CompletionEscrowContractFactory {
      * exhaust the stack with via_ir disabled.
      */
     function _deploy(EscrowParams memory p) internal returns (address) {
-        bytes32 salt = keccak256(abi.encodePacked(
+        address clone = Clones.cloneDeterministic(IMPLEMENTATION, _computeSalt(p));
+        _init(clone, p);
+        return clone;
+    }
+
+    function _computeSalt(EscrowParams memory p) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked(
             p.tokenAddress,
             p.buyer,
             p.seller,
@@ -156,9 +170,9 @@ contract CompletionEscrowContractFactory {
             p.recipient1Bps,
             block.timestamp
         ));
+    }
 
-        address clone = Clones.cloneDeterministic(IMPLEMENTATION, salt);
-
+    function _init(address clone, EscrowParams memory p) internal {
         CompletionEscrowContract(clone).initialize(
             p.tokenAddress,
             p.buyer,
@@ -170,10 +184,9 @@ contract CompletionEscrowContractFactory {
             FEE_RECIPIENT,
             p.recipient1,
             p.recipient2,
-            p.recipient1Bps
+            p.recipient1Bps,
+            p.verifier
         );
-
-        return clone;
     }
 
     /**

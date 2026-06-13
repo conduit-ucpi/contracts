@@ -77,6 +77,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
     error NotInitialized();
     error OnlyBuyer();
     error OnlySeller();
+    error OnlyVerifier();
+    error VerifierCannotBeSeller();
     error OnlyBuyerOrGasPayer();
     error AlreadyFundedOrClaimed();
     error InsufficientBalanceToActivate();
@@ -92,8 +94,9 @@ contract CompletionEscrowContract is ReentrancyGuard {
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
     address public FACTORY;       // Factory contract that created this escrow
     IERC20 public tokenAddress;   // The ERC20 token contract (microUSDC, etc.)
-    address public BUYER;         // Deposits funds, disputes, and verifies completion
+    address public BUYER;         // Deposits funds and raises disputes
     address public SELLER;        // Supplier - marks work complete and votes in disputes
+    address public VERIFIER;      // Verifies completion on the buyer's behalf (defaults to BUYER)
     address public GAS_PAYER;     // Platform/arbiter - can vote in disputes, NOT take money
     address public FEE_RECIPIENT; // Address that receives the platform fee
 
@@ -142,6 +145,11 @@ contract CompletionEscrowContract is ReentrancyGuard {
         _;
     }
 
+    modifier onlyVerifier() {
+        if (msg.sender != VERIFIER) revert OnlyVerifier();
+        _;
+    }
+
     modifier onlyBuyerOrGasPayer() {
         if (msg.sender != BUYER && msg.sender != GAS_PAYER) revert OnlyBuyerOrGasPayer();
         _;
@@ -168,7 +176,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
         address _feeRecipient,
         address _recipient1,
         address _recipient2,
-        uint256 _recipient1Bps
+        uint256 _recipient1Bps,
+        address _verifier
     ) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
@@ -178,6 +187,9 @@ contract CompletionEscrowContract is ReentrancyGuard {
         if (_seller == address(0)) revert InvalidSellerAddress();
         if (_gasPayer == address(0)) revert InvalidGasPayerAddress();
         if (_buyer == _seller) revert BuyerSellerMustBeDifferent();
+        // A nominated verifier acts for the buyer - it must never be the supplier,
+        // or the supplier could approve its own work. Unset (0) defaults to the buyer.
+        if (_verifier == _seller) revert VerifierCannotBeSeller();
         // Expiry must be a real future timestamp - this variant has no instant transfer
         if (_expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
         if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
@@ -196,6 +208,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
         tokenAddress = IERC20(_tokenAddress);
         BUYER = _buyer;
         SELLER = _seller;
+        // Default the verifier to the buyer when none is nominated at creation
+        VERIFIER = _verifier == address(0) ? _buyer : _verifier;
         GAS_PAYER = _gasPayer;
         FEE_RECIPIENT = _feeRecipient;
         RECIPIENT1 = _recipient1;
@@ -296,12 +310,14 @@ contract CompletionEscrowContract is ReentrancyGuard {
     }
 
     /**
-     * ✅ BUYER VERIFIES COMPLETION - FUNDS PAY OUT IN THIS CALL
+     * ✅ VERIFIER VERIFIES COMPLETION - FUNDS PAY OUT IN THIS CALL
      *
-     * Once the SELLER has marked complete and the BUYER verifies, the full escrowed
+     * Once the SELLER has marked complete and the VERIFIER verifies, the full escrowed
      * amount is split between the recipients immediately. There is no separate claim.
+     * The VERIFIER is the buyer's nominated delegate for this step, and defaults to the
+     * BUYER when none was nominated at creation.
      */
-    function verifyComplete() external onlyBuyer initialized nonReentrant {
+    function verifyComplete() external onlyVerifier initialized nonReentrant {
         if (_state != 3) revert NotAwaitingVerification();
 
         _state = 4; // claimed
@@ -312,7 +328,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
             escrowAmount = AMOUNT - CREATOR_FEE;
         }
 
-        emit CompletionVerified(BUYER, block.timestamp);
+        emit CompletionVerified(VERIFIER, block.timestamp);
 
         // Distribute the entire escrow to the recipients per the configured split
         _distributeToRecipients(escrowAmount);

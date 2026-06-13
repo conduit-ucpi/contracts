@@ -77,7 +77,7 @@ contract CompletionEscrowContractTest is Test {
     function _create(address r1, address r2, uint256 r1Bps) internal returns (CompletionEscrowContract) {
         vm.prank(buyer);
         address addr = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, r1, r2, r1Bps, description
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, r1, r2, r1Bps, address(0), description
         );
         return CompletionEscrowContract(addr);
     }
@@ -121,7 +121,7 @@ contract CompletionEscrowContractTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.InvalidRecipientSplit.selector);
         factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, address(0), 9999, description
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, address(0), 9999, address(0), description
         );
     }
 
@@ -129,7 +129,7 @@ contract CompletionEscrowContractTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.InvalidRecipientSplit.selector);
         factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, recipient2, 0, description
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, recipient2, 0, address(0), description
         );
     }
 
@@ -137,7 +137,7 @@ contract CompletionEscrowContractTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.InvalidRecipientSplit.selector);
         factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, recipient2, 10000, description
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, recipient2, 10000, address(0), description
         );
     }
 
@@ -145,7 +145,7 @@ contract CompletionEscrowContractTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.RecipientsMustBeDifferent.selector);
         factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, recipient1, 5000, description
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, recipient1, 5000, address(0), description
         );
     }
 
@@ -153,7 +153,7 @@ contract CompletionEscrowContractTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.InvalidRecipientAddress.selector);
         factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, address(0), recipient2, 5000, description
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, address(0), recipient2, 5000, address(0), description
         );
     }
 
@@ -161,7 +161,7 @@ contract CompletionEscrowContractTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.InvalidExpiryTimestamp.selector);
         factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, block.timestamp, recipient1, address(0), 10000, description
+            address(usdc), buyer, seller, AMOUNT, block.timestamp, recipient1, address(0), 10000, address(0), description
         );
     }
 
@@ -254,14 +254,14 @@ contract CompletionEscrowContractTest is Test {
         vm.prank(buyer);
         address childAddr = factory.createEscrowContract(
             address(usdc), buyer, seller, childAmount, expiryTimestamp,
-            finalRecipient, address(0), 10000, "child"
+            finalRecipient, address(0), 10000, address(0), "child"
         );
         CompletionEscrowContract child = CompletionEscrowContract(childAddr);
 
         vm.prank(buyer);
         address parentAddr = factory.createEscrowContract(
             address(usdc), buyer, seller, parentAmount, expiryTimestamp,
-            childAddr, otherRecipient, 5000, "parent"
+            childAddr, otherRecipient, 5000, address(0), "parent"
         );
         CompletionEscrowContract parent = CompletionEscrowContract(parentAddr);
 
@@ -358,13 +358,63 @@ contract CompletionEscrowContractTest is Test {
         escrow.markComplete();
     }
 
-    function testVerifyOnlyBuyer() public {
+    function testVerifyOnlyVerifierDefaultsToBuyer() public {
         CompletionEscrowContract escrow = _createAndFund(recipient1, address(0), 10000);
+        // With no nominated verifier, the buyer is the verifier
+        assertEq(escrow.VERIFIER(), buyer);
         vm.prank(seller);
         escrow.markComplete();
         vm.prank(other);
-        vm.expectRevert(CompletionEscrowContract.OnlyBuyer.selector);
+        vm.expectRevert(CompletionEscrowContract.OnlyVerifier.selector);
         escrow.verifyComplete();
+    }
+
+    function testNominatedVerifierVerifies() public {
+        address verifier = address(0x31);
+        vm.prank(buyer);
+        address addr = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, address(0), 10000, verifier, description
+        );
+        CompletionEscrowContract escrow = CompletionEscrowContract(addr);
+        assertEq(escrow.VERIFIER(), verifier);
+        _fund(escrow);
+
+        vm.prank(seller);
+        escrow.markComplete();
+
+        // The buyer can no longer verify - only the nominated verifier can
+        vm.prank(buyer);
+        vm.expectRevert(CompletionEscrowContract.OnlyVerifier.selector);
+        escrow.verifyComplete();
+
+        // The nominated verifier completes the payout
+        vm.prank(verifier);
+        escrow.verifyComplete();
+        assertTrue(escrow.isClaimed());
+        assertEq(usdc.balanceOf(recipient1), ESCROW);
+    }
+
+    function testNominatedVerifierStillLetsBuyerDispute() public {
+        address verifier = address(0x31);
+        vm.prank(buyer);
+        address addr = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, address(0), 10000, verifier, description
+        );
+        CompletionEscrowContract escrow = CompletionEscrowContract(addr);
+        _fund(escrow);
+
+        // Dispute power stays with the buyer even when a verifier is nominated
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        assertTrue(escrow.isDisputed());
+    }
+
+    function testCreateRevertsVerifierIsSeller() public {
+        vm.prank(buyer);
+        vm.expectRevert(CompletionEscrowContractFactory.VerifierCannotBeSeller.selector);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, recipient1, address(0), 10000, seller, description
+        );
     }
 
     function testVerifyRequiresMarkComplete() public {
