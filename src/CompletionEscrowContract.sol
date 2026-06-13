@@ -79,6 +79,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
     error OnlySeller();
     error OnlyBuyerOrGasPayer();
     error AlreadyFundedOrClaimed();
+    error InsufficientBalanceToActivate();
     error CannotDisputeAfterExpiry();
     error NotFunded();
     error NotAwaitingVerification();
@@ -239,6 +240,42 @@ contract CompletionEscrowContract is ReentrancyGuard {
         tokenAddress.safeTransferFrom(BUYER, address(this), AMOUNT);
 
         // 💳 STEP 3: Platform gets their fee (the ONLY money the platform receives)
+        if (CREATOR_FEE > 0) {
+            tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
+        }
+    }
+
+    /**
+     * 💰 SELF-FUND FROM EXISTING BALANCE - FOR TREE FAN-OUT
+     *
+     * When this escrow is itself a recipient of a parent node, the parent pays it by
+     * transferring tokens directly to this address (no approval/transferFrom is
+     * possible). This function activates the escrow using funds it already holds in
+     * `tokenAddress` (the only currency it recognizes), instead of pulling from BUYER.
+     *
+     * It needs to hold at least AMOUNT. The platform fee is paid out of that balance,
+     * exactly as in depositFunds(). Any balance beyond AMOUNT is left untouched, so
+     * orchestrators should size each node's AMOUNT to match the payout it will receive.
+     */
+    function checkAndActivate() external onlyBuyerOrGasPayer initialized nonReentrant {
+        if (_state != 0) revert AlreadyFundedOrClaimed();
+        if (tokenAddress.balanceOf(address(this)) < AMOUNT) revert InsufficientBalanceToActivate();
+
+        uint256 escrowAmount;
+        unchecked {
+            // Safe: CREATOR_FEE < AMOUNT is checked in initialize
+            escrowAmount = AMOUNT - CREATOR_FEE;
+        }
+
+        _state = 1; // funded - the held balance is now LOCKED in escrow
+
+        // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+        emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
+        if (CREATOR_FEE > 0) {
+            emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
+        }
+
+        // 💳 STEP 2: Platform gets their fee out of the funds already held here
         if (CREATOR_FEE > 0) {
             tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
         }
@@ -452,6 +489,16 @@ contract CompletionEscrowContract is ReentrancyGuard {
 
     function canDeposit() external view initialized returns (bool) {
         return _state == 0;
+    }
+
+    /// @notice This escrow's own balance of the escrow token (the only currency it recognizes).
+    function tokenBalance() external view initialized returns (uint256) {
+        return tokenAddress.balanceOf(address(this));
+    }
+
+    /// @notice True if the escrow is unfunded and already holds enough to self-activate.
+    function canActivateFromBalance() external view initialized returns (bool) {
+        return _state == 0 && tokenAddress.balanceOf(address(this)) >= AMOUNT;
     }
 
     function isDisputed() external view initialized returns (bool) {

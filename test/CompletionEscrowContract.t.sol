@@ -197,6 +197,105 @@ contract CompletionEscrowContractTest is Test {
         escrow.depositFunds();
     }
 
+    // ── self-fund from balance (tree fan-out) ────────────────────────────────
+
+    function testCheckAndActivateFromBalance() public {
+        CompletionEscrowContract escrow = _create(recipient1, address(0), 10000);
+        assertFalse(escrow.canActivateFromBalance());
+
+        // Simulate a parent node transferring tokens directly to this escrow's address
+        usdc.mint(address(escrow), AMOUNT);
+        assertTrue(escrow.canActivateFromBalance());
+        assertEq(escrow.tokenBalance(), AMOUNT);
+
+        vm.prank(gasPayer);
+        escrow.checkAndActivate();
+
+        assertTrue(escrow.isFunded());
+        assertEq(escrow.tokenBalance(), ESCROW);    // fee paid out, escrow retained
+        assertEq(usdc.balanceOf(gasPayer), CREATOR_FEE);
+    }
+
+    function testCheckAndActivateRevertsInsufficientBalance() public {
+        CompletionEscrowContract escrow = _create(recipient1, address(0), 10000);
+        usdc.mint(address(escrow), AMOUNT - 1);
+        vm.prank(gasPayer);
+        vm.expectRevert(CompletionEscrowContract.InsufficientBalanceToActivate.selector);
+        escrow.checkAndActivate();
+    }
+
+    function testCheckAndActivateRevertsIfAlreadyFunded() public {
+        CompletionEscrowContract escrow = _createAndFund(recipient1, address(0), 10000);
+        usdc.mint(address(escrow), AMOUNT);
+        vm.prank(gasPayer);
+        vm.expectRevert(CompletionEscrowContract.AlreadyFundedOrClaimed.selector);
+        escrow.checkAndActivate();
+    }
+
+    function testCheckAndActivateOnlyBuyerOrGasPayer() public {
+        CompletionEscrowContract escrow = _create(recipient1, address(0), 10000);
+        usdc.mint(address(escrow), AMOUNT);
+        vm.prank(other);
+        vm.expectRevert(CompletionEscrowContract.OnlyBuyerOrGasPayer.selector);
+        escrow.checkAndActivate();
+    }
+
+    /// Full tree: a parent node pays a child node, the child self-funds, then completes.
+    function testTreeFanOutChildSelfFunds() public {
+        address finalRecipient = address(0x21);
+        address otherRecipient = address(0x22);
+
+        // Parent escrow of 2000 USDC paying out 50/50; fee = 1% => ESCROW 1980, so the
+        // child (recipient1, 50%) will receive exactly 990 USDC.
+        uint256 parentAmount = 2000 * 10**6;
+        uint256 childAmount = 990 * 10**6;
+
+        // Child must exist first (its address is the parent's recipient1)
+        vm.prank(buyer);
+        address childAddr = factory.createEscrowContract(
+            address(usdc), buyer, seller, childAmount, expiryTimestamp,
+            finalRecipient, address(0), 10000, "child"
+        );
+        CompletionEscrowContract child = CompletionEscrowContract(childAddr);
+
+        vm.prank(buyer);
+        address parentAddr = factory.createEscrowContract(
+            address(usdc), buyer, seller, parentAmount, expiryTimestamp,
+            childAddr, otherRecipient, 5000, "parent"
+        );
+        CompletionEscrowContract parent = CompletionEscrowContract(parentAddr);
+
+        // Fund and complete the parent
+        vm.prank(buyer);
+        usdc.approve(parentAddr, parentAmount);
+        vm.prank(buyer);
+        parent.depositFunds();
+        vm.prank(seller);
+        parent.markComplete();
+        vm.prank(buyer);
+        parent.verifyComplete();
+
+        // Parent paid the child exactly its AMOUNT
+        assertEq(usdc.balanceOf(childAddr), childAmount);
+        assertTrue(child.canActivateFromBalance());
+
+        // Child self-funds from what the parent sent, then completes to its final recipient
+        vm.prank(gasPayer);
+        child.checkAndActivate();
+        assertTrue(child.isFunded());
+
+        uint256 childEscrow = childAmount - (childAmount / 100); // 1% fee
+        assertEq(usdc.balanceOf(childAddr), childEscrow);
+
+        vm.prank(seller);
+        child.markComplete();
+        vm.prank(buyer);
+        child.verifyComplete();
+
+        assertEq(usdc.balanceOf(finalRecipient), childEscrow);
+        assertEq(usdc.balanceOf(childAddr), 0);
+    }
+
     // ── happy path: dual verify ─────────────────────────────────────────────
 
     function testHappyPathSingleRecipient() public {
