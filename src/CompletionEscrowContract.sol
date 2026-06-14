@@ -18,16 +18,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *    This makes the contract a node in a tree of fan-out payments: each node is gated
  *    by BOTH supplier and buyer agreement.
  *
- * 2. UP TO TWO PAYOUT RECIPIENTS
- *    Instead of paying a single SELLER, the escrowed funds are split between up to two
- *    recipient addresses by a configured basis-point split. The SELLER is the supplier
- *    (who marks complete and votes in disputes) and is NOT necessarily a recipient.
+ * 2. UP TO MAX_RECIPIENTS PAYOUT RECIPIENTS
+ *    Instead of paying a single SELLER, the escrowed funds are split between 1..N
+ *    recipient addresses by a configured basis-point split (the shares sum to 10000).
+ *    The SELLER is the supplier (who marks complete and votes in disputes) and is NOT
+ *    necessarily a recipient.
  *
  * ─────────────────────────────────────────────────────────────────────────────────
  * 💰 WHERE MONEY CAN GO (enforced by code)
  * ─────────────────────────────────────────────────────────────────────────────────
- * ✅ RECIPIENT1 / RECIPIENT2: Receive the escrowed amount, split by basis points,
- *    on a successful dual-verify OR as the supplier-side share of a dispute.
+ * ✅ RECIPIENTS (1..MAX_RECIPIENTS): Receive the escrowed amount, split by basis
+ *    points, on a successful dual-verify OR as the supplier-side share of a dispute.
  * ✅ BUYER: Receives a refund share on a dispute resolution.
  * ✅ FEE_RECIPIENT: Receives the small platform fee once, at deposit time.
  * ❌ NOBODY ELSE.
@@ -61,6 +62,9 @@ contract CompletionEscrowContract is ReentrancyGuard {
     // Basis-point denominator for the recipient split (100% = 10000 bps)
     uint256 public constant BPS_DENOMINATOR = 10000;
 
+    // Upper bound on the number of payout recipients (bounds the distribution loop's gas)
+    uint256 public constant MAX_RECIPIENTS = 10;
+
     // Custom errors (saves gas compared to require strings)
     error AlreadyInitialized();
     error ImplementationCannotBeInitialized();
@@ -69,9 +73,12 @@ contract CompletionEscrowContract is ReentrancyGuard {
     error InvalidSellerAddress();
     error InvalidGasPayerAddress();
     error BuyerSellerMustBeDifferent();
+    error NoRecipients();
+    error TooManyRecipients();
+    error RecipientArrayLengthMismatch();
     error InvalidRecipientAddress();
-    error RecipientsMustBeDifferent();
-    error InvalidRecipientSplit();
+    error InvalidRecipientBps();
+    error RecipientBpsSumNot10000();
     error InvalidExpiryTimestamp();
     error CreatorFeeMustBeLessThanAmount();
     error NotInitialized();
@@ -100,10 +107,11 @@ contract CompletionEscrowContract is ReentrancyGuard {
     address public GAS_PAYER;     // Platform/arbiter - can vote in disputes, NOT take money
     address public FEE_RECIPIENT; // Address that receives the platform fee
 
-    // 💰 PAYOUT RECIPIENTS: escrowed funds are split between these by basis points
-    address public RECIPIENT1;    // Primary payout recipient (receives RECIPIENT1_BPS share)
-    address public RECIPIENT2;    // Secondary payout recipient (receives remainder); 0 = single recipient
-    uint256 public RECIPIENT1_BPS; // Share of escrow to RECIPIENT1, in basis points (0-10000)
+    // 💰 PAYOUT RECIPIENTS: escrowed funds are split between these by basis points.
+    // recipients[i] receives recipientBps[i] / 10000 of the escrow; the bps sum to 10000.
+    // 1..MAX_RECIPIENTS recipients are allowed; a single recipient just has bps [10000].
+    address[] public recipients;
+    uint256[] public recipientBps;
 
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
     uint256 public AMOUNT;           // Total amount BUYER must deposit (includes platform fee)
@@ -165,66 +173,80 @@ contract CompletionEscrowContract is ReentrancyGuard {
         _state = 255;
     }
 
-    function initialize(
-        address _tokenAddress,
-        address _buyer,
-        address _seller,
-        address _gasPayer,
-        uint256 _amount,
-        uint256 _expiryTimestamp,
-        uint256 _creatorFee,
-        address _feeRecipient,
-        address _recipient1,
-        address _recipient2,
-        uint256 _recipient1Bps,
-        address _verifier
-    ) external {
+    // Initialization parameters, passed as a single calldata struct so the many fields
+    // (including the dynamic recipient arrays) live in calldata rather than on the stack.
+    struct InitParams {
+        address tokenAddress;
+        address buyer;
+        address seller;
+        address gasPayer;
+        uint256 amount;
+        uint256 expiryTimestamp;
+        uint256 creatorFee;
+        address feeRecipient;
+        address[] recipients;
+        uint256[] recipientBps;
+        address verifier;
+    }
+
+    function initialize(InitParams calldata p) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
         FACTORY = msg.sender;
-        if (_tokenAddress == address(0)) revert InvalidTokenAddress();
-        if (_buyer == address(0)) revert InvalidBuyerAddress();
-        if (_seller == address(0)) revert InvalidSellerAddress();
-        if (_gasPayer == address(0)) revert InvalidGasPayerAddress();
-        if (_buyer == _seller) revert BuyerSellerMustBeDifferent();
+        if (p.tokenAddress == address(0)) revert InvalidTokenAddress();
+        if (p.buyer == address(0)) revert InvalidBuyerAddress();
+        if (p.seller == address(0)) revert InvalidSellerAddress();
+        if (p.gasPayer == address(0)) revert InvalidGasPayerAddress();
+        if (p.buyer == p.seller) revert BuyerSellerMustBeDifferent();
         // A nominated verifier acts for the buyer - it must never be the supplier,
         // or the supplier could approve its own work. Unset (0) defaults to the buyer.
-        if (_verifier == _seller) revert VerifierCannotBeSeller();
+        if (p.verifier == p.seller) revert VerifierCannotBeSeller();
         // Expiry must be a real future timestamp - this variant has no instant transfer
-        if (_expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
-        if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
+        if (p.expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
+        if (p.creatorFee >= p.amount) revert CreatorFeeMustBeLessThanAmount();
 
-        // Validate recipient split
-        if (_recipient1 == address(0)) revert InvalidRecipientAddress();
-        if (_recipient2 == address(0)) {
-            // Single recipient: must take the entire escrow
-            if (_recipient1Bps != BPS_DENOMINATOR) revert InvalidRecipientSplit();
-        } else {
-            // Two recipients: distinct addresses and a strict split in (0, 10000)
-            if (_recipient1 == _recipient2) revert RecipientsMustBeDifferent();
-            if (_recipient1Bps == 0 || _recipient1Bps >= BPS_DENOMINATOR) revert InvalidRecipientSplit();
-        }
+        _validateRecipients(p.recipients, p.recipientBps);
 
-        tokenAddress = IERC20(_tokenAddress);
-        BUYER = _buyer;
-        SELLER = _seller;
+        tokenAddress = IERC20(p.tokenAddress);
+        BUYER = p.buyer;
+        SELLER = p.seller;
         // Default the verifier to the buyer when none is nominated at creation
-        VERIFIER = _verifier == address(0) ? _buyer : _verifier;
-        GAS_PAYER = _gasPayer;
-        FEE_RECIPIENT = _feeRecipient;
-        RECIPIENT1 = _recipient1;
-        RECIPIENT2 = _recipient2;
-        RECIPIENT1_BPS = _recipient1Bps;
-        AMOUNT = _amount;
-        EXPIRY_TIMESTAMP = _expiryTimestamp;
-        CREATOR_FEE = _creatorFee;
+        VERIFIER = p.verifier == address(0) ? p.buyer : p.verifier;
+        GAS_PAYER = p.gasPayer;
+        FEE_RECIPIENT = p.feeRecipient;
+        recipients = p.recipients;
+        recipientBps = p.recipientBps;
+        AMOUNT = p.amount;
+        EXPIRY_TIMESTAMP = p.expiryTimestamp;
+        CREATOR_FEE = p.creatorFee;
         createdAt = block.timestamp;
         _state = 0; // unfunded
 
         // Initialize votes as "not voted" (255)
-        resolutionVotes[_buyer].buyerPercentage = 255;
-        resolutionVotes[_seller].buyerPercentage = 255;
-        resolutionVotes[_gasPayer].buyerPercentage = 255;
+        resolutionVotes[p.buyer].buyerPercentage = 255;
+        resolutionVotes[p.seller].buyerPercentage = 255;
+        resolutionVotes[p.gasPayer].buyerPercentage = 255;
+    }
+
+    /**
+     * Validates the recipient split: 1..MAX recipients, matching bps arrays, every
+     * recipient non-zero with a positive share, and the shares summing to exactly 100%.
+     */
+    function _validateRecipients(
+        address[] calldata _recipients,
+        uint256[] calldata _recipientBps
+    ) internal pure {
+        uint256 n = _recipients.length;
+        if (n == 0) revert NoRecipients();
+        if (n > MAX_RECIPIENTS) revert TooManyRecipients();
+        if (n != _recipientBps.length) revert RecipientArrayLengthMismatch();
+        uint256 bpsSum;
+        for (uint256 i = 0; i < n; i++) {
+            if (_recipients[i] == address(0)) revert InvalidRecipientAddress();
+            if (_recipientBps[i] == 0) revert InvalidRecipientBps();
+            bpsSum += _recipientBps[i];
+        }
+        if (bpsSum != BPS_DENOMINATOR) revert RecipientBpsSumNot10000();
     }
 
     /**
@@ -428,34 +450,30 @@ contract CompletionEscrowContract is ReentrancyGuard {
     }
 
     /**
-     * Splits `amount` between the recipients by the configured basis-point split.
-     * For a single recipient (RECIPIENT2 == 0) the whole amount goes to RECIPIENT1.
-     * For two recipients, RECIPIENT1 gets floor(amount * bps / 10000) and RECIPIENT2
-     * gets the remainder, so any rounding dust always lands on RECIPIENT2 (never stuck).
+     * Splits `amount` between the recipients by their configured basis-point shares.
+     * Each recipient but the last gets floor(amount * bps[i] / 10000); the last recipient
+     * gets whatever remains, so any rounding dust always lands on it and nothing is stuck.
+     * (For a single recipient it simply gets the whole amount.)
      */
     function _distributeToRecipients(uint256 amount) internal {
-        if (RECIPIENT2 == address(0)) {
-            if (amount > 0) {
-                emit FundsClaimed(RECIPIENT1, amount, block.timestamp);
-                tokenAddress.safeTransfer(RECIPIENT1, amount);
+        uint256 n = recipients.length;
+        uint256 distributed;
+        for (uint256 i = 0; i < n; i++) {
+            uint256 share;
+            if (i + 1 == n) {
+                // Last recipient absorbs the remainder (no dust left behind)
+                unchecked {
+                    // Safe: distributed <= amount, since each share <= its bps fraction
+                    share = amount - distributed;
+                }
+            } else {
+                share = (amount * recipientBps[i]) / BPS_DENOMINATOR;
+                distributed += share;
             }
-            return;
-        }
-
-        uint256 amount1 = (amount * RECIPIENT1_BPS) / BPS_DENOMINATOR;
-        uint256 amount2;
-        unchecked {
-            // Safe: amount1 <= amount by math (RECIPIENT1_BPS <= BPS_DENOMINATOR)
-            amount2 = amount - amount1;
-        }
-
-        if (amount1 > 0) {
-            emit FundsClaimed(RECIPIENT1, amount1, block.timestamp);
-            tokenAddress.safeTransfer(RECIPIENT1, amount1);
-        }
-        if (amount2 > 0) {
-            emit FundsClaimed(RECIPIENT2, amount2, block.timestamp);
-            tokenAddress.safeTransfer(RECIPIENT2, amount2);
+            if (share > 0) {
+                emit FundsClaimed(recipients[i], share, block.timestamp);
+                tokenAddress.safeTransfer(recipients[i], share);
+            }
         }
     }
 
@@ -488,11 +506,10 @@ contract CompletionEscrowContract is ReentrancyGuard {
     }
 
     function getRecipients() external view initialized returns (
-        address _recipient1,
-        address _recipient2,
-        uint256 _recipient1Bps
+        address[] memory _recipients,
+        uint256[] memory _recipientBps
     ) {
-        return (RECIPIENT1, RECIPIENT2, RECIPIENT1_BPS);
+        return (recipients, recipientBps);
     }
 
     function isExpired() external view initialized returns (bool) {

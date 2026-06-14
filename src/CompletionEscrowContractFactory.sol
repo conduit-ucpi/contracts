@@ -13,8 +13,11 @@ import {CompletionEscrowContract} from "./CompletionEscrowContract.sol";
  *
  * Creates individual CompletionEscrowContract instances via minimal proxies. Each
  * escrow gates payout behind BOTH supplier and buyer agreement (dual-verify) and pays
- * out to up to two recipients by a configured basis-point split. The factory has no
- * power over contracts once created.
+ * out to up to MAX_RECIPIENTS recipients by a configured basis-point split. The factory
+ * has no power over contracts once created.
+ *
+ * The recipient split is validated inside CompletionEscrowContract.initialize; that
+ * revert bubbles up through createEscrowContract, so callers see the same errors.
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
 contract CompletionEscrowContractFactory {
@@ -27,9 +30,6 @@ contract CompletionEscrowContractFactory {
     error InvalidSellerAddress();
     error BuyerSellerMustBeDifferent();
     error VerifierCannotBeSeller();
-    error InvalidRecipientAddress();
-    error RecipientsMustBeDifferent();
-    error InvalidRecipientSplit();
     error AmountMustBeGreaterThanZero();
     error InvalidExpiryTimestamp();
     error AmountTooSmallForMinFee();
@@ -47,9 +47,8 @@ contract CompletionEscrowContractFactory {
         address indexed seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        address recipient1,
-        address recipient2,
-        uint256 recipient1Bps,
+        address[] recipients,
+        uint256[] recipientBps,
         address verifier,
         string description
     );
@@ -67,8 +66,8 @@ contract CompletionEscrowContractFactory {
      * 🏭 CREATE NEW COMPLETION ESCROW CONTRACT
      *
      * Creates a dual-verify escrow between BUYER and SELLER (supplier), paying out to
-     * one or two recipients by a basis-point split. All addresses and the split are
-     * locked in at creation.
+     * 1..MAX_RECIPIENTS recipients by a basis-point split (the bps must sum to 10000).
+     * All addresses and the split are locked in at creation.
      */
     function createEscrowContract(
         address tokenAddress,
@@ -76,9 +75,8 @@ contract CompletionEscrowContractFactory {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        address recipient1,
-        address recipient2,
-        uint256 recipient1Bps,
+        address[] calldata recipients,
+        uint256[] calldata recipientBps,
         address verifier,
         string memory description
     ) external returns (address) {
@@ -91,15 +89,7 @@ contract CompletionEscrowContractFactory {
         if (amount == 0) revert AmountMustBeGreaterThanZero();
         // This variant has no instant transfer - expiry must be a real future timestamp
         if (expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
-
-        // Validate the recipient split up front (mirrors CompletionEscrowContract.initialize)
-        if (recipient1 == address(0)) revert InvalidRecipientAddress();
-        if (recipient2 == address(0)) {
-            if (recipient1Bps != 10000) revert InvalidRecipientSplit();
-        } else {
-            if (recipient1 == recipient2) revert RecipientsMustBeDifferent();
-            if (recipient1Bps == 0 || recipient1Bps >= 10000) revert InvalidRecipientSplit();
-        }
+        // The recipient split is validated in CompletionEscrowContract.initialize.
 
         // Collapse the params into a memory struct so the deploy step has a shallow stack
         EscrowParams memory p = EscrowParams({
@@ -108,9 +98,8 @@ contract CompletionEscrowContractFactory {
             seller: seller,
             amount: amount,
             expiryTimestamp: expiryTimestamp,
-            recipient1: recipient1,
-            recipient2: recipient2,
-            recipient1Bps: recipient1Bps,
+            recipients: recipients,
+            recipientBps: recipientBps,
             verifier: verifier,
             creatorFee: _calculateCreatorFee(tokenAddress, amount)
         });
@@ -123,9 +112,8 @@ contract CompletionEscrowContractFactory {
             seller,
             amount,
             expiryTimestamp,
-            recipient1,
-            recipient2,
-            recipient1Bps,
+            recipients,
+            recipientBps,
             verifier,
             description
         );
@@ -140,17 +128,16 @@ contract CompletionEscrowContractFactory {
         address seller;
         uint256 amount;
         uint256 expiryTimestamp;
-        address recipient1;
-        address recipient2;
-        uint256 recipient1Bps;
+        address[] recipients;
+        uint256[] recipientBps;
         address verifier;
         uint256 creatorFee;
     }
 
     /**
-     * 🏭 Deterministically clones the implementation and initializes it. Lives in its
-     * own stack frame so the deterministic salt (which mixes in many params) does not
-     * exhaust the stack with via_ir disabled.
+     * 🏭 Deterministically clones the implementation and initializes it. Split into
+     * _computeSalt and _init so each heavy step gets its own stack frame and the build
+     * stays within the stack limit with via_ir disabled.
      */
     function _deploy(EscrowParams memory p) internal returns (address) {
         address clone = Clones.cloneDeterministic(IMPLEMENTATION, _computeSalt(p));
@@ -159,33 +146,34 @@ contract CompletionEscrowContractFactory {
     }
 
     function _computeSalt(EscrowParams memory p) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(
+        // abi.encode (not encodePacked) so the dynamic arrays are encoded unambiguously
+        return keccak256(abi.encode(
             p.tokenAddress,
             p.buyer,
             p.seller,
             p.amount,
             p.expiryTimestamp,
-            p.recipient1,
-            p.recipient2,
-            p.recipient1Bps,
+            p.recipients,
+            p.recipientBps,
             block.timestamp
         ));
     }
 
     function _init(address clone, EscrowParams memory p) internal {
         CompletionEscrowContract(clone).initialize(
-            p.tokenAddress,
-            p.buyer,
-            p.seller,
-            OWNER,
-            p.amount,
-            p.expiryTimestamp,
-            p.creatorFee,
-            FEE_RECIPIENT,
-            p.recipient1,
-            p.recipient2,
-            p.recipient1Bps,
-            p.verifier
+            CompletionEscrowContract.InitParams({
+                tokenAddress: p.tokenAddress,
+                buyer: p.buyer,
+                seller: p.seller,
+                gasPayer: OWNER,
+                amount: p.amount,
+                expiryTimestamp: p.expiryTimestamp,
+                creatorFee: p.creatorFee,
+                feeRecipient: FEE_RECIPIENT,
+                recipients: p.recipients,
+                recipientBps: p.recipientBps,
+                verifier: p.verifier
+            })
         );
     }
 
@@ -219,20 +207,18 @@ contract CompletionEscrowContractFactory {
         address seller,
         uint256 amount,
         uint256 expiryTimestamp,
-        address recipient1,
-        address recipient2,
-        uint256 recipient1Bps,
+        address[] calldata recipients,
+        uint256[] calldata recipientBps,
         uint256 creationTimestamp
     ) external view returns (address) {
-        bytes32 salt = keccak256(abi.encodePacked(
+        bytes32 salt = keccak256(abi.encode(
             tokenAddress,
             buyer,
             seller,
             amount,
             expiryTimestamp,
-            recipient1,
-            recipient2,
-            recipient1Bps,
+            recipients,
+            recipientBps,
             creationTimestamp
         ));
 
