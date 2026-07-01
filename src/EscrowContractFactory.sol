@@ -22,8 +22,9 @@ import {EscrowContract} from "./EscrowContract.sol";
  * 
  * 🛡️ WHAT THIS FACTORY CANNOT DO:
  * ❌ Cannot modify existing escrow contracts
- * ❌ Cannot access money in escrow contracts  
- * ❌ Cannot change BUYER or SELLER addresses after creation
+ * ❌ Cannot access money in escrow contracts
+ * ❌ Cannot change the BUYER address after creation (the SELLER may reassign only its
+ *    own payout address, and only the seller itself can do so - not the factory)
  * ❌ Cannot bypass security mechanisms in individual contracts
  * 
  * The factory simply creates secure escrow contracts - it has no power over them afterward.
@@ -39,6 +40,7 @@ contract EscrowContractFactory {
     error InvalidBuyerAddress();
     error InvalidSellerAddress();
     error BuyerSellerMustBeDifferent();
+    error ArbiterMustBeDistinct();
     error AmountMustBeGreaterThanZero();
     error InvalidExpiryTimestamp();
     error AmountTooSmallForMinFee();
@@ -78,7 +80,8 @@ contract EscrowContractFactory {
      * 
      * What this function does:
      * ✅ Creates a new escrow contract between BUYER and SELLER
-     * ✅ Locks in the BUYER and SELLER addresses (cannot be changed)
+     * ✅ Locks in the BUYER address (immutable); the SELLER may later reassign only its
+     *    own payout address via changeRecipient (seller-controlled)
      * ✅ Sets up all security mechanisms to protect both parties
      * ✅ Ensures only BUYER and SELLER can receive the escrowed money
      * 
@@ -106,6 +109,11 @@ contract EscrowContractFactory {
 
         // Default arbiter to the caller when not specified
         if (arbiter == address(0)) arbiter = msg.sender;
+        // The arbiter must be an independent third party. Sharing the arbiter address
+        // with the buyer or seller would hand that party 2-of-3 dispute votes. This
+        // also blocks the footgun of a buyer/seller creating their own escrow and
+        // defaulting the arbiter to themselves.
+        if (arbiter == buyer || arbiter == seller) revert ArbiterMustBeDistinct();
 
         uint256 creatorFee = _calculateCreatorFee(tokenAddress, amount);
 
@@ -161,7 +169,17 @@ contract EscrowContractFactory {
      *   Reverts if the amount is too small to cover the minimum fee.
      */
     function _calculateCreatorFee(address tokenAddress, uint256 amount) internal view returns (uint256) {
-        uint256 oneUnit = 10 ** IERC20Metadata(tokenAddress).decimals();
+        // decimals() is an OPTIONAL ERC20 extension. Tokens that omit it (or revert)
+        // must not brick escrow creation, so fall back to the 18-decimal convention.
+        // Clamp to a sane maximum to avoid 10**decimals overflowing uint256.
+        uint8 decimals = 18;
+        try IERC20Metadata(tokenAddress).decimals() returns (uint8 d) {
+            if (d <= 36) decimals = d;
+        } catch {
+            // keep the 18-decimal fallback
+        }
+
+        uint256 oneUnit = 10 ** decimals;
         uint256 noFeeThreshold = oneUnit / 1000;
 
         if (amount <= noFeeThreshold) return 0;

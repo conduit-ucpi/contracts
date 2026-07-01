@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test, console} from "forge-std/Test.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {EscrowContract} from "../src/EscrowContract.sol";
 import {EscrowContractFactory} from "../src/EscrowContractFactory.sol";
 
@@ -44,6 +45,68 @@ contract MockERC20 is Test {
         balanceOf[to] += amount;
         totalSupply += amount;
     }
+}
+
+// Delivers 1% less than requested on transfer/transferFrom, simulating a
+// fee-on-transfer / deflationary token. Used to prove deposits reject such tokens.
+contract FeeOnTransferERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    uint8 public decimals = 6;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "balance");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount - (amount / 100); // 1% fee vanishes
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(allowance[from][msg.sender] >= amount, "allowance");
+        require(balanceOf[from] >= amount, "balance");
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount - (amount / 100); // recipient receives less than `amount`
+        return true;
+    }
+}
+
+// A minimal ERC20 that intentionally omits the optional decimals() function, to
+// prove the factory tolerates it via a fallback rather than reverting.
+contract NoDecimalsERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "balance");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(allowance[from][msg.sender] >= amount, "allowance");
+        require(balanceOf[from] >= amount, "balance");
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+    // no decimals()
 }
 
 contract EscrowContractTest is Test {
@@ -1476,5 +1539,338 @@ contract EscrowContractTest is Test {
 
         // Escrow token should be untouched
         assertTrue(escrow.isFunded());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // changeRecipient — seller reassigns their payout right (state 1 only)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    event RecipientChanged(address indexed previousSeller, address indexed newSeller, uint256 timestamp);
+
+    function testChangeRecipientHappyPath() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit RecipientChanged(seller, other, block.timestamp);
+
+        vm.prank(seller);
+        escrow.changeRecipient(other);
+
+        assertEq(escrow.SELLER(), other);
+        assertEq(escrow.recipient(), other);
+        // State is untouched by the reassignment
+        assertTrue(escrow.isFunded());
+    }
+
+    function testChangeRecipientOnlySeller() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.OnlySeller.selector);
+        escrow.changeRecipient(other);
+
+        vm.prank(arbiter);
+        vm.expectRevert(EscrowContract.OnlySeller.selector);
+        escrow.changeRecipient(other);
+
+        vm.prank(other);
+        vm.expectRevert(EscrowContract.OnlySeller.selector);
+        escrow.changeRecipient(other);
+
+        // Seller remains unchanged after all failed attempts
+        assertEq(escrow.SELLER(), seller);
+    }
+
+    function testChangeRecipientRejectsZeroAddress() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.InvalidSellerAddress.selector);
+        escrow.changeRecipient(address(0));
+    }
+
+    function testChangeRecipientRejectsBuyer() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.BuyerSellerMustBeDifferent.selector);
+        escrow.changeRecipient(buyer);
+    }
+
+    function testChangeRecipientRejectsArbiter() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        // Reassigning to the arbiter would collapse 2-of-3 votes into one address
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
+        escrow.changeRecipient(arbiter);
+    }
+
+    function testChangeRecipientRejectedWhenUnfunded() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.changeRecipient(other);
+    }
+
+    function testChangeRecipientRejectedWhenDisputed() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.changeRecipient(other);
+    }
+
+    function testChangeRecipientRejectedWhenClaimed() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.warp(expiryTimestamp + 1);
+        vm.prank(seller);
+        escrow.claimFunds();
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.changeRecipient(other);
+    }
+
+    function testChangeRecipientNewSellerReceivesFundsOnClaim() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.prank(seller);
+        escrow.changeRecipient(other);
+
+        vm.warp(expiryTimestamp + 1);
+
+        uint256 oldSellerBefore = usdc.balanceOf(seller);
+        uint256 newSellerBefore = usdc.balanceOf(other);
+
+        vm.prank(other);
+        escrow.claimFunds();
+
+        // Funds go to the new recipient, not the original seller
+        assertEq(usdc.balanceOf(seller), oldSellerBefore);
+        assertEq(usdc.balanceOf(other), newSellerBefore + (AMOUNT - CREATOR_FEE));
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+    }
+
+    function testChangeRecipientTransfersVotingRights() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.prank(seller);
+        escrow.changeRecipient(other);
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        // Original seller is no longer an authorized voter
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.NotAuthorizedToVote.selector);
+        escrow.submitResolutionVote(50);
+
+        // New recipient votes as the seller party; consensus with buyer pays new recipient
+        uint256 newSellerBefore = usdc.balanceOf(other);
+
+        vm.prank(buyer);
+        escrow.submitResolutionVote(0); // 0% to buyer => 100% to seller party
+
+        vm.prank(other);
+        escrow.submitResolutionVote(0);
+
+        assertTrue(escrow.consensusReached());
+        assertEq(usdc.balanceOf(other), newSellerBefore + (AMOUNT - CREATOR_FEE));
+    }
+
+    // Regression: a reassigned seller must NOT be counted as having voted 0% by
+    // default. Without the explicit `= 255` in changeRecipient, the new seller's
+    // default mapping value (0) would collude with an arbiter 0-vote to force a
+    // false consensus paying the seller 100%.
+    function testChangeRecipientNewSellerNotCountedAsVoted() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        vm.prank(seller);
+        escrow.changeRecipient(other);
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        // Only the arbiter votes 0. If the new seller defaulted to "voted 0%",
+        // this would reach seller+arbiter consensus. It must not.
+        vm.prank(arbiter);
+        escrow.submitResolutionVote(0);
+
+        assertFalse(escrow.consensusReached());
+        assertTrue(escrow.isDisputed());
+        assertEq(usdc.balanceOf(address(escrow)), AMOUNT - CREATOR_FEE);
+
+        // New seller can then genuinely vote to complete the 2-of-3
+        vm.prank(other);
+        escrow.submitResolutionVote(0);
+        assertTrue(escrow.consensusReached());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Arbiter must be an independent third party (2-of-3 vote integrity)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function testFactoryRejectsArbiterEqualsBuyer() public {
+        vm.prank(arbiter);
+        vm.expectRevert(EscrowContractFactory.ArbiterMustBeDistinct.selector);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, buyer
+        );
+    }
+
+    function testFactoryRejectsArbiterEqualsSeller() public {
+        vm.prank(arbiter);
+        vm.expectRevert(EscrowContractFactory.ArbiterMustBeDistinct.selector);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, seller
+        );
+    }
+
+    // Pins the initialize-level guard independently of the factory's own check
+    // (defense in depth): a raw clone initialized with a colliding arbiter must
+    // revert even if the factory guard were ever bypassed or removed.
+    function testInitializeRejectsArbiterEqualsBuyerOrSeller() public {
+        EscrowContract impl = new EscrowContract();
+
+        address cloneA = Clones.clone(address(impl));
+        vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
+        EscrowContract(cloneA).initialize(
+            address(usdc), buyer, seller, buyer, AMOUNT, expiryTimestamp, 0, arbiter
+        );
+
+        address cloneB = Clones.clone(address(impl));
+        vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
+        EscrowContract(cloneB).initialize(
+            address(usdc), buyer, seller, seller, AMOUNT, expiryTimestamp, 0, arbiter
+        );
+    }
+
+    function testInitializeRejectsZeroFeeRecipient() public {
+        EscrowContract impl = new EscrowContract();
+        address clone = Clones.clone(address(impl));
+        vm.expectRevert(EscrowContract.InvalidFeeRecipientAddress.selector);
+        EscrowContract(clone).initialize(
+            address(usdc), buyer, seller, arbiter, AMOUNT, expiryTimestamp, 0, address(0)
+        );
+    }
+
+    function testFactoryRejectsCreatorDefaultingSelfAsArbiter() public {
+        // Buyer creates their own escrow without specifying an arbiter; the default
+        // (msg.sender == buyer) must be rejected rather than granting them 2 votes.
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContractFactory.ArbiterMustBeDistinct.selector);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Token safety: fee-on-transfer rejection and missing decimals() tolerance
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function testDepositRejectsFeeOnTransferToken() public {
+        FeeOnTransferERC20 feeToken = new FeeOnTransferERC20();
+        feeToken.mint(buyer, AMOUNT * 10);
+
+        vm.prank(arbiter);
+        address esc = factory.createEscrowContract(
+            address(feeToken), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter
+        );
+        EscrowContract escrow = EscrowContract(esc);
+
+        vm.prank(buyer);
+        feeToken.approve(esc, AMOUNT);
+
+        // The contract would receive less than AMOUNT; deposit must reject the token
+        // rather than under-fund the escrow and lock later payouts.
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.TransferAmountMismatch.selector);
+        escrow.depositFunds();
+    }
+
+    function testFactoryToleratesTokenWithoutDecimals() public {
+        NoDecimalsERC20 noDec = new NoDecimalsERC20();
+        // Large enough to clear the 18-decimal fallback minimum fee.
+        uint256 bigAmount = 1000 ether;
+        noDec.mint(buyer, bigAmount * 2);
+
+        // Creation must not revert just because decimals() is absent.
+        vm.prank(arbiter);
+        address esc = factory.createEscrowContract(
+            address(noDec), buyer, seller, bigAmount, expiryTimestamp, description, arbiter
+        );
+        assertTrue(esc != address(0));
+
+        // And the resulting escrow is fully usable (funds cleanly).
+        vm.prank(buyer);
+        noDec.approve(esc, bigAmount);
+        vm.prank(buyer);
+        EscrowContract(esc).depositFunds();
+        assertTrue(EscrowContract(esc).isFunded());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MarketplaceEscrow integration adapter views
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function testAdapterViews() public {
+        EscrowContract escrow = createAndFundEscrow();
+
+        assertEq(escrow.recipient(), seller);
+        assertEq(escrow.maturity(), expiryTimestamp);
+        assertEq(escrow.token(), address(usdc));
+        assertEq(escrow.payoutAmount(), AMOUNT - CREATOR_FEE);
+        assertFalse(escrow.hasActiveDispute());
+    }
+
+    function testAdapterHasActiveDisputeReflectsState() public {
+        EscrowContract escrow = createAndFundEscrow();
+        assertFalse(escrow.hasActiveDispute());
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        assertTrue(escrow.hasActiveDispute());
+
+        // Resolve and confirm it clears
+        vm.prank(buyer);
+        escrow.submitResolutionVote(100);
+        vm.prank(arbiter);
+        escrow.submitResolutionVote(100);
+        assertFalse(escrow.hasActiveDispute());
+        assertTrue(escrow.isClaimed());
+    }
+
+    function testAdapterRecipientReflectsReassignment() public {
+        EscrowContract escrow = createAndFundEscrow();
+        assertEq(escrow.recipient(), seller);
+
+        vm.prank(seller);
+        escrow.changeRecipient(other);
+        assertEq(escrow.recipient(), other);
+    }
+
+    function testAdapterViewsRevertBeforeInit() public {
+        EscrowContract implementation = new EscrowContract();
+
+        vm.expectRevert(EscrowContract.NotInitialized.selector);
+        implementation.recipient();
+
+        vm.expectRevert(EscrowContract.NotInitialized.selector);
+        implementation.maturity();
+
+        vm.expectRevert(EscrowContract.NotInitialized.selector);
+        implementation.hasActiveDispute();
+
+        vm.expectRevert(EscrowContract.NotInitialized.selector);
+        implementation.token();
+
+        vm.expectRevert(EscrowContract.NotInitialized.selector);
+        implementation.payoutAmount();
     }
 }
