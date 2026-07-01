@@ -243,7 +243,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
- contract EscrowContract is ReentrancyGuard {
+contract EscrowContract is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // Custom errors (saves gas compared to require strings)
@@ -281,26 +281,26 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     //    seller may reassign it via changeRecipient() (see that function), but only the
     //    seller can do so, only while funded and undisputed, and funds can still ONLY
     //    ever reach the current BUYER or SELLER - never the platform or a third party.
-    address public FACTORY;  // Factory contract that created this escrow - only it can initialize
-    IERC20 public tokenAddress;     // The ERC20 token contract (any ERC20) - immutable after initialization
-    address public BUYER;           // ONLY this address can deposit funds and raise disputes - immutable
-    address public SELLER;          // Receives funds after expiry or dispute - reassignable by the seller via changeRecipient()
-    address public ARBITER;         // Arbiter address - can ONLY vote on disputes, NOT take your money - immutable, distinct from buyer/seller
-    address public FEE_RECIPIENT;   // Address that receives the platform fee - immutable
-    
+    address public FACTORY; // Factory contract that created this escrow - only it can initialize
+    IERC20 public tokenAddress; // The ERC20 token contract (any ERC20) - immutable after initialization
+    address public BUYER; // ONLY this address can deposit funds and raise disputes - immutable
+    address public SELLER; // Receives funds after expiry or dispute - reassignable by the seller via changeRecipient()
+    address public ARBITER; // Arbiter address - can ONLY vote on disputes, NOT take your money - immutable, distinct from buyer/seller
+    address public FEE_RECIPIENT; // Address that receives the platform fee - immutable
+
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
-    uint256 public AMOUNT;          // Total amount BUYER must deposit (includes platform fee)
+    uint256 public AMOUNT; // Total amount BUYER must deposit (includes platform fee)
     uint256 public EXPIRY_TIMESTAMP; // When SELLER can claim funds (if no dispute)
     // Description stored in events only (not in storage) to save ~20k gas
-    uint256 public CREATOR_FEE;     // Small platform fee (deducted from AMOUNT, rest goes to BUYER/SELLER)
-    uint256 public createdAt;       // Timestamp when the contract was created
-    
+    uint256 public CREATOR_FEE; // Small platform fee (deducted from AMOUNT, rest goes to BUYER/SELLER)
+    uint256 public createdAt; // Timestamp when the contract was created
+
     // 🔐 INTERNAL STATE: Tracks contract progress (cannot be manipulated externally)
     uint8 private _state; // 0=unfunded, 1=funded, 2=disputed, 3=resolved, 4=claimed
 
     // ⚖️  VOTING STATE: 2-of-3 voting resolution system
     struct ResolutionVote {
-        uint8 buyerPercentage;  // 0-100 = valid vote, 255 = not voted yet
+        uint8 buyerPercentage; // 0-100 = valid vote, 255 = not voted yet
         // Packed into 1 byte instead of 65 bytes (3 slots)
         // Gas savings: ~40k per vote write, ~10k per vote update!
     }
@@ -317,7 +317,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     event VoteSubmitted(address indexed voter, uint256 buyerPercentage);
     event TokensSwept(address indexed token, address indexed recipient, uint256 amount);
     event RecipientChanged(address indexed previousSeller, address indexed newSeller, uint256 timestamp);
-    
+
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
 
     // ⚡ BUYER PROTECTION: Only the original BUYER can raise disputes
@@ -332,19 +332,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         _;
     }
 
-
     modifier initialized() {
         if (_state == 255) revert NotInitialized();
         _;
     }
-    
+
     constructor() {
         // Implementation contract - disable initialization
         // FACTORY will remain address(0) for the implementation
         _state = 255; // Mark as disabled
     }
-    
-    
+
     function initialize(
         address _tokenAddress,
         address _buyer,
@@ -357,7 +355,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     ) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
-        FACTORY = msg.sender;  // Set the factory to the caller
+        FACTORY = msg.sender; // Set the factory to the caller
         if (_tokenAddress == address(0)) revert InvalidTokenAddress();
         if (_buyer == address(0)) revert InvalidBuyerAddress();
         if (_seller == address(0)) revert InvalidSellerAddress();
@@ -380,7 +378,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
         CREATOR_FEE = _creatorFee;
-        createdAt = block.timestamp;  // Set the creation timestamp
+        createdAt = block.timestamp; // Set the creation timestamp
         if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
         _state = 0; // Set to unfunded state
 
@@ -389,7 +387,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         resolutionVotes[_seller].buyerPercentage = 255;
         resolutionVotes[_arbiter].buyerPercentage = 255;
     }
-    
+
     /**
      * 💰 BUYER DEPOSITS MONEY - THE ESCROW BEGINS
      *
@@ -452,7 +450,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
             // 💰 STEP 4: Immediately transfer to SELLER (no escrow period)
             tokenAddress.safeTransfer(SELLER, escrowAmount);
-
         } else {
             _state = 1; // funded - money is now LOCKED in escrow
 
@@ -479,7 +476,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
         }
     }
-    
+
     /**
      * 💰 CHECK AND ACTIVATE - DIRECT TRANSFER FUNDING
      *
@@ -531,7 +528,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
             // 💰 STEP 3: Immediately transfer to SELLER (no escrow period)
             tokenAddress.safeTransfer(SELLER, escrowAmount);
-
         } else {
             _state = 1; // funded - money is now LOCKED in escrow
 
@@ -618,99 +614,99 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
     /**
      * 🚨 BUYER PROTECTION - RAISE A DISPUTE
-     * 
+     *
      * 🔒 SECURITY GUARANTEE: This is BUYER's protection mechanism - can ONLY be called by BUYER
-     * 
+     *
      * This function allows BUYER to protect themselves if:
      * ✅ SELLER didn't deliver what was promised
      * ✅ There's a problem with the transaction
      * ✅ BUYER needs their money back or partial refund
-     * 
+     *
      * 🛡️ What happens when BUYER disputes:
      * 1. SELLER can no longer claim the money automatically
      * 2. The money stays LOCKED until a neutral party resolves the dispute
      * 3. A fair resolution will split the money between BUYER and SELLER
      * 4. Platform cannot take the disputed money - it MUST go to BUYER/SELLER
-     * 
+     *
      * 🔐 BUYER'S RIGHTS:
      * ✅ Can dispute at ANY time before SELLER claims
      * ✅ Stops SELLER from taking money until dispute is resolved
      * ✅ Guarantees neutral review of the situation
      * ✅ Ensures fair distribution of funds based on what actually happened
-     * 
+     *
      * ⏰ TIMING: BUYER should dispute BEFORE the expiry time if there's a problem.
-     *          After expiry, SELLER can claim - but if BUYER disputes first, 
+     *          After expiry, SELLER can claim - but if BUYER disputes first,
      *          SELLER must wait for resolution.
      */
     function raiseDispute() external onlyBuyer initialized {
         if (_state != 1) revert NotFundedOrAlreadyProcessed();
         if (EXPIRY_TIMESTAMP == 0) revert CannotDisputeInstantTransfer();
         if (block.timestamp >= EXPIRY_TIMESTAMP) revert CannotDisputeAfterExpiry();
-        
+
         _state = 2; // disputed - money is now frozen until resolution
-        
+
         // 📝 Record this dispute permanently on blockchain
         emit DisputeRaised(block.timestamp);
-        
+
         // 🔒 At this point: Money is LOCKED until dispute resolution
         //    SELLER cannot claim until dispute is resolved
         //    Only BUYER and SELLER can receive money from resolution
     }
-    
-/**
- * ⚖️  DISPUTE RESOLUTION - 2-OF-3 VOTING SYSTEM
- *
- * 🎯 DECENTRALIZED DISPUTE RESOLUTION THROUGH VOTING
- *
- * This contract uses a 2-of-3 voting mechanism where buyer, seller, and admin
- * can each vote on the resolution percentage. When any 2 votes agree, the
- * resolution executes automatically.
- *
- * 🔐 WHAT THE CODE GUARANTEES (mathematically enforced):
- * ✅ Platform CANNOT take disputed funds for themselves
- * ✅ Platform CANNOT send funds to addresses other than buyer/seller
- * ✅ Platform CANNOT change buyer/seller addresses
- * ✅ Percentages MUST be <= 100%
- * ✅ All escrowed funds MUST be distributed to buyer and/or seller
- * ✅ Platform gets ZERO extra payment from disputes (only initial fee)
- * ✅ Votes are immutable once consensus is reached
- *
- * 🤝 HOW VOTING WORKS:
- *
- * STEP 1 - Buyer Raises Dispute (On-Chain):
- * ✅ Buyer calls raiseDispute() → funds are now frozen
- * ✅ Seller cannot claim until resolved
- * ✅ This protects buyer from seller taking money for undelivered goods
- *
- * STEP 2 - Voting Phase:
- * ✅ Buyer, seller, and admin can each submit their vote
- * ✅ All parties vote on: "What % of funds should be refunded to buyer?"
- * ✅ Votes can be changed until 2 votes match (then consensus is reached)
- * ✅ Admin is trusted and can vote anytime
- *
- * STEP 3 - Consensus & Execution:
- * ✅ When any 2 votes agree (buyer+seller, buyer+admin, or seller+admin)
- * ✅ Consensus is reached and votes become immutable
- * ✅ Resolution executes automatically with the agreed percentage
- * ✅ Funds distributed immediately
- *
- * 🛡️ WHY THIS DESIGN:
- *
- * ✅ PRACTICAL: Encourages parties to negotiate and agree
- * ✅ FAIR: Admin cannot force resolution alone (needs 1 party agreement)
- * ✅ FLEXIBLE: Handles nuanced situations (partial delivery, quality issues)
- * ✅ TRANSPARENT: All votes visible on-chain
- * ✅ DEADLOCK-FREE: Admin can break deadlock by agreeing with one party
- *
- * 💰 DISTRIBUTION MATH (enforced by code):
- * Total escrowed = (AMOUNT - CREATOR_FEE)
- * Buyer receives = (Total × agreedPercentage) ÷ 100
- * Seller receives = Total - Buyer amount
- * Platform receives = 0 (already got CREATOR_FEE at deposit)
- *
- * This approach combines BLOCKCHAIN SECURITY (code-guaranteed fund safety)
- * with PRACTICAL UX (voting-based resolution). It's transparent and fair.
- */
+
+    /**
+     * ⚖️  DISPUTE RESOLUTION - 2-OF-3 VOTING SYSTEM
+     *
+     * 🎯 DECENTRALIZED DISPUTE RESOLUTION THROUGH VOTING
+     *
+     * This contract uses a 2-of-3 voting mechanism where buyer, seller, and admin
+     * can each vote on the resolution percentage. When any 2 votes agree, the
+     * resolution executes automatically.
+     *
+     * 🔐 WHAT THE CODE GUARANTEES (mathematically enforced):
+     * ✅ Platform CANNOT take disputed funds for themselves
+     * ✅ Platform CANNOT send funds to addresses other than buyer/seller
+     * ✅ Platform CANNOT change buyer/seller addresses
+     * ✅ Percentages MUST be <= 100%
+     * ✅ All escrowed funds MUST be distributed to buyer and/or seller
+     * ✅ Platform gets ZERO extra payment from disputes (only initial fee)
+     * ✅ Votes are immutable once consensus is reached
+     *
+     * 🤝 HOW VOTING WORKS:
+     *
+     * STEP 1 - Buyer Raises Dispute (On-Chain):
+     * ✅ Buyer calls raiseDispute() → funds are now frozen
+     * ✅ Seller cannot claim until resolved
+     * ✅ This protects buyer from seller taking money for undelivered goods
+     *
+     * STEP 2 - Voting Phase:
+     * ✅ Buyer, seller, and admin can each submit their vote
+     * ✅ All parties vote on: "What % of funds should be refunded to buyer?"
+     * ✅ Votes can be changed until 2 votes match (then consensus is reached)
+     * ✅ Admin is trusted and can vote anytime
+     *
+     * STEP 3 - Consensus & Execution:
+     * ✅ When any 2 votes agree (buyer+seller, buyer+admin, or seller+admin)
+     * ✅ Consensus is reached and votes become immutable
+     * ✅ Resolution executes automatically with the agreed percentage
+     * ✅ Funds distributed immediately
+     *
+     * 🛡️ WHY THIS DESIGN:
+     *
+     * ✅ PRACTICAL: Encourages parties to negotiate and agree
+     * ✅ FAIR: Admin cannot force resolution alone (needs 1 party agreement)
+     * ✅ FLEXIBLE: Handles nuanced situations (partial delivery, quality issues)
+     * ✅ TRANSPARENT: All votes visible on-chain
+     * ✅ DEADLOCK-FREE: Admin can break deadlock by agreeing with one party
+     *
+     * 💰 DISTRIBUTION MATH (enforced by code):
+     * Total escrowed = (AMOUNT - CREATOR_FEE)
+     * Buyer receives = (Total × agreedPercentage) ÷ 100
+     * Seller receives = Total - Buyer amount
+     * Platform receives = 0 (already got CREATOR_FEE at deposit)
+     *
+     * This approach combines BLOCKCHAIN SECURITY (code-guaranteed fund safety)
+     * with PRACTICAL UX (voting-based resolution). It's transparent and fair.
+     */
     function submitResolutionVote(uint256 _buyerPercentage) external initialized {
         if (_state != 2) revert ContractMustBeDisputed();
         if (consensusReached) revert ConsensusAlreadyReached();
@@ -793,21 +789,21 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         // ✅ SECURITY VERIFICATION: At this point, 100% of escrowed money has been
         //    distributed to BUYER and SELLER. Platform cannot access any of it.
     }
-    
+
     /**
      * 💰 SELLER CLAIMS MONEY - THE HAPPY PATH
-     * 
+     *
      * 🔒 SECURITY GUARANTEE: Money can ONLY go to the SELLER address (set at creation)
-     * 
+     *
      * This function allows SELLER to claim their money when:
      * ✅ The time has expired (BUYER had their chance to dispute)
      * ✅ No dispute was raised by BUYER
      * ✅ Funds were previously deposited
-     * 
-     * 🛡️ BUYER PROTECTION: 
+     *
+     * 🛡️ BUYER PROTECTION:
      * - BUYER had the entire time period to raise a dispute if something was wrong
      * - If BUYER didn't dispute, it means they're satisfied with the transaction
-     * 
+     *
      * 🔐 SECURITY MECHANISMS:
      * ✅ IMPOSSIBLE for anyone except SELLER to receive this money
      * ✅ Platform cannot intercept or redirect these funds
@@ -823,7 +819,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
         if (_state != 1) revert NotFundedOrAlreadyProcessed();
         if (EXPIRY_TIMESTAMP == 0) revert InstantTransferAlreadyCompleted();
         if (block.timestamp < EXPIRY_TIMESTAMP) revert NotExpiredYet();
-        
+
         _state = 4; // claimed - transaction complete
 
         // 💰 Calculate amount for SELLER (total minus platform fee that was already paid)
@@ -832,27 +828,32 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             // Safe: CREATOR_FEE < AMOUNT is checked in initialize
             escrowAmount = AMOUNT - CREATOR_FEE;
         }
-        
+
         // 📝 STEP 1: Emit event before external call to prevent event-based reentrancy
         emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
-        
+
         // 🔒 STEP 2: This money can ONLY go to the SELLER address (nobody else)
         tokenAddress.safeTransfer(SELLER, escrowAmount);
-        
+
         // 🎉 TRANSACTION COMPLETE: SELLER got their money, BUYER's time to dispute has passed
     }
-    
-    function getContractInfo() external view initialized returns (
-        address _buyer,
-        address _seller,
-        uint256 _amount,
-        uint256 _expiryTimestamp,
-        uint8 _currentState,
-        uint256 _currentTimestamp,
-        uint256 _creatorFee,
-        uint256 _createdAt,
-        address _tokenAddress
-    ) {
+
+    function getContractInfo()
+        external
+        view
+        initialized
+        returns (
+            address _buyer,
+            address _seller,
+            uint256 _amount,
+            uint256 _expiryTimestamp,
+            uint8 _currentState,
+            uint256 _currentTimestamp,
+            uint256 _creatorFee,
+            uint256 _createdAt,
+            address _tokenAddress
+        )
+    {
         return (
             BUYER,
             SELLER,
@@ -865,7 +866,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             address(tokenAddress)
         );
     }
-    
+
     function isExpired() external view initialized returns (bool) {
         return block.timestamp >= EXPIRY_TIMESTAMP;
     }
@@ -906,7 +907,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
             return AMOUNT - CREATOR_FEE;
         }
     }
-    
+
     function canClaim() external view initialized returns (bool) {
         return _state == 1 && EXPIRY_TIMESTAMP != 0 && block.timestamp >= EXPIRY_TIMESTAMP;
     }
@@ -914,19 +915,19 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
     function canDispute() external view initialized returns (bool) {
         return _state == 1 && EXPIRY_TIMESTAMP != 0 && block.timestamp < EXPIRY_TIMESTAMP;
     }
-    
+
     function isFunded() external view initialized returns (bool) {
         return _state >= 1;
     }
-    
+
     function canDeposit() external view initialized returns (bool) {
         return _state == 0;
     }
-    
+
     function isDisputed() external view initialized returns (bool) {
         return _state == 2;
     }
-    
+
     function isClaimed() external view initialized returns (bool) {
         return _state == 4;
     }

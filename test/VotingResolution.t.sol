@@ -12,7 +12,7 @@ contract MockERC20 is Test {
     string public name = "Mock USDC";
     string public symbol = "MUSDC";
     uint8 public decimals = 6;
-    uint256 public totalSupply = 1000000 * 10**6;
+    uint256 public totalSupply = 1000000 * 10 ** 6;
 
     constructor() {
         balanceOf[msg.sender] = totalSupply;
@@ -55,7 +55,7 @@ contract VotingResolutionTest is Test {
     address public admin = address(0x3);
     address public unauthorized = address(0x4);
 
-    uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
+    uint256 public constant AMOUNT = 1000 * 10 ** 6; // 1000 USDC
     uint256 public CREATOR_FEE;
     uint256 public expiryTimestamp;
     string public description = "Test escrow transaction";
@@ -80,13 +80,7 @@ contract VotingResolutionTest is Test {
         // Create escrow
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc),
-            buyer,
-            seller,
-            AMOUNT,
-            expiryTimestamp,
-            description,
-            address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -148,13 +142,7 @@ contract VotingResolutionTest is Test {
         // Create and fund escrow but don't dispute
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc),
-            buyer,
-            seller,
-            AMOUNT,
-            expiryTimestamp,
-            description,
-            address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);

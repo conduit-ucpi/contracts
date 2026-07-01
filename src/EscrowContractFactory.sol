@@ -10,28 +10,27 @@ import {EscrowContract} from "./EscrowContract.sol";
  * ═══════════════════════════════════════════════════════════════════════════════════
  *                      🔒 ESCROW FACTORY - SECURITY OVERVIEW 🔒
  * ═══════════════════════════════════════════════════════════════════════════════════
- * 
+ *
  * This factory creates individual escrow contracts. Each escrow contract it creates
  * has the same security guarantees outlined in EscrowContract.sol.
- * 
+ *
  * 🔐 FACTORY SECURITY PROMISES:
  * ✅ Only creates legitimate escrow contracts (no malicious code)
- * ✅ Each contract locks money between BUYER and SELLER only  
+ * ✅ Each contract locks money between BUYER and SELLER only
  * ✅ Platform cannot modify contracts after creation
  * ✅ All created contracts follow the same security rules
- * 
+ *
  * 🛡️ WHAT THIS FACTORY CANNOT DO:
  * ❌ Cannot modify existing escrow contracts
  * ❌ Cannot access money in escrow contracts
  * ❌ Cannot change the BUYER address after creation (the SELLER may reassign only its
  *    own payout address, and only the seller itself can do so - not the factory)
  * ❌ Cannot bypass security mechanisms in individual contracts
- * 
+ *
  * The factory simply creates secure escrow contracts - it has no power over them afterward.
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
 contract EscrowContractFactory {
-
     // Custom errors (saves gas compared to require strings)
     error InvalidOwnerAddress();
     error InvalidImplementationAddress();
@@ -47,10 +46,10 @@ contract EscrowContractFactory {
     error CreatorFeeMustBeLessThanAmount();
 
     // 🔒 IMMUTABLE FACTORY SETTINGS: These CANNOT be changed after deployment
-    address public immutable OWNER;       // Platform address - can create contracts but NOT access money
+    address public immutable OWNER; // Platform address - can create contracts but NOT access money
     address public immutable IMPLEMENTATION; // Template contract - ensures all escrows have same security
     address public immutable FEE_RECIPIENT; // Address that receives platform fees (defaults to OWNER if not set)
-    
+
     // 📢 PUBLIC EVENT: Records every escrow contract creation (permanent blockchain record)
     // Description stored here instead of contract storage to save ~20k gas per deployment
     event ContractCreated(
@@ -61,7 +60,7 @@ contract EscrowContractFactory {
         uint256 expiryTimestamp,
         string description
     );
-    
+
     constructor(address _owner, address _implementation, address _feeRecipient) {
         if (_owner == address(0)) revert InvalidOwnerAddress();
         if (_implementation == address(0)) revert InvalidImplementationAddress();
@@ -71,20 +70,20 @@ contract EscrowContractFactory {
         // Default to OWNER if feeRecipient not specified
         FEE_RECIPIENT = _feeRecipient == address(0) ? _owner : _feeRecipient;
     }
-    
+
     /**
      * 🏭 CREATE NEW ESCROW CONTRACT
-     * 
+     *
      * 🔒 SECURITY GUARANTEE: This creates a secure escrow contract with the same protections
      *                        outlined in EscrowContract.sol
-     * 
+     *
      * What this function does:
      * ✅ Creates a new escrow contract between BUYER and SELLER
      * ✅ Locks in the BUYER address (immutable); the SELLER may later reassign only its
      *    own payout address via changeRecipient (seller-controlled)
      * ✅ Sets up all security mechanisms to protect both parties
      * ✅ Ensures only BUYER and SELLER can receive the escrowed money
-     * 
+     *
      * 🛡️ SECURITY VERIFICATION:
      * - Each contract is created from the same secure template
      * - Factory cannot modify contracts after creation
@@ -117,51 +116,38 @@ contract EscrowContractFactory {
 
         uint256 creatorFee = _calculateCreatorFee(tokenAddress, amount);
 
-
         // 🔐 Generate unique contract address (deterministic but unpredictable)
-        bytes32 salt = keccak256(abi.encodePacked(
-            tokenAddress,
-            buyer,
-            seller,
-            amount,
-            expiryTimestamp,
-            block.timestamp
-        ));
-        
+        bytes32 salt =
+            keccak256(abi.encodePacked(tokenAddress, buyer, seller, amount, expiryTimestamp, block.timestamp));
+
         // 🏭 Create new contract from secure template
         address clone = Clones.cloneDeterministic(IMPLEMENTATION, salt);
-        
+
         // 🔒 Initialize with IMMUTABLE security settings
         // Note: description is NOT passed to initialize - only emitted in event below
-        EscrowContract(clone).initialize(
-            tokenAddress,    // ERC20 token to be used for this escrow
-            buyer,           // ONLY this address can deposit and dispute
-            seller,          // ONLY this address can receive funds (with buyer)
-            arbiter,         // Arbiter - can vote on disputes but NOT take money
-            amount,
-            expiryTimestamp,
-            creatorFee,      // Platform fee (transparent and upfront)
-            FEE_RECIPIENT    // Address that receives the platform fee
-        );
-        
+        EscrowContract(clone)
+            .initialize(
+                tokenAddress, // ERC20 token to be used for this escrow
+                buyer, // ONLY this address can deposit and dispute
+                seller, // ONLY this address can receive funds (with buyer)
+                arbiter, // Arbiter - can vote on disputes but NOT take money
+                amount,
+                expiryTimestamp,
+                creatorFee, // Platform fee (transparent and upfront)
+                FEE_RECIPIENT // Address that receives the platform fee
+            );
+
         EscrowContract newContract = EscrowContract(clone);
-        
+
         // 📝 Record this contract creation permanently on blockchain
-        emit ContractCreated(
-            address(newContract),
-            buyer,
-            seller,
-            amount,
-            expiryTimestamp,
-            description
-        );
-        
+        emit ContractCreated(address(newContract), buyer, seller, amount, expiryTimestamp, description);
+
         return address(newContract);
-        
+
         // ✅ SECURITY CONFIRMATION: The new contract now has all the security guarantees
         //    described in EscrowContract.sol. Factory has no further control over it.
     }
-    
+
     /**
      * Calculates the creator fee for a given token and amount.
      * - Amounts at or below 1/1000 of one token unit: zero fee.
@@ -202,15 +188,10 @@ contract EscrowContractFactory {
         uint256 expiryTimestamp,
         uint256 creationTimestamp
     ) external view returns (address) {
-        bytes32 salt = keccak256(abi.encodePacked(
-            tokenAddress,
-            buyer,
-            seller,
-            amount,
-            expiryTimestamp,
-            creationTimestamp
-        ));
-        
+        bytes32 salt = keccak256(
+            abi.encodePacked(tokenAddress, buyer, seller, amount, expiryTimestamp, creationTimestamp)
+        );
+
         return Clones.predictDeterministicAddress(IMPLEMENTATION, salt, address(this));
     }
 }
