@@ -386,6 +386,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
         if (_buyerPercentage > 100) revert InvalidPercentage();
         if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != GAS_PAYER) revert NotAuthorizedToVote();
 
+        // casting to uint8 is safe: _buyerPercentage is bounded to <= 100 above
+        // forge-lint: disable-next-line(unsafe-typecast)
         resolutionVotes[msg.sender].buyerPercentage = uint8(_buyerPercentage);
 
         emit VoteSubmitted(msg.sender, _buyerPercentage);
