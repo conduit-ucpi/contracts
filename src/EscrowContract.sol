@@ -577,23 +577,35 @@ contract EscrowContract is ReentrancyGuard {
      * cashflow to a liquidity provider at a discount) where the payout destination
      * must move without touching the escrowed funds themselves.
      *
-     * 🔒 SCOPE (deliberately narrow):
-     * ✅ Callable ONLY by the current SELLER
-     * ✅ Allowed ONLY while funded and undisputed (_state == 1)
-     *    - Not before funding, not during a dispute, not after claim/resolution
-     *    - This keeps dispute-voting rights from being reassigned mid-dispute
-     * ✅ New seller cannot be the zero address or the BUYER (preserves the
-     *    buyer != seller invariant enforced at initialize)
+     * 🔒 SCOPE:
+     * ✅ Callable ONLY by the current SELLER (the current recipient)
+     * ✅ Allowed while funded OR disputed (_state == 1 or 2)
+     *    - Not before funding, not after claim/resolution
+     *    - Disputed is permitted so a contract holding the recipient role (e.g. a
+     *      liquidity marketplace) can hand it back to the seller even if the buyer
+     *      raised a dispute in the meantime, avoiding stranded funds.
+     * ✅ New seller cannot be the zero address, the BUYER, or the ARBITER (preserves
+     *    buyer != seller and keeps the arbiter an independent third vote)
+     *
+     * 🔐 WHY MID-DISPUTE REASSIGNMENT IS SAFE:
+     *    - The ARBITER guard prevents collapsing two of the three votes into one
+     *      address, so no one can gain unilateral control of the outcome.
+     *    - The new seller is reset to "not voted" (below), so a reassignment can only
+     *      clear the seller's own vote, never manufacture a false consensus.
+     *    - Consensus is evaluated on every vote, so if one had been reached the escrow
+     *      would already be resolved (state 4) and this call would revert. A seller
+     *      resetting their vote cannot stall resolution: buyer + arbiter alone still
+     *      form a 2-of-3 majority.
      *
      * ⚠️  TRUST NOTE: This intentionally relaxes the "seller is immutable" property.
-     *    The BUYER's counterparty for a future dispute can change to whoever the
-     *    seller assigns. Callers integrating this contract should account for that.
+     *    The BUYER's counterparty for a dispute can change to whoever the seller
+     *    assigns. Callers integrating this contract should account for that.
      *
      * @param newSeller The address that will receive seller funds going forward.
      */
     function changeRecipient(address newSeller) external initialized {
         if (msg.sender != SELLER) revert OnlySeller();
-        if (_state != 1) revert NotFundedOrAlreadyProcessed();
+        if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
         if (newSeller == address(0)) revert InvalidSellerAddress();
         if (newSeller == BUYER) revert BuyerSellerMustBeDifferent();
         // Prevent collapsing the seller and arbiter into one address, which would
@@ -605,8 +617,10 @@ contract EscrowContract is ReentrancyGuard {
 
         // Mark the new seller as "not voted" (255). A default mapping entry reads as
         // 0, which _checkAndExecuteConsensus would treat as a valid 0%-to-buyer vote
-        // (like initialize does for the original parties). No need to clear the old
-        // seller's slot: this only runs in state 1, before any dispute vote exists.
+        // (like initialize does for the original parties). This also matters mid-dispute:
+        // the old seller's slot may hold a real vote, but it is never read again (the
+        // address is no longer a voting role), and the new seller starts clean. Setting
+        // 255 cannot create consensus, so no re-check is needed here.
         resolutionVotes[newSeller].buyerPercentage = 255;
 
         emit RecipientChanged(previousSeller, newSeller, block.timestamp);
