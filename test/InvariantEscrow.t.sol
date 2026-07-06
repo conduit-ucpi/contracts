@@ -90,6 +90,25 @@ contract EscrowHandler is Test {
         vm.prank(currentSeller);
         try escrow.changeRecipient(newSeller) {} catch {}
     }
+
+    // Fuzz the one-shot approval path: sometimes approve, sometimes pull, sometimes
+    // revoke — in random interleavings with disputes/claims/reassigns above.
+    function approveTransfer(uint256 idx, bool revoke) external {
+        address currentSeller = escrow.SELLER();
+        vm.prank(currentSeller);
+        if (revoke) {
+            try escrow.approveRecipientTransfer(address(0), address(0)) {} catch {}
+        } else {
+            address target = reassignTargets[idx % reassignTargets.length];
+            try escrow.approveRecipientTransfer(address(this), target) {} catch {}
+        }
+    }
+
+    function pullTransfer(uint256 idx) external {
+        // Handler acts as the operator; try both the approved target and wrong ones.
+        address target = reassignTargets[idx % reassignTargets.length];
+        try escrow.transferRecipientFrom(target) {} catch {}
+    }
 }
 
 contract InvariantEscrowTest is Test {

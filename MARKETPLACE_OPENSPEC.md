@@ -2,7 +2,7 @@
 
 **Version:** 0.4
 **Date:** 2026-07-06
-**Status:** Spec hardened after adversarial review; escrow needs two small additions (§3.2); `MarketplaceEscrow` pending
+**Status:** Escrow side fully implemented (incl. §3.2 atomic-swap support); `MarketplaceEscrow` contract pending
 **Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic.
 
 ---
@@ -41,18 +41,22 @@ The Stabledrop Liquidity Marketplace enables escrow recipients (sellers) to sell
 | `changeRecipient(address)` | Callable only by current recipient, funded OR disputed state; new recipient cannot be zero/buyer/arbiter; new recipient's vote reset to "not voted" |
 | `FACTORY() → address` | The factory that created the escrow — used for provenance verification (§8.1) |
 
-### 3.2 Required additions to `EscrowContract` (pending) ⏳
+### 3.2 One-shot recipient-transfer approval — implemented ✅
 
 ```solidity
-address public recipientOperator;   // one-shot approved operator, address(0) = none
+address public recipientOperator;          // approved operator, address(0) = none
+uint64  public recipientApprovalExpiry;    // approval deadline (packed)
+address public approvedRecipientTarget;    // the ONLY address the operator may set
+uint256 public constant RECIPIENT_APPROVAL_TTL = 5 minutes;
 
-function approveRecipientTransfer(address operator) external;
+function approveRecipientTransfer(address operator, address newRecipient) external;
 function transferRecipientFrom(address newRecipient) external;
 ```
 
-- `approveRecipientTransfer`: callable **only by the current recipient**, in the same states `changeRecipient` allows (funded or disputed). `address(0)` revokes. Emits `RecipientOperatorSet(operator)`.
-- `transferRecipientFrom`: callable **only by the approved operator**. Applies the exact same guards and effects as `changeRecipient` (state check, zero/buyer/arbiter rejection, vote reset, `RecipientChanged` event), then **clears the approval** (one-shot).
-- Any recipient change (direct or operator-driven) **clears `recipientOperator`** — an approval never survives a change of recipient.
+- `approveRecipientTransfer(operator, newRecipient)`: callable **only by the current recipient**, in the same states `changeRecipient` allows (funded or disputed). Binds **both** the operator **and** the exact destination — even a malicious operator can only execute the precise move the seller sanctioned. The destination is validated at grant time (zero/buyer/arbiter rejected). Valid for **5 minutes** (`RECIPIENT_APPROVAL_TTL`) — covers the human gap between the two signed transactions; an expired approval just means re-approving. `operator == address(0)` revokes. Emits `RecipientTransferApproved(operator, newRecipient, expiry)`.
+- `transferRecipientFrom(newRecipient)`: callable **only by the approved operator**, **only** with `newRecipient == approvedRecipientTarget`, **only** before expiry. Applies the identical guards and effects as `changeRecipient` (state check, zero/buyer/arbiter rejection, vote reset, `RecipientChanged` event), then **clears the approval** (one-shot, no replay).
+- **Any** recipient change (direct or operator-driven) clears the approval — an approval granted by a previous seller can never act on the new seller's role.
+- A dangling approval is harmless: it moves nothing by itself, blocks nothing (claims/disputes/votes unaffected), expires in 5 minutes, and is inert once the escrow settles regardless.
 
 > Deployment note: existing deployed escrows are immutable and will not have these functions. The marketplace serves escrows created by the **new** factory/implementation deployment only, enforced by the provenance check (§8.1).
 
@@ -63,7 +67,7 @@ function transferRecipientFrom(address newRecipient) external;
 ```
 LP deposits token → Offer created (OPEN)
         │
-        ├─ Seller: escrow.approveRecipientTransfer(marketplace)   (tx 1, on escrow)
+        ├─ Seller: escrow.approveRecipientTransfer(marketplace, lp)  (tx 1, on escrow, 5-min TTL)
         │  Seller: marketplace.acceptOffer(escrow, lp)            (tx 2, atomic swap)
         │        → role pulled to LP, seller paid, fee accrued → COMPLETED
         │        → all other OPEN offers on this escrow become STALE (recipient changed)
@@ -156,7 +160,7 @@ function createOffer(
 function acceptOffer(address escrowContract, address lp) external nonReentrant
 ```
 
-**Pre-condition (tx 1, seller, on the escrow):** `escrow.approveRecipientTransfer(address(marketplace))`. Without it, step 6 reverts and nothing moves.
+**Pre-condition (tx 1, seller, on the escrow):** `escrow.approveRecipientTransfer(marketplace, lp)` — binds the operator AND the exact LP, valid 5 minutes. Without it (or after expiry), step 6 reverts and nothing moves; the seller simply re-approves.
 
 **Logic (tx 2 — checks → effects → interactions):**
 
@@ -247,7 +251,7 @@ event DefaultOfferDurationUpdated(uint256 durationSeconds);
 event FeesWithdrawn(address indexed token, address to, uint256 amount);
 ```
 
-On the escrow (additions): `RecipientOperatorSet(address operator)`; `RecipientChanged` already exists.
+On the escrow (implemented): `RecipientTransferApproved(address indexed operator, address indexed newRecipient, uint256 expiry)`; `RecipientChanged` already existed.
 
 ## 10. Errors
 
@@ -305,6 +309,7 @@ error InsufficientAccruedFees(address token, uint256 requested, uint256 availabl
 
 ## 14. Changelog
 
+- **v0.4.1 (2026-07-06):** Escrow §3.2 implemented. Approval now binds **operator + exact destination** (decision: even a malicious operator can only execute the sanctioned move) and carries a **5-minute TTL** (decision: covers only the human gap between the two signed transactions; prevents indefinite dangling approvals). Event finalized as `RecipientTransferApproved(operator, newRecipient, expiry)`.
 - **v0.4 (2026-07-06):** Adversarial review. Replaced two-tx custody flow with atomic approve-and-pull (kills stale-seller theft, custody-window fund stranding, expire-restore griefing, reclaim deadlock). Added: factory provenance check, funded/undisputed/unclaimed gate at create+accept, per-escrow token support with per-token fee accounting (`accruedFees`), deposit/fee segregation (`totalDeposits`), empty-slot requirement (fixes deposit overwrite), 50%-of-payout minimum offer, balance-delta deposit guard, mandatory `nonReentrant`, lazy expiry/staleness (removed `expireOffer`, `reclaimRecipient`, enumeration array, O(N) cancel loop, `EXPIRED`/`BLOCKED` states, `payable`). Escrow additions specified: `approveRecipientTransfer` / `transferRecipientFrom` (one-shot operator).
 - **v0.3 (2026-07-06):** Recorded escrow-side interface implementation; `changeRecipient` extended to disputed state.
 - **v0.2 (2026-07-01):** Initial draft.

@@ -260,6 +260,9 @@ contract EscrowContract is ReentrancyGuard {
     error NotInitialized();
     error OnlyBuyer();
     error OnlySeller();
+    error NotApprovedOperator();
+    error ApprovedTargetMismatch();
+    error RecipientApprovalExpired();
     error OnlyArbiter();
     error AlreadyFundedOrClaimed();
     error CannotDisputeInstantTransfer();
@@ -308,6 +311,16 @@ contract EscrowContract is ReentrancyGuard {
     mapping(address => ResolutionVote) public resolutionVotes;
     bool public consensusReached;
 
+    // 🔁 ONE-SHOT RECIPIENT-TRANSFER APPROVAL (for atomic marketplace swaps)
+    // The current seller may authorize ONE operator to move the recipient role to
+    // ONE exact destination, valid for RECIPIENT_APPROVAL_TTL. Consumed on use,
+    // wiped by any recipient change, revocable, and inert once the escrow settles.
+    address public recipientOperator; // approved operator (address(0) = none)
+    uint64 public recipientApprovalExpiry; // packs into the slot above
+    address public approvedRecipientTarget; // the ONLY address the operator may set
+
+    uint256 public constant RECIPIENT_APPROVAL_TTL = 5 minutes;
+
     // 📢 PUBLIC EVENTS: These events prove what happened (recorded permanently on blockchain)
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
     event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
@@ -317,6 +330,7 @@ contract EscrowContract is ReentrancyGuard {
     event VoteSubmitted(address indexed voter, uint256 buyerPercentage);
     event TokensSwept(address indexed token, address indexed recipient, uint256 amount);
     event RecipientChanged(address indexed previousSeller, address indexed newSeller, uint256 timestamp);
+    event RecipientTransferApproved(address indexed operator, address indexed newRecipient, uint256 expiry);
 
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
 
@@ -605,6 +619,81 @@ contract EscrowContract is ReentrancyGuard {
      */
     function changeRecipient(address newSeller) external initialized {
         if (msg.sender != SELLER) revert OnlySeller();
+        _transferRecipient(newSeller);
+    }
+
+    /**
+     * 🔏 SELLER GRANTS A ONE-SHOT, TARGET-BOUND RECIPIENT-TRANSFER APPROVAL
+     *
+     * Enables atomic marketplace swaps: the seller authorizes a specific operator
+     * (e.g. the liquidity marketplace contract) to move the recipient role to ONE
+     * exact destination (e.g. the LP whose offer they are accepting), within
+     * RECIPIENT_APPROVAL_TTL (5 minutes). The operator then executes the move inside
+     * its own transaction via transferRecipientFrom, so the role passes seller → LP
+     * atomically and the marketplace never holds it.
+     *
+     * 🔒 PROPERTIES:
+     * ✅ Callable ONLY by the current SELLER, in the same states changeRecipient allows
+     * ✅ Binds BOTH the operator AND the exact destination — even a malicious operator
+     *    can only execute the precise move the seller sanctioned
+     * ✅ Expires after 5 minutes — an approval can never dangle indefinitely
+     * ✅ One-shot: consumed on use; wiped by ANY recipient change; inert after settlement
+     * ✅ Revocable: approve operator address(0) to clear
+     * ✅ The destination is validated here AND at execution (zero/buyer/arbiter rejected)
+     *
+     * @param operator     The address allowed to execute the transfer (address(0) revokes).
+     * @param newRecipient The exact address the operator may transfer the role to.
+     */
+    function approveRecipientTransfer(address operator, address newRecipient) external initialized {
+        if (msg.sender != SELLER) revert OnlySeller();
+        if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
+
+        if (operator == address(0)) {
+            // Revoke any outstanding approval
+            recipientOperator = address(0);
+            approvedRecipientTarget = address(0);
+            recipientApprovalExpiry = 0;
+            emit RecipientTransferApproved(address(0), address(0), 0);
+            return;
+        }
+
+        // Validate the destination up front with the same guards the execution applies,
+        // so a doomed approval fails at grant time rather than at the swap.
+        if (newRecipient == address(0)) revert InvalidSellerAddress();
+        if (newRecipient == BUYER) revert BuyerSellerMustBeDifferent();
+        if (newRecipient == ARBITER) revert ArbiterMustBeDistinct();
+
+        uint64 expiry = uint64(block.timestamp + RECIPIENT_APPROVAL_TTL);
+        recipientOperator = operator;
+        approvedRecipientTarget = newRecipient;
+        recipientApprovalExpiry = expiry;
+
+        emit RecipientTransferApproved(operator, newRecipient, expiry);
+    }
+
+    /**
+     * 🔁 APPROVED OPERATOR EXECUTES THE RECIPIENT TRANSFER
+     *
+     * Callable only by the operator the seller approved, only to the exact approved
+     * destination, only before the approval expires. Applies the identical guards and
+     * effects as changeRecipient (state gating, zero/buyer/arbiter rejection, vote
+     * reset), then the approval is cleared — it can never be replayed.
+     *
+     * @param newRecipient Must equal the approved destination exactly.
+     */
+    function transferRecipientFrom(address newRecipient) external initialized {
+        if (msg.sender != recipientOperator) revert NotApprovedOperator();
+        if (newRecipient != approvedRecipientTarget) revert ApprovedTargetMismatch();
+        if (block.timestamp > recipientApprovalExpiry) revert RecipientApprovalExpired();
+        _transferRecipient(newRecipient);
+    }
+
+    /**
+     * Shared recipient-transfer logic for changeRecipient (seller-direct) and
+     * transferRecipientFrom (operator-executed). See changeRecipient NatSpec for the
+     * mid-dispute safety argument.
+     */
+    function _transferRecipient(address newSeller) internal {
         if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
         if (newSeller == address(0)) revert InvalidSellerAddress();
         if (newSeller == BUYER) revert BuyerSellerMustBeDifferent();
@@ -614,6 +703,15 @@ contract EscrowContract is ReentrancyGuard {
 
         address previousSeller = SELLER;
         SELLER = newSeller;
+
+        // ANY recipient change voids an outstanding approval: an approval granted by a
+        // previous seller must never survive to act on the new seller's role. This is
+        // also what makes operator-executed transfers one-shot.
+        if (recipientOperator != address(0)) {
+            recipientOperator = address(0);
+            approvedRecipientTarget = address(0);
+            recipientApprovalExpiry = 0;
+        }
 
         // Mark the new seller as "not voted" (255). A default mapping entry reads as
         // 0, which _checkAndExecuteConsensus would treat as a valid 0%-to-buyer vote

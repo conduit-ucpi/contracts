@@ -1571,6 +1571,277 @@ contract EscrowContractTest is Test {
         assertTrue(escrow.isClaimed());
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // One-shot recipient-transfer approval (atomic marketplace swap support)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    event RecipientTransferApproved(address indexed operator, address indexed newRecipient, uint256 expiry);
+
+    function testApproveAndPullHappyPath() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.expectEmit(true, true, false, true, address(escrow));
+        emit RecipientTransferApproved(marketplace, lp, block.timestamp + escrow.RECIPIENT_APPROVAL_TTL());
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        assertEq(escrow.recipientOperator(), marketplace);
+        assertEq(escrow.approvedRecipientTarget(), lp);
+
+        vm.prank(marketplace);
+        escrow.transferRecipientFrom(lp);
+
+        assertEq(escrow.recipient(), lp);
+        // Approval fully consumed
+        assertEq(escrow.recipientOperator(), address(0));
+        assertEq(escrow.approvedRecipientTarget(), address(0));
+        assertEq(escrow.recipientApprovalExpiry(), 0);
+    }
+
+    function testApproveOnlySeller() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.OnlySeller.selector);
+        escrow.approveRecipientTransfer(marketplace, other);
+
+        vm.prank(arbiter);
+        vm.expectRevert(EscrowContract.OnlySeller.selector);
+        escrow.approveRecipientTransfer(marketplace, other);
+
+        vm.prank(other);
+        vm.expectRevert(EscrowContract.OnlySeller.selector);
+        escrow.approveRecipientTransfer(marketplace, other);
+    }
+
+    function testApproveValidatesTargetUpFront() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.InvalidSellerAddress.selector);
+        escrow.approveRecipientTransfer(marketplace, address(0));
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.BuyerSellerMustBeDifferent.selector);
+        escrow.approveRecipientTransfer(marketplace, buyer);
+
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
+        escrow.approveRecipientTransfer(marketplace, arbiter);
+    }
+
+    function testApproveRejectedWhenUnfunded() public {
+        EscrowContract escrow = createUnfundedEscrow();
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.approveRecipientTransfer(makeAddr("marketplace"), other);
+    }
+
+    function testApproveAllowedWhenDisputed() public {
+        EscrowContract escrow = createAndFundEscrow();
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(makeAddr("marketplace"), other);
+        assertEq(escrow.recipientOperator(), makeAddr("marketplace"));
+    }
+
+    function testApproveRejectedWhenClaimed() public {
+        EscrowContract escrow = createAndFundEscrow();
+        vm.warp(expiryTimestamp + 1);
+        vm.prank(seller);
+        escrow.claimFunds();
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.approveRecipientTransfer(makeAddr("marketplace"), other);
+    }
+
+    function testApproveRevoke() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(address(0), address(0));
+
+        assertEq(escrow.recipientOperator(), address(0));
+        assertEq(escrow.approvedRecipientTarget(), address(0));
+        assertEq(escrow.recipientApprovalExpiry(), 0);
+
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.NotApprovedOperator.selector);
+        escrow.transferRecipientFrom(lp);
+    }
+
+    function testPullOnlyApprovedOperator() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        // No approval at all
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.NotApprovedOperator.selector);
+        escrow.transferRecipientFrom(lp);
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        // Wrong caller (even the seller and the target themselves)
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.NotApprovedOperator.selector);
+        escrow.transferRecipientFrom(lp);
+        vm.prank(lp);
+        vm.expectRevert(EscrowContract.NotApprovedOperator.selector);
+        escrow.transferRecipientFrom(lp);
+    }
+
+    function testPullOnlyApprovedTarget() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        // Operator cannot redirect to any address other than the sanctioned one
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.ApprovedTargetMismatch.selector);
+        escrow.transferRecipientFrom(other);
+
+        assertEq(escrow.recipient(), seller); // nothing moved
+    }
+
+    function testPullExpiresAfterTtl() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        // Exactly at expiry: still valid (<= boundary)
+        vm.warp(block.timestamp + escrow.RECIPIENT_APPROVAL_TTL());
+        // One second past: expired
+        vm.warp(block.timestamp + 1);
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.RecipientApprovalExpired.selector);
+        escrow.transferRecipientFrom(lp);
+
+        // Seller can simply re-approve and complete
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+        vm.prank(marketplace);
+        escrow.transferRecipientFrom(lp);
+        assertEq(escrow.recipient(), lp);
+    }
+
+    function testPullCannotBeReplayed() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+        vm.prank(marketplace);
+        escrow.transferRecipientFrom(lp);
+
+        // One-shot: a second pull with the same (consumed) approval must fail
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.NotApprovedOperator.selector);
+        escrow.transferRecipientFrom(lp);
+    }
+
+    // Regression: an approval must NOT survive a recipient change. Without the
+    // clearing in _transferRecipient, an approval granted by a previous seller could
+    // move the NEW seller's role.
+    function testApprovalVoidedByDirectRecipientChange() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        // Seller changes recipient directly (outside the marketplace flow)
+        vm.prank(seller);
+        escrow.changeRecipient(other);
+
+        // The stale approval must be dead — it cannot act on the new seller's role
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.NotApprovedOperator.selector);
+        escrow.transferRecipientFrom(lp);
+        assertEq(escrow.recipient(), other);
+    }
+
+    function testPullWorksMidDispute() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+        vm.prank(marketplace);
+        escrow.transferRecipientFrom(lp);
+
+        assertEq(escrow.recipient(), lp);
+        assertTrue(escrow.isDisputed());
+    }
+
+    function testPullRevertsAfterSettlement() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        // Escrow settles (claim) before the pull executes
+        vm.warp(expiryTimestamp + 1);
+        vm.prank(seller);
+        escrow.claimFunds();
+
+        // Approval is inert once the escrow is settled...
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.RecipientApprovalExpired.selector);
+        escrow.transferRecipientFrom(lp);
+    }
+
+    // Regression (same class as changeRecipient's): a seller installed via the pull
+    // path must NOT be counted as having voted 0% by default.
+    function testPulledSellerNotCountedAsVoted() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp = makeAddr("lp");
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+        vm.prank(marketplace);
+        escrow.transferRecipientFrom(lp);
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        // Arbiter alone votes 0. If lp defaulted to "voted 0%", this would falsely
+        // reach seller+arbiter consensus.
+        vm.prank(arbiter);
+        escrow.submitResolutionVote(0);
+        assertFalse(escrow.consensusReached());
+
+        vm.prank(lp);
+        escrow.submitResolutionVote(0);
+        assertTrue(escrow.consensusReached());
+    }
+
     function testChangeRecipientRejectedWhenClaimed() public {
         EscrowContract escrow = createAndFundEscrow();
 
