@@ -1758,6 +1758,38 @@ contract EscrowContractTest is Test {
         escrow.transferRecipientFrom(lp);
     }
 
+    // "One-shot" is per grant, not per escrow: after a pull the slot is empty and the
+    // CURRENT recipient (the LP who just bought the role) can grant a fresh approval
+    // for another transfer (resale). The previous seller can no longer grant.
+    function testApprovalReusableByNewRecipientAfterUse() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address marketplace = makeAddr("marketplace");
+        address lp1 = makeAddr("lp1");
+        address lp2 = makeAddr("lp2");
+
+        // First one-shot: seller -> lp1
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp1);
+        vm.prank(marketplace);
+        escrow.transferRecipientFrom(lp1);
+        assertEq(escrow.recipient(), lp1);
+
+        // The previous seller can NOT grant the next approval
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.OnlySeller.selector);
+        escrow.approveRecipientTransfer(marketplace, lp2);
+
+        // The new recipient CAN: second one-shot, lp1 -> lp2 (resale)
+        vm.prank(lp1);
+        escrow.approveRecipientTransfer(marketplace, lp2);
+        vm.prank(marketplace);
+        escrow.transferRecipientFrom(lp2);
+        assertEq(escrow.recipient(), lp2);
+
+        // And again the approval is fully consumed
+        assertEq(escrow.recipientOperator(), address(0));
+    }
+
     // Regression: an approval must NOT survive a recipient change. Without the
     // clearing in _transferRecipient, an approval granted by a previous seller could
     // move the NEW seller's role.

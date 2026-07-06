@@ -1,8 +1,8 @@
 # Stabledrop Liquidity Marketplace — Contract OpenSpec
 
-**Version:** 0.4
+**Version:** 0.4.2
 **Date:** 2026-07-06
-**Status:** Escrow side fully implemented (incl. §3.2 atomic-swap support); `MarketplaceEscrow` contract pending
+**Status:** Escrow side fully implemented (incl. §3.2 atomic-swap support); spec re-reviewed end-to-end; `MarketplaceEscrow` contract pending
 **Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic.
 
 ---
@@ -39,7 +39,7 @@ The Stabledrop Liquidity Marketplace enables escrow recipients (sellers) to sell
 | `payoutAmount() → uint256` | Net amount the recipient receives (`AMOUNT − CREATOR_FEE`) — **the figure LPs price against** |
 | `isFunded() / isClaimed()` | State views. NOTE: `isFunded()` is `_state >= 1` (includes disputed/claimed). "Sellable" is the composite: `isFunded() && !hasActiveDispute() && !isClaimed()` |
 | `changeRecipient(address)` | Callable only by current recipient, funded OR disputed state; new recipient cannot be zero/buyer/arbiter; new recipient's vote reset to "not voted" |
-| `FACTORY() → address` | The factory that created the escrow — used for provenance verification (§8.1) |
+| `FACTORY() → address` | Set to whoever initialized the clone. **Informational only — NOT usable for provenance** (a fake contract can return any address). Genuineness is verified via the ERC-1167 codehash check (§8.1). |
 
 ### 3.2 One-shot recipient-transfer approval — implemented ✅
 
@@ -57,8 +57,9 @@ function transferRecipientFrom(address newRecipient) external;
 - `transferRecipientFrom(newRecipient)`: callable **only by the approved operator**, **only** with `newRecipient == approvedRecipientTarget`, **only** before expiry. Applies the identical guards and effects as `changeRecipient` (state check, zero/buyer/arbiter rejection, vote reset, `RecipientChanged` event), then **clears the approval** (one-shot, no replay).
 - **Any** recipient change (direct or operator-driven) clears the approval — an approval granted by a previous seller can never act on the new seller's role.
 - A dangling approval is harmless: it moves nothing by itself, blocks nothing (claims/disputes/votes unaffected), expires in 5 minutes, and is inert once the escrow settles regardless.
+- **"One-shot" means per grant, not per escrow.** Each grant permits at most one transfer; after use (or expiry/revocation/recipient change) the slot is empty again and a **fresh approval can be granted at any time by whoever is the current recipient then**. The original seller cannot re-grant after a sale — only the new recipient (e.g. the LP) can, which is exactly what enables resale.
 
-> Deployment note: existing deployed escrows are immutable and will not have these functions. The marketplace serves escrows created by the **new** factory/implementation deployment only, enforced by the provenance check (§8.1).
+> Deployment note: existing deployed escrows are immutable and will not have these functions. The marketplace serves clones of the **new** implementation only, enforced by the codehash check (§8.1) — old-implementation clones have a different codehash and are rejected automatically.
 
 ---
 
@@ -107,21 +108,32 @@ mapping(bytes32 => Offer) public offers;
 // Key: keccak256(abi.encodePacked(escrowContract, lp))
 // One offer record per (escrow, LP). Slot is freed (deleted) on withdrawal.
 
-address public immutable TRUSTED_FACTORY;               // provenance check (§8.1)
+address public immutable TRUSTED_IMPLEMENTATION;        // the audited EscrowContract implementation
+bytes32 public immutable EXPECTED_ESCROW_CODEHASH;       // ERC-1167 clone hash embedding it (§8.1)
 uint256 public feeRateBps;                              // e.g. 100 = 1%; hard cap 1000 (10%)
-uint256 public defaultOfferDuration;                    // e.g. 24 hours
+uint256 public defaultOfferDuration;                    // e.g. 24 hours; always > 0
 mapping(address => uint256) public accruedFees;         // per-token protocol fees (§8.5)
 mapping(address => uint256) public totalDeposits;       // per-token sum of live LP deposits (§8.6)
 ```
+
+### 5.1a Constructor
+
+```solidity
+constructor(address trustedImplementation, uint256 initialFeeRateBps, uint256 initialDefaultOfferDuration, address initialOwner)
+```
+
+- Require `trustedImplementation != address(0)`, `initialFeeRateBps <= 1000`, `initialDefaultOfferDuration > 0`, `initialOwner != address(0)` (Ownable2Step initial owner).
+- `EXPECTED_ESCROW_CODEHASH = keccak256(abi.encodePacked(hex"363d3d373d3d3d363d73", trustedImplementation, hex"5af43d82803e903d91602b57fd5bf3"))` — the ERC-1167 minimal-proxy runtime code that OpenZeppelin `Clones` deploys, with the implementation address embedded.
 
 There is **no offer-enumeration array**. Competing offers are invalidated lazily by the staleness rule, so no O(N) cancellation loop exists (removes the sybil gas-DoS on `acceptOffer`).
 
 ### 5.2 Key Invariants
 
 1. **Slot integrity:** `createOffer` requires the (escrow, lp) slot to be `NONE`. A cancelled/expired-but-unwithdrawn offer still owns its slot and its deposit; it can never be overwritten.
-2. **Sellable escrow only:** at `createOffer` AND `acceptOffer` the escrow must be funded, undisputed, unclaimed, non-instant (`maturity() != 0`), created by `TRUSTED_FACTORY`, and `offerExpiry < maturity()`.
+2. **Sellable escrow only:** at `createOffer` AND `acceptOffer` the escrow must be **verifiably genuine** (`escrow.codehash == EXPECTED_ESCROW_CODEHASH` — unforgeable, unlike any self-reported value), funded, undisputed, unclaimed, non-instant (`maturity() != 0`), and `offerExpiry < maturity()`.
 3. **Live seller:** an offer is acceptable only while `escrow.recipient() == offer.seller` and only by that address. Any recipient change makes every existing offer on that escrow permanently stale (withdrawable, never acceptable). Payment always goes to `msg.sender == offer.seller == recipient()` — a stale snapshot can never be paid.
-4. **Minimum offer:** `offerAmount >= escrow.payoutAmount() / 2` (at least 50% of face value).
+4. **Minimum offer:** `offerAmount >= max(escrow.payoutAmount() / 2, 1)` (at least 50% of face value, and never zero — guards the dust-escrow edge where `payoutAmount() <= 1` would round the floor to 0).
+4a. **Firm quotes:** an LP **cannot cancel their own OPEN offer**. Offers are irrevocable commitments until expiry/rejection/staleness — otherwise an LP could bait with a high offer and front-run the seller's `acceptOffer` with a cancellation. LPs control their exposure via `offerDurationSeconds`.
 5. **Fee containment:** protocol fees accrue to `accruedFees[token]` only at acceptance. `withdrawFees` is capped by `accruedFees[token]` — the owner can never touch LP deposits. Cancelled/expired/stale offers refund the **full gross** amount including the computed fee.
 6. **No custody:** the marketplace address is never the escrow recipient at rest. The role moves seller → LP within a single `acceptOffer` transaction.
 7. **Conservation:** for every token, `balanceOf(marketplace) >= totalDeposits[token] + accruedFees[token]` (excess = accidental transfers, sweepable §8.7).
@@ -142,13 +154,13 @@ function createOffer(
 
 **Logic:**
 
-1. Require `EscrowContract(escrowContract).FACTORY() == TRUSTED_FACTORY` (revert `UntrustedEscrow`).
+1. Require `escrowContract.codehash == EXPECTED_ESCROW_CODEHASH` (revert `UntrustedEscrow`). This is checked against the EVM's own record of the deployed code — a hostile contract cannot fake it, unlike a self-reported `FACTORY()` value. It also rejects EOAs and the raw implementation itself.
 2. Derive key `keccak256(abi.encodePacked(escrowContract, msg.sender))`; require `offers[key].status == NONE` (revert `OfferSlotOccupied`).
 3. Require `maturity() != 0` (revert `InstantEscrowNotSupported`).
 4. Require sellable: `isFunded() && !hasActiveDispute() && !isClaimed()` (revert `EscrowNotSellable`). Protects the LP from offering on unfunded or already-settled escrows.
 5. `offerExpiry = block.timestamp + (offerDurationSeconds == 0 ? defaultOfferDuration : offerDurationSeconds)`; require `offerExpiry < maturity()` (revert `OfferExpiryExceedsEscrowMaturity`).
 6. `seller = escrow.recipient()`; require `msg.sender != seller && msg.sender != BUYER() && msg.sender != ARBITER()` (revert `LpCannotBeEscrowParty`) — the escrow re-checks buyer/arbiter at the pull; this is a clean early error.
-7. Require `offerAmount >= escrow.payoutAmount() / 2` (revert `OfferBelowMinimum`).
+7. Require `offerAmount >= max(escrow.payoutAmount() / 2, 1)` (revert `OfferBelowMinimum`).
 8. `fee = offerAmount * feeRateBps / 10000`; `netAmount = offerAmount − fee`.
 9. `token = escrow.token()`. Pull deposit with a **balance-delta check**: measure `balanceOf(this)` before/after `safeTransferFrom(msg.sender, this, offerAmount)`; require delta `== offerAmount` (revert `TransferAmountMismatch`) — rejects fee-on-transfer tokens, mirroring the escrow's own deposit guard.
 10. `totalDeposits[token] += offerAmount`. Store `Offer{..., status: OPEN}`.
@@ -193,8 +205,11 @@ function withdrawFunds(address escrowContract) external nonReentrant
 
 1. Key = (escrowContract, `msg.sender`). Withdrawable iff:
    - `status == CANCELLED`, **or**
-   - `status == OPEN && (block.timestamp > offerExpiry || escrow.recipient() != offer.seller)` (expired or stale — evaluated lazily, no separate expire transaction).
-   Otherwise revert `NothingToWithdraw`.
+   - `status == OPEN &&` any of:
+     - `block.timestamp > offerExpiry` (expired), or
+     - `escrow.recipient() != offer.seller` (stale — recipient changed), or
+     - `escrow.hasActiveDispute() || escrow.isClaimed()` (escrow permanently unacceptable: a dispute can only resolve to settled — state 2 never returns to state 1 — so the offer can never be accepted again; the LP exits immediately instead of waiting out `offerExpiry`).
+   Otherwise revert `NothingToWithdraw`. No withdrawable offer is ever simultaneously acceptable (acceptance rejects all three conditions), so there is no accept/withdraw race.
 2. **Effects first (CEI):** cache `(token, offerAmount)`; `totalDeposits[token] −= offerAmount`; `delete offers[key]` — freeing the slot for a future offer (invariant 1).
 3. `token.safeTransfer(msg.sender, offerAmount)` — full gross, including the never-accrued fee.
 4. Emit `FundsWithdrawn(escrowContract, msg.sender, token, offerAmount)`.
@@ -203,7 +218,7 @@ function withdrawFunds(address escrowContract) external nonReentrant
 
 ```solidity
 function setFeeRate(uint256 newFeeRateBps) external onlyOwner;          // require <= 1000 (10% cap); applies to NEW offers only
-function setDefaultOfferDuration(uint256 durationSeconds) external onlyOwner;
+function setDefaultOfferDuration(uint256 durationSeconds) external onlyOwner; // require > 0 (a 0 default would make offers expire at creation)
 function withdrawFees(address token, address to, uint256 amount) external onlyOwner;
 // require amount <= accruedFees[token]; decrement before transfer. LP deposits are unreachable.
 ```
@@ -229,7 +244,7 @@ Sweeps only the **excess** of a token above `totalDeposits[token] + accruedFees[
 
 ## 8. Design Notes
 
-1. **Provenance (`TRUSTED_FACTORY`):** offers are only accepted on escrows created by the known factory, closing the "malicious escrow returns fake `maturity()`/`hasActiveDispute()`" hole from v0.2 §11. The factory is permissionless, so anyone can *create* a genuine escrow — genuineness of code is what's being verified, not the creator.
+1. **Provenance (codehash, not self-report):** the marketplace verifies `escrow.codehash == EXPECTED_ESCROW_CODEHASH` — the ERC-1167 minimal-proxy bytecode embedding the trusted implementation. This is read from the EVM's record of deployed code, which a hostile contract cannot forge. (v0.4 originally specified checking `escrow.FACTORY() == TRUSTED_FACTORY`, which asked the escrow to vouch for itself — a fake contract could return the real factory's address, report a fake `payoutAmount()`/`recipient()`, accept a real-token deposit from an LP, and no-op the role transfer. Fixed in v0.4.2.) The factory is permissionless, so anyone can create a genuine escrow — genuineness of *code* plus the funded-state gate (real tokens actually deposited) is the security property, not who created it.
 2. **Atomicity:** the marketplace holds the recipient role for zero blocks. Every custody-window failure mode (dispute payout landing on the marketplace, maturity claim landing on the marketplace, stranded role) is structurally impossible rather than handled.
 3. **One-shot approval:** consumed on use, cleared on any recipient change, revocable by approving `address(0)`. An approval can never be replayed or survive a seller change.
 4. **Staleness over enumeration:** `recipient()` is the single source of truth. Any change of recipient — sale through this marketplace, direct `changeRecipient`, resale by an LP — automatically invalidates all outstanding offers without touching them.
@@ -286,7 +301,9 @@ error InsufficientAccruedFees(address token, uint256 requested, uint256 availabl
 | Sybil offer spam gas-DoS on acceptance | No cancellation loop (lazy staleness); 50%-of-payout minimum makes spam capital-intensive. |
 | Deposit-slot overwrite | `createOffer` requires an empty (`NONE`) slot; slots free only on withdrawal. |
 | Fee-on-transfer / deflationary tokens | Balance-delta check on deposit (revert), mirroring the escrow. |
-| Malicious escrow contract | `TRUSTED_FACTORY` provenance check — only genuine escrow code is accepted. |
+| Malicious escrow contract | ERC-1167 codehash check — only clones of the trusted implementation are accepted; deployed code cannot be forged. A self-reported value (e.g. `FACTORY()`) is never trusted. |
+| LP bait-and-switch (cancel at acceptance) | Impossible: LPs cannot cancel OPEN offers (§5.2.4a firm quotes); their exposure window is the duration they chose. |
+| Blacklistable tokens (e.g. USDC) | **Accepted residual risk:** if the marketplace address were blacklisted by a token issuer, deposits in that token would be stuck until unblacklisted. Not fixable on-chain; scope of harm is one token's live offers. |
 | **LP inherits dispute risk (disclose!)** | After acceptance the LP is the escrow's seller-side party: the buyer can still dispute before maturity, and buyer + arbiter can outvote the LP 2-of-3, up to a 100% buyer refund. LPs must price buyer/arbiter reputation into their discount. This is inherent to buying the cashflow, not a defect. |
 | Seller approves marketplace but never accepts | Harmless: the approval moves nothing by itself, is revocable (`approveRecipientTransfer(address(0))`), and is cleared by any recipient change. |
 | Front-running `acceptOffer` | Only the current recipient can call it; the approval is only usable by the marketplace inside that call. An LP withdrawing a stale/expired offer cannot be raced into an acceptance (stale/expired offers are never acceptable). |
@@ -309,6 +326,7 @@ error InsufficientAccruedFees(address token, uint256 requested, uint256 availabl
 
 ## 14. Changelog
 
+- **v0.4.2 (2026-07-06):** Full-spec re-review. **Fixed spoofable provenance:** replaced the `FACTORY()` self-report with an unforgeable ERC-1167 codehash check (`EXPECTED_ESCROW_CODEHASH`) — no factory/escrow changes needed. Widened `withdrawFunds` so LPs exit immediately when an escrow becomes permanently unacceptable (disputed/settled; state 2 never returns to 1). Documented firm quotes (LPs cannot cancel OPEN offers — prevents accept-front-run bait-and-switch). Minimum offer now `max(payout/2, 1)` (dust edge). `setDefaultOfferDuration` requires `> 0`. Added constructor spec (§5.1a), blacklist-token residual risk, and the per-grant (reusable) one-shot clarification.
 - **v0.4.1 (2026-07-06):** Escrow §3.2 implemented. Approval now binds **operator + exact destination** (decision: even a malicious operator can only execute the sanctioned move) and carries a **5-minute TTL** (decision: covers only the human gap between the two signed transactions; prevents indefinite dangling approvals). Event finalized as `RecipientTransferApproved(operator, newRecipient, expiry)`.
 - **v0.4 (2026-07-06):** Adversarial review. Replaced two-tx custody flow with atomic approve-and-pull (kills stale-seller theft, custody-window fund stranding, expire-restore griefing, reclaim deadlock). Added: factory provenance check, funded/undisputed/unclaimed gate at create+accept, per-escrow token support with per-token fee accounting (`accruedFees`), deposit/fee segregation (`totalDeposits`), empty-slot requirement (fixes deposit overwrite), 50%-of-payout minimum offer, balance-delta deposit guard, mandatory `nonReentrant`, lazy expiry/staleness (removed `expireOffer`, `reclaimRecipient`, enumeration array, O(N) cancel loop, `EXPIRED`/`BLOCKED` states, `payable`). Escrow additions specified: `approveRecipientTransfer` / `transferRecipientFrom` (one-shot operator).
 - **v0.3 (2026-07-06):** Recorded escrow-side interface implementation; `changeRecipient` extended to disputed state.
