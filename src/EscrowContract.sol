@@ -826,6 +826,8 @@ contract EscrowContract is ReentrancyGuard {
         if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != ARBITER) revert NotAuthorizedToVote();
 
         // All parties can vote anytime - votes can be changed until consensus
+        // casting to uint8 is safe: _buyerPercentage is bounded to <= 100 above
+        // forge-lint: disable-next-line(unsafe-typecast)
         resolutionVotes[msg.sender].buyerPercentage = uint8(_buyerPercentage);
 
         emit VoteSubmitted(msg.sender, _buyerPercentage);
