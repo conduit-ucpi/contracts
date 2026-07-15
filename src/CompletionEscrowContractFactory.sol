@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {CompletionEscrowContract} from "./CompletionEscrowContract.sol";
 
@@ -32,8 +30,7 @@ contract CompletionEscrowContractFactory {
     error VerifierCannotBeSeller();
     error AmountMustBeGreaterThanZero();
     error InvalidExpiryTimestamp();
-    error AmountTooSmallForMinFee();
-    error CreatorFeeMustBeLessThanAmount();
+    error OnlyOwner();
 
     // 🔒 IMMUTABLE FACTORY SETTINGS
     address public immutable OWNER;          // Platform/arbiter - creates contracts, cannot take money
@@ -67,7 +64,8 @@ contract CompletionEscrowContractFactory {
      *
      * Creates a dual-verify escrow between BUYER and SELLER (supplier), paying out to
      * 1..MAX_RECIPIENTS recipients by a basis-point split (the bps must sum to 10000).
-     * All addresses and the split are locked in at creation.
+     * All addresses and the split are locked in at creation. Charges the flat 1%
+     * platform fee - this is the path for top-level (root) escrows.
      */
     function createEscrowContract(
         address tokenAddress,
@@ -80,19 +78,7 @@ contract CompletionEscrowContractFactory {
         address verifier,
         string memory description
     ) external returns (address) {
-        if (tokenAddress == address(0)) revert InvalidTokenAddress();
-        if (buyer == address(0)) revert InvalidBuyerAddress();
-        if (seller == address(0)) revert InvalidSellerAddress();
-        if (buyer == seller) revert BuyerSellerMustBeDifferent();
-        // A nominated verifier acts for the buyer - it must never be the supplier
-        if (verifier == seller) revert VerifierCannotBeSeller();
-        if (amount == 0) revert AmountMustBeGreaterThanZero();
-        // This variant has no instant transfer - expiry must be a real future timestamp
-        if (expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
-        // The recipient split is validated in CompletionEscrowContract.initialize.
-
-        // Collapse the params into a memory struct so the deploy step has a shallow stack
-        EscrowParams memory p = EscrowParams({
+        return _create(EscrowParams({
             tokenAddress: tokenAddress,
             buyer: buyer,
             seller: seller,
@@ -101,20 +87,70 @@ contract CompletionEscrowContractFactory {
             recipients: recipients,
             recipientBps: recipientBps,
             verifier: verifier,
-            creatorFee: _calculateCreatorFee(tokenAddress, amount)
-        });
+            creatorFee: _calculateCreatorFee(amount)
+        }), description);
+    }
+
+    /**
+     * 🏭 CREATE CHILD ESCROW CONTRACT (FEE-EXEMPT, PLATFORM ONLY)
+     *
+     * The platform fee is charged once per fan-out tree, on the top-level escrow.
+     * Child nodes are created through this fee-exempt path instead. Only OWNER (the
+     * platform relayer, which deploys all nodes) may call it - otherwise anyone
+     * could create fee-free escrows.
+     */
+    function createChildEscrowContract(
+        address tokenAddress,
+        address buyer,
+        address seller,
+        uint256 amount,
+        uint256 expiryTimestamp,
+        address[] calldata recipients,
+        uint256[] calldata recipientBps,
+        address verifier,
+        string memory description
+    ) external returns (address) {
+        if (msg.sender != OWNER) revert OnlyOwner();
+        return _create(EscrowParams({
+            tokenAddress: tokenAddress,
+            buyer: buyer,
+            seller: seller,
+            amount: amount,
+            expiryTimestamp: expiryTimestamp,
+            recipients: recipients,
+            recipientBps: recipientBps,
+            verifier: verifier,
+            creatorFee: 0
+        }), description);
+    }
+
+    /**
+     * Shared validate + deploy + announce path for both creation variants. The params
+     * arrive as a memory struct so the deploy step keeps a shallow stack.
+     */
+    function _create(EscrowParams memory p, string memory description) internal returns (address) {
+        if (p.tokenAddress == address(0)) revert InvalidTokenAddress();
+        if (p.buyer == address(0)) revert InvalidBuyerAddress();
+        if (p.seller == address(0)) revert InvalidSellerAddress();
+        if (p.buyer == p.seller) revert BuyerSellerMustBeDifferent();
+        // A nominated verifier acts for the buyer - it must never be the supplier
+        if (p.verifier == p.seller) revert VerifierCannotBeSeller();
+        if (p.amount == 0) revert AmountMustBeGreaterThanZero();
+        // This variant has no instant transfer - expiry must be a real future timestamp
+        if (p.expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
+        // The recipient split is validated in CompletionEscrowContract.initialize.
 
         address clone = _deploy(p);
 
         emit ContractCreated(
             clone,
-            buyer,
-            seller,
-            amount,
-            expiryTimestamp,
-            recipients,
-            recipientBps,
-            verifier,
+            p.buyer,
+            p.seller,
+            p.amount,
+            p.expiryTimestamp,
+            p.recipients,
+            p.recipientBps,
+            p.verifier,
             description
         );
 
@@ -178,27 +214,12 @@ contract CompletionEscrowContractFactory {
     }
 
     /**
-     * 📊 Dynamic platform fee: free below 1/1000 of one token unit, otherwise the
-     * greater of 1% of the amount or 30% of one token unit.
+     * 📊 Flat 1% platform fee, floor division. No minimum and no thresholds: tiny
+     * amounts floor to a zero fee, and 1% can never reach the escrow contract's
+     * creatorFee < amount limit, so no amount or split can revert a creation.
      */
-    function _calculateCreatorFee(address tokenAddress, uint256 amount) internal view returns (uint256) {
-        uint8 decimals = IERC20Metadata(tokenAddress).decimals();
-
-        uint256 oneUnit = 10 ** decimals;
-        uint256 noFeeThreshold = oneUnit / 1000;
-
-        if (amount <= noFeeThreshold) {
-            return 0;
-        }
-
-        uint256 minFee = (oneUnit * 30) / 100;
-        if (amount <= minFee) revert AmountTooSmallForMinFee();
-
-        uint256 onePercentFee = amount / 100;
-        uint256 creatorFee = onePercentFee > minFee ? onePercentFee : minFee;
-
-        if (creatorFee >= amount) revert CreatorFeeMustBeLessThanAmount();
-        return creatorFee;
+    function _calculateCreatorFee(uint256 amount) internal pure returns (uint256) {
+        return amount / 100;
     }
 
     function getContractAddress(

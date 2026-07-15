@@ -249,6 +249,96 @@ contract CompletionEscrowContractTest is Test {
         impl.isFunded();
     }
 
+    // ── fee schedule (flat 1%, no minimum, no thresholds) ───────────────────
+
+    function testFeeIsFlatOnePercent() public {
+        CompletionEscrowContract escrow = _createSingle();
+        assertEq(escrow.CREATOR_FEE(), AMOUNT / 100);
+    }
+
+    function testFeeFloorsToZeroForTinyAmounts() public {
+        // Any amount below 100 base units floors to a zero fee - and, unlike the
+        // legacy schedule, small amounts never revert creation.
+        (address[] memory r, uint256[] memory b) = _single();
+        vm.prank(buyer);
+        address addr = factory.createEscrowContract(
+            address(usdc), buyer, seller, 99, expiryTimestamp, r, b, address(0), description
+        );
+        assertEq(CompletionEscrowContract(addr).CREATOR_FEE(), 0);
+    }
+
+    function testFeeSmallAmountsDoNotRevert() public {
+        // The legacy factory reverted between the dust threshold and the minimum
+        // fee (AmountTooSmallForMinFee). The flat schedule accepts every amount.
+        (address[] memory r, uint256[] memory b) = _single();
+        uint256 amount = 200_000; // 0.20 USDC - inside the legacy revert band
+        vm.prank(buyer);
+        address addr = factory.createEscrowContract(
+            address(usdc), buyer, seller, amount, expiryTimestamp, r, b, address(0), description
+        );
+        assertEq(CompletionEscrowContract(addr).CREATOR_FEE(), amount / 100);
+    }
+
+    // ── child creation (fee-exempt, owner only) ─────────────────────────────
+
+    function _createChild() internal returns (CompletionEscrowContract) {
+        (address[] memory r, uint256[] memory b) = _single();
+        vm.prank(gasPayer); // gasPayer is the factory OWNER in setUp
+        address addr = factory.createChildEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, r, b, address(0), description
+        );
+        return CompletionEscrowContract(addr);
+    }
+
+    function testChildCreateHasZeroFee() public {
+        CompletionEscrowContract child = _createChild();
+        assertEq(child.CREATOR_FEE(), 0);
+        assertEq(child.AMOUNT(), AMOUNT);
+    }
+
+    function testChildCreateRevertsForNonOwner() public {
+        (address[] memory r, uint256[] memory b) = _single();
+        vm.prank(buyer);
+        vm.expectRevert(CompletionEscrowContractFactory.OnlyOwner.selector);
+        factory.createChildEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, r, b, address(0), description
+        );
+    }
+
+    function testChildDepositPaysNoFee() public {
+        CompletionEscrowContract child = _createChild();
+        vm.prank(buyer);
+        usdc.approve(address(child), AMOUNT);
+        vm.prank(buyer);
+        child.depositFunds();
+        // The full amount stays in escrow; the fee recipient gets nothing.
+        assertEq(usdc.balanceOf(address(child)), AMOUNT);
+        assertEq(usdc.balanceOf(gasPayer), 0);
+    }
+
+    function testChildFullAmountPaidToRecipientOnCompletion() public {
+        CompletionEscrowContract child = _createChild();
+        vm.prank(buyer);
+        usdc.approve(address(child), AMOUNT);
+        vm.prank(buyer);
+        child.depositFunds();
+        vm.prank(seller);
+        child.markComplete();
+        vm.prank(buyer);
+        child.verifyComplete();
+        assertEq(usdc.balanceOf(recipient1), AMOUNT);
+    }
+
+    function testChildCreateStillValidates() public {
+        // The fee-exempt path shares the root path's validation.
+        (address[] memory r, uint256[] memory b) = _single();
+        vm.prank(gasPayer);
+        vm.expectRevert(CompletionEscrowContractFactory.BuyerSellerMustBeDifferent.selector);
+        factory.createChildEscrowContract(
+            address(usdc), buyer, buyer, AMOUNT, expiryTimestamp, r, b, address(0), description
+        );
+    }
+
     // ── deposit ─────────────────────────────────────────────────────────────
 
     function testDeposit() public {
