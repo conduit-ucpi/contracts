@@ -87,7 +87,7 @@ contract CompletionEscrowContractFactory {
             recipients: recipients,
             recipientBps: recipientBps,
             verifier: verifier,
-            creatorFee: _calculateCreatorFee(amount)
+            creatorFee: quoteCreatorFee(amount)
         }), description);
     }
 
@@ -217,8 +217,11 @@ contract CompletionEscrowContractFactory {
      * 📊 Flat 1% platform fee, floor division. No minimum and no thresholds: tiny
      * amounts floor to a zero fee, and 1% can never reach the escrow contract's
      * creatorFee < amount limit, so no amount or split can revert a creation.
+     *
+     * Public so off-chain services quote the fee by asking the contract instead of
+     * duplicating the formula. Child escrows (createChildEscrowContract) are exempt.
      */
-    function _calculateCreatorFee(uint256 amount) internal pure returns (uint256) {
+    function quoteCreatorFee(uint256 amount) public pure returns (uint256) {
         return amount / 100;
     }
 
