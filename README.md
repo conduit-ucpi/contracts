@@ -86,16 +86,58 @@ forge test --gas-report
 
 ### Deployment
 
+There are two escrow families, each with its own implementation + factory:
+
+- **Legacy** — `EscrowContract` / `EscrowContractFactory` (single-recipient).
+- **Completion (fan-out)** — `CompletionEscrowContract` /
+  `CompletionEscrowContractFactory` (dual-verify, 1–10 recipient split; powers
+  the Projects feature).
+
+Two scripts cover them:
+
+- `DeploymentScript` — deploys **both** families in one broadcast. Use on a
+  fresh chain (e.g. a clean testnet) where neither is deployed yet.
+- `DeployCompletionEscrow` — deploys **only** the completion family. Use when
+  the legacy factory is already live on the target chain (as on Base mainnet —
+  see `DEPLOYMENT_ADDRESSES.md`) and you only need to add the fan-out pair.
+
+Verification is **not** configured in `foundry.toml`, so you must pass the
+explorer credentials on the command line — a bare `--verify` will not verify
+anything. For Base, `VERIFIER_URL` is `https://api.basescan.org/api` (mainnet)
+or `https://api-sepolia.basescan.org/api` (Sepolia), and `VERIFIER_API_KEY` is
+your Basescan key.
+
 ```bash
-# Deploy to configured network
+# Deploy BOTH families (fresh chain) + verify all four contracts
 forge script script/DeploymentScript.s.sol:DeploymentScript \
   --rpc-url $NETWORK_RPC_URL \
   --broadcast \
-  --verify
+  --verify \
+  --etherscan-api-key $VERIFIER_API_KEY \
+  --verifier-url $VERIFIER_URL
 
-# The deployment script will output:
-# - Implementation contract address
-# - Factory contract address
+# Deploy ONLY the completion (fan-out) family (legacy already deployed)
+forge script script/DeployCompletionEscrow.s.sol:DeployCompletionEscrow \
+  --rpc-url $NETWORK_RPC_URL \
+  --broadcast \
+  --verify \
+  --etherscan-api-key $VERIFIER_API_KEY \
+  --verifier-url $VERIFIER_URL
+```
+
+Both scripts print each deployed implementation + factory address. The
+completion deploy also prints the two values to set on **fanOutChainService**:
+
+- `FANOUT_CONTRACT_FACTORY_ADDRESS`
+- `FANOUT_ESCROW_IMPLEMENTATION_ADDRESS`
+
+If verification fails mid-run (explorer lag is common), you don't need to
+redeploy — verify a single address afterwards:
+
+```bash
+forge verify-contract <address> <ContractName> \
+  --etherscan-api-key $VERIFIER_API_KEY \
+  --verifier-url $VERIFIER_URL
 ```
 
 ## Security
