@@ -4,23 +4,23 @@ pragma solidity 0.8.26;
 import {Script, console} from "forge-std/Script.sol";
 import {EscrowContractFactory} from "../src/EscrowContractFactory.sol";
 import {EscrowContract} from "../src/EscrowContract.sol";
+import {DeployCompletionEscrow} from "./DeployCompletionEscrow.s.sol";
 
-contract DeploymentScript is Script {
-    function run() external {
+/**
+ * Main deployment: deploys the LEGACY escrow pair and then, in the same
+ * broadcast, the COMPLETION (fan-out) pair via the inherited
+ * [deployCompletion] helper. Run DeployCompletionEscrow directly instead if you
+ * only need the completion pair.
+ */
+contract DeploymentScript is DeployCompletionEscrow {
+    function run() external override {
         uint256 deployerPrivateKey = vm.envUint("RELAYER_WALLET_PRIVATE_KEY");
         address relayerAddress = vm.addr(deployerPrivateKey);
         uint256 chainId = vm.envUint("CHAIN_ID");
         string memory network = vm.envString("NETWORK");
 
         // Try to read FEE_RECIPIENT_ADDRESS, default to address(0) if not set
-        address feeRecipient;
-        try vm.envAddress("FEE_RECIPIENT_ADDRESS") returns (address _feeRecipient) {
-            feeRecipient = _feeRecipient;
-            console.log("Using custom fee recipient:", feeRecipient);
-        } catch {
-            feeRecipient = address(0);
-            console.log("No FEE_RECIPIENT_ADDRESS set, will default to owner");
-        }
+        address feeRecipient = _readFeeRecipient();
 
         console.log("Deploying with the following parameters:");
         console.log("Network:", network);
@@ -46,9 +46,12 @@ contract DeploymentScript is Script {
         );
         
         console.log("=================================================");
-        console.log("Factory deployed at:", address(factory));
+        console.log("Legacy factory deployed at:", address(factory));
         console.log("=================================================");
-        
+
+        // Deploy the completion (fan-out) pair in the same broadcast.
+        deployCompletion(relayerAddress, feeRecipient);
+
         vm.stopBroadcast();
         
         console.log("Deployment completed successfully!");
