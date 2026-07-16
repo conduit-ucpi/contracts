@@ -50,18 +50,35 @@ jobs:
         id: deploy
         run: |
           source .env
-          # Deploy with verification
-          forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url $VERIFIER_URL -vvvv 2>&1 | tee deployment_output.txt
+          # Deploy with verification. DeploymentScript deploys BOTH the legacy
+          # and the completion (fan-out) implementation + factory. --retries/--delay
+          # give blockscout's verification queue time to settle (it can sit in
+          # "Pending in queue" longer than the default 5x5s budget).
+          forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url $VERIFIER_URL --retries 10 --delay 15 -vvvv 2>&1 | tee deployment_output.txt
 
-          # Extract addresses from the output (look for the actual hex addresses)
+          # Extract addresses from the output. The script logs a distinct line per
+          # contract; match each precisely (a bare "Factory deployed at:" no longer
+          # exists — the lines are now "Legacy factory..." / "Completion factory...").
           IMPLEMENTATION_ADDRESS=$(grep "Implementation deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
-          FACTORY_ADDRESS=$(grep "Factory deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
-          
-          # Verification happens automatically with --verify flag above
-          # Manual verification only needed if automatic verification fails
-          echo "Contracts deployed and verified automatically"
-          echo "Implementation: $IMPLEMENTATION_ADDRESS"
-          echo "Factory: $FACTORY_ADDRESS"
+          FACTORY_ADDRESS=$(grep "Legacy factory deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          FANOUT_IMPLEMENTATION_ADDRESS=$(grep "Completion implementation deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          FANOUT_FACTORY_ADDRESS=$(grep "Completion factory deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+
+          # Fail loudly if any address failed to parse, rather than emitting a
+          # summary with blank fields (which silently breaks downstream config).
+          for pair in "legacy implementation:$IMPLEMENTATION_ADDRESS" "legacy factory:$FACTORY_ADDRESS" \
+                      "completion implementation:$FANOUT_IMPLEMENTATION_ADDRESS" "completion factory:$FANOUT_FACTORY_ADDRESS"; do
+            if [ -z "${pair#*:}" ]; then
+              echo "ERROR: could not parse the ${pair%%:*} address from deployment output" >&2
+              exit 1
+            fi
+          done
+
+          echo "Contracts deployed"
+          echo "Legacy implementation: $IMPLEMENTATION_ADDRESS"
+          echo "Legacy factory: $FACTORY_ADDRESS"
+          echo "Completion implementation: $FANOUT_IMPLEMENTATION_ADDRESS"
+          echo "Completion factory: $FANOUT_FACTORY_ADDRESS"
 
           # Get fee recipient for summary (from secrets now)
           FEE_RECIPIENT="${{ secrets.FEE_RECIPIENT_ADDRESS }}"
@@ -75,9 +92,14 @@ jobs:
           echo "==================================================="
           echo "🏭 DEPLOYMENT COMPLETE"
           echo "==================================================="
-          echo "Implementation: $IMPLEMENTATION_ADDRESS"
-          echo "Factory: $FACTORY_ADDRESS"
-          echo "Fee Recipient: $FEE_RECIPIENT_DISPLAY"
+          echo "Legacy implementation:     $IMPLEMENTATION_ADDRESS"
+          echo "Legacy factory:            $FACTORY_ADDRESS"
+          echo "Completion implementation: $FANOUT_IMPLEMENTATION_ADDRESS"
+          echo "Completion factory:        $FANOUT_FACTORY_ADDRESS"
+          echo "Fee Recipient:             $FEE_RECIPIENT_DISPLAY"
           echo "==================================================="
-          echo "FACTORY ADDRESS FOR UI CONFIG: $FACTORY_ADDRESS"
-          echo "===================================================" 
+          echo "LEGACY FACTORY ADDRESS FOR UI CONFIG: $FACTORY_ADDRESS"
+          echo "fanOutChainService env:"
+          echo "  FANOUT_CONTRACT_FACTORY_ADDRESS      = $FANOUT_FACTORY_ADDRESS"
+          echo "  FANOUT_ESCROW_IMPLEMENTATION_ADDRESS = $FANOUT_IMPLEMENTATION_ADDRESS"
+          echo "==================================================="
