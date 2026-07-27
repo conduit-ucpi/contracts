@@ -11,10 +11,10 @@ import {CompletionEscrowContract} from "./CompletionEscrowContract.sol";
  *
  * Creates individual CompletionEscrowContract instances via minimal proxies. Each
  * escrow gates payout behind BOTH supplier and buyer agreement (dual-verify) and pays
- * out to up to MAX_RECIPIENTS recipients by a configured basis-point split. The factory
+ * out to up to MAX_PAYEES payees by a configured basis-point split. The factory
  * has no power over contracts once created.
  *
- * The recipient split is validated inside CompletionEscrowContract.initialize; that
+ * The payee split is validated inside CompletionEscrowContract.initialize; that
  * revert bubbles up through createEscrowContract, so callers see the same errors.
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
@@ -25,67 +25,63 @@ contract CompletionEscrowContractFactory {
     error InvalidImplementationAddress();
     error InvalidTokenAddress();
     error InvalidBuyerAddress();
-    error InvalidSellerAddress();
-    error BuyerSellerMustBeDifferent();
-    error VerifierCannotBeSeller();
+    error InvalidLeadSupplierAddress();
+    error BuyerAndLeadSupplierMustDiffer();
+    error VerifierCannotBeLeadSupplier();
     error AmountMustBeGreaterThanZero();
-    error InvalidExpiryTimestamp();
     error OnlyOwner();
 
     // 🔒 IMMUTABLE FACTORY SETTINGS
     address public immutable OWNER;          // Platform/arbiter - creates contracts, cannot take money
     address public immutable IMPLEMENTATION; // Template contract (all escrows share its security)
-    address public immutable FEE_RECIPIENT;  // Receives platform fees (defaults to OWNER if unset)
+    address public immutable PLATFORM_FEE_WALLET;  // Receives platform fees (defaults to OWNER if unset)
 
     // 📢 PUBLIC EVENT: Records every escrow creation
     event ContractCreated(
         address indexed contractAddress,
         address indexed buyer,
-        address indexed seller,
+        address indexed leadSupplier,
         uint256 amount,
-        uint256 expiryTimestamp,
-        address[] recipients,
-        uint256[] recipientBps,
+        address[] payees,
+        uint256[] payeeBps,
         address verifier,
         string description
     );
 
-    constructor(address _owner, address _implementation, address _feeRecipient) {
+    constructor(address _owner, address _implementation, address _platformFeeWallet) {
         if (_owner == address(0)) revert InvalidOwnerAddress();
         if (_implementation == address(0)) revert InvalidImplementationAddress();
 
         OWNER = _owner;
         IMPLEMENTATION = _implementation;
-        FEE_RECIPIENT = _feeRecipient == address(0) ? _owner : _feeRecipient;
+        PLATFORM_FEE_WALLET = _platformFeeWallet == address(0) ? _owner : _platformFeeWallet;
     }
 
     /**
      * 🏭 CREATE NEW COMPLETION ESCROW CONTRACT
      *
-     * Creates a dual-verify escrow between BUYER and SELLER (supplier), paying out to
-     * 1..MAX_RECIPIENTS recipients by a basis-point split (the bps must sum to 10000).
+     * Creates a dual-verify escrow between BUYER and LEAD_SUPPLIER (supplier), paying out to
+     * 1..MAX_PAYEES payees by a basis-point split (the bps must sum to 10000).
      * All addresses and the split are locked in at creation. Charges the flat 1%
      * platform fee - this is the path for top-level (root) escrows.
      */
     function createEscrowContract(
         address tokenAddress,
         address buyer,
-        address seller,
+        address leadSupplier,
         uint256 amount,
-        uint256 expiryTimestamp,
-        address[] calldata recipients,
-        uint256[] calldata recipientBps,
+        address[] calldata payees,
+        uint256[] calldata payeeBps,
         address verifier,
         string memory description
     ) external returns (address) {
         return _create(EscrowParams({
             tokenAddress: tokenAddress,
             buyer: buyer,
-            seller: seller,
+            leadSupplier: leadSupplier,
             amount: amount,
-            expiryTimestamp: expiryTimestamp,
-            recipients: recipients,
-            recipientBps: recipientBps,
+            payees: payees,
+            payeeBps: payeeBps,
             verifier: verifier,
             creatorFee: quoteCreatorFee(amount)
         }), description);
@@ -102,11 +98,10 @@ contract CompletionEscrowContractFactory {
     function createChildEscrowContract(
         address tokenAddress,
         address buyer,
-        address seller,
+        address leadSupplier,
         uint256 amount,
-        uint256 expiryTimestamp,
-        address[] calldata recipients,
-        uint256[] calldata recipientBps,
+        address[] calldata payees,
+        uint256[] calldata payeeBps,
         address verifier,
         string memory description
     ) external returns (address) {
@@ -114,11 +109,10 @@ contract CompletionEscrowContractFactory {
         return _create(EscrowParams({
             tokenAddress: tokenAddress,
             buyer: buyer,
-            seller: seller,
+            leadSupplier: leadSupplier,
             amount: amount,
-            expiryTimestamp: expiryTimestamp,
-            recipients: recipients,
-            recipientBps: recipientBps,
+            payees: payees,
+            payeeBps: payeeBps,
             verifier: verifier,
             creatorFee: 0
         }), description);
@@ -131,25 +125,22 @@ contract CompletionEscrowContractFactory {
     function _create(EscrowParams memory p, string memory description) internal returns (address) {
         if (p.tokenAddress == address(0)) revert InvalidTokenAddress();
         if (p.buyer == address(0)) revert InvalidBuyerAddress();
-        if (p.seller == address(0)) revert InvalidSellerAddress();
-        if (p.buyer == p.seller) revert BuyerSellerMustBeDifferent();
+        if (p.leadSupplier == address(0)) revert InvalidLeadSupplierAddress();
+        if (p.buyer == p.leadSupplier) revert BuyerAndLeadSupplierMustDiffer();
         // A nominated verifier acts for the buyer - it must never be the supplier
-        if (p.verifier == p.seller) revert VerifierCannotBeSeller();
+        if (p.verifier == p.leadSupplier) revert VerifierCannotBeLeadSupplier();
         if (p.amount == 0) revert AmountMustBeGreaterThanZero();
-        // This variant has no instant transfer - expiry must be a real future timestamp
-        if (p.expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
-        // The recipient split is validated in CompletionEscrowContract.initialize.
+        // The payee split is validated in CompletionEscrowContract.initialize.
 
         address clone = _deploy(p);
 
         emit ContractCreated(
             clone,
             p.buyer,
-            p.seller,
+            p.leadSupplier,
             p.amount,
-            p.expiryTimestamp,
-            p.recipients,
-            p.recipientBps,
+            p.payees,
+            p.payeeBps,
             p.verifier,
             description
         );
@@ -161,11 +152,10 @@ contract CompletionEscrowContractFactory {
     struct EscrowParams {
         address tokenAddress;
         address buyer;
-        address seller;
+        address leadSupplier;
         uint256 amount;
-        uint256 expiryTimestamp;
-        address[] recipients;
-        uint256[] recipientBps;
+        address[] payees;
+        uint256[] payeeBps;
         address verifier;
         uint256 creatorFee;
     }
@@ -186,11 +176,10 @@ contract CompletionEscrowContractFactory {
         return keccak256(abi.encode(
             p.tokenAddress,
             p.buyer,
-            p.seller,
+            p.leadSupplier,
             p.amount,
-            p.expiryTimestamp,
-            p.recipients,
-            p.recipientBps,
+            p.payees,
+            p.payeeBps,
             block.timestamp
         ));
     }
@@ -200,14 +189,13 @@ contract CompletionEscrowContractFactory {
             CompletionEscrowContract.InitParams({
                 tokenAddress: p.tokenAddress,
                 buyer: p.buyer,
-                seller: p.seller,
-                gasPayer: OWNER,
+                leadSupplier: p.leadSupplier,
+                arbiter: OWNER,
                 amount: p.amount,
-                expiryTimestamp: p.expiryTimestamp,
                 creatorFee: p.creatorFee,
-                feeRecipient: FEE_RECIPIENT,
-                recipients: p.recipients,
-                recipientBps: p.recipientBps,
+                platformFeeWallet: PLATFORM_FEE_WALLET,
+                payees: p.payees,
+                payeeBps: p.payeeBps,
                 verifier: p.verifier
             })
         );
@@ -228,21 +216,19 @@ contract CompletionEscrowContractFactory {
     function getContractAddress(
         address tokenAddress,
         address buyer,
-        address seller,
+        address leadSupplier,
         uint256 amount,
-        uint256 expiryTimestamp,
-        address[] calldata recipients,
-        uint256[] calldata recipientBps,
+        address[] calldata payees,
+        uint256[] calldata payeeBps,
         uint256 creationTimestamp
     ) external view returns (address) {
         bytes32 salt = keccak256(abi.encode(
             tokenAddress,
             buyer,
-            seller,
+            leadSupplier,
             amount,
-            expiryTimestamp,
-            recipients,
-            recipientBps,
+            payees,
+            payeeBps,
             creationTimestamp
         ));
 

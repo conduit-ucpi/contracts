@@ -7,8 +7,8 @@ import {CompletionEscrowContract} from "../src/CompletionEscrowContract.sol";
 
 /**
  * Deploys the COMPLETION (fan-out) escrow pair: the implementation and the
- * recipient-split factory that clones it. This is the sibling of the LEGACY
- * single-recipient EscrowContract pair — the two factories are independent and
+ * payee-split factory that clones it. This is the sibling of the LEGACY
+ * single-payee EscrowContract pair — the two factories are independent and
  * both can live on the same chain.
  *
  * The deployment itself lives in the internal [deployCompletion] helper, which
@@ -18,7 +18,7 @@ import {CompletionEscrowContract} from "../src/CompletionEscrowContract.sol";
  *     deploys the legacy and completion pairs together.
  *
  * The relayer/owner passed in becomes the factory OWNER (and each escrow's
- * GAS_PAYER); only the OWNER may call createChildEscrowContract, so fee-exempt
+ * ARBITER); only the OWNER may call createChildEscrowContract, so fee-exempt
  * child nodes can only be created by the platform relayer.
  */
 contract DeployCompletionEscrow is Script {
@@ -38,7 +38,7 @@ contract DeployCompletionEscrow is Script {
         console.log("=================================================");
         console.log("Completion factory deployed at:", address(factory));
         console.log("Factory owner:", factory.OWNER());
-        console.log("Fee recipient:", factory.FEE_RECIPIENT());
+        console.log("Platform fee wallet:", factory.PLATFORM_FEE_WALLET());
         console.log("Set these env vars on fanOutChainService:");
         console.log("  FANOUT_CONTRACT_FACTORY_ADDRESS =", address(factory));
         console.log("  FANOUT_ESCROW_IMPLEMENTATION_ADDRESS =", address(implementation));

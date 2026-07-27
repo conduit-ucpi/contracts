@@ -7,89 +7,105 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════
- *            🤝 COMPLETION ESCROW WITH DUAL-VERIFY + RECIPIENT SPLIT 🤝
+ *            🤝 COMPLETION ESCROW WITH DUAL-VERIFY + PAYEE SPLIT 🤝
  * ═══════════════════════════════════════════════════════════════════════════════════
  *
  * A variant of the practical escrow primitive with two additional abilities:
  *
  * 1. DUAL-VERIFY COMPLETION
- *    The SELLER (supplier) marks the work complete; the BUYER must then verify before
- *    funds pay out. Payout happens automatically inside the BUYER's verify call.
- *    This makes the contract a node in a tree of fan-out payments: each node is gated
- *    by BOTH supplier and buyer agreement.
+ *    The LEAD_SUPPLIER marks the work complete; the VERIFIER (the buyer, or the
+ *    buyer's nominated delegate) must then verify before funds pay out. Payout happens
+ *    automatically inside the VERIFIER's call. This makes the contract a node in a tree
+ *    of fan-out payments: each node is gated by BOTH supplier and buyer-side agreement.
  *
- * 2. UP TO MAX_RECIPIENTS PAYOUT RECIPIENTS
- *    Instead of paying a single SELLER, the escrowed funds are split between 1..N
- *    recipient addresses by a configured basis-point split (the shares sum to 10000).
- *    The SELLER is the supplier (who marks complete and votes in disputes) and is NOT
- *    necessarily a recipient.
+ * 2. UP TO MAX_PAYEES PAYEES
+ *    Instead of paying a single supplier, the escrowed funds are split between 1..N
+ *    payee addresses by a configured basis-point split (the shares sum to 10000).
+ *    A payee may be a supplier's own wallet or a child escrow (subcontracting).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────
+ * 🧭 ROLE VOCABULARY (buyer-side vs supplier-side)
+ * ─────────────────────────────────────────────────────────────────────────────────
+ * BUYER          Receives the service and pays for it. Funds the escrow, disputes.
+ * LEAD_SUPPLIER  Provides/coordinates the service. Marks complete, votes in disputes.
+ *                MAY take a 0% cut (a pure coordinator that passes everything on).
+ * PAYEES         Where the money goes. Usually suppliers; may be child escrows.
+ *                LEAD_SUPPLIER is a payee only when it takes a share of its own.
+ * VERIFIER       Signs off on the buyer's behalf. Defaults to BUYER; never the
+ *                LEAD_SUPPLIER. A distinct verifier keeps the escrow completable if
+ *                the buyer goes silent.
+ * ARBITER        Platform. Third vote in disputes. Can NEVER take money.
  *
  * ─────────────────────────────────────────────────────────────────────────────────
  * 💰 WHERE MONEY CAN GO (enforced by code)
  * ─────────────────────────────────────────────────────────────────────────────────
- * ✅ RECIPIENTS (1..MAX_RECIPIENTS): Receive the escrowed amount, split by basis
+ * ✅ PAYEES (1..MAX_PAYEES): Receive the escrowed amount, split by basis
  *    points, on a successful dual-verify OR as the supplier-side share of a dispute.
  * ✅ BUYER: Receives a refund share on a dispute resolution.
- * ✅ FEE_RECIPIENT: Receives the small platform fee once, at deposit time.
+ * ✅ PLATFORM_FEE_WALLET: Receives the small platform fee once, at deposit time.
  * ❌ NOBODY ELSE.
  *
  * ─────────────────────────────────────────────────────────────────────────────────
  * 🛡️ TRANSACTION FLOWS
  * ─────────────────────────────────────────────────────────────────────────────────
  * 📗 Happy Path:
- *    Buyer deposits → Seller marks complete → Buyer verifies → recipients paid → Done
+ *    Buyer deposits → Lead supplier marks complete → Verifier verifies → payees paid
  *
  * 📕 Disputed Path:
- *    Buyer deposits → Buyer disputes (before expiry) → 2-of-3 vote →
- *    buyer share refunded, supplier share split between recipients → Done
+ *    Buyer deposits → Buyer disputes → 2-of-3 vote →
+ *    buyer share refunded, supplier share split between payees → Done
  *
  * ─────────────────────────────────────────────────────────────────────────────────
  * 🔐 GUARANTEED BY CODE
  * ─────────────────────────────────────────────────────────────────────────────────
  * ⚡ All addresses and the split are set once at creation and can never change
- * ⚡ Funds move ONLY via dual-verify OR dispute resolution — never on expiry alone
- * ⚡ Expiry only closes the buyer's dispute window; it never releases funds
- * ⚡ Disputed funds MUST be split between buyer and the recipients only
+ * ⚡ Funds move ONLY via dual-verify OR dispute resolution
+ * ⚡ Disputed funds MUST be split between buyer and the payees only
  * ⚡ The platform fee is fixed, transparent, and paid once at deposit
  *
- * Same dispute mechanism (2-of-3 voting between buyer / seller / arbiter) as the base
- * escrow applies up until the dual-verify completes.
+ * ⏰ NO DEADLINE. There is deliberately no expiry timestamp. The buyer's right to
+ *    dispute ends when the money moves, not on a date: the correct cut-off is the
+ *    state transition (verification), which the buyer or their delegate controls.
+ *    A calendar deadline could only ever remove the buyer's recovery path while
+ *    leaving their ability to stall by not verifying untouched — stranding funds.
+ *    Payout still requires an affirmative act, so nobody is paid by waiting.
+ *
+ * Same dispute mechanism (2-of-3 voting between buyer / lead supplier / arbiter) as the
+ * base escrow applies up until the dual-verify completes.
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
 contract CompletionEscrowContract is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    // Basis-point denominator for the recipient split (100% = 10000 bps)
+    // Basis-point denominator for the payee split (100% = 10000 bps)
     uint256 public constant BPS_DENOMINATOR = 10000;
 
-    // Upper bound on the number of payout recipients (bounds the distribution loop's gas)
-    uint256 public constant MAX_RECIPIENTS = 10;
+    // Upper bound on the number of payout payees (bounds the distribution loop's gas)
+    uint256 public constant MAX_PAYEES = 10;
 
     // Custom errors (saves gas compared to require strings)
     error AlreadyInitialized();
     error ImplementationCannotBeInitialized();
     error InvalidTokenAddress();
     error InvalidBuyerAddress();
-    error InvalidSellerAddress();
-    error InvalidGasPayerAddress();
-    error BuyerSellerMustBeDifferent();
-    error NoRecipients();
-    error TooManyRecipients();
-    error RecipientArrayLengthMismatch();
-    error InvalidRecipientAddress();
-    error InvalidRecipientBps();
-    error RecipientBpsSumNot10000();
-    error InvalidExpiryTimestamp();
+    error InvalidLeadSupplierAddress();
+    error InvalidArbiterAddress();
+    error BuyerAndLeadSupplierMustDiffer();
+    error NoPayees();
+    error TooManyPayees();
+    error PayeeArrayLengthMismatch();
+    error InvalidPayeeAddress();
+    error InvalidPayeeBps();
+    error PayeeBpsSumNot10000();
     error CreatorFeeMustBeLessThanAmount();
     error NotInitialized();
     error OnlyBuyer();
-    error OnlySeller();
+    error OnlyLeadSupplier();
     error OnlyVerifier();
-    error VerifierCannotBeSeller();
-    error OnlyBuyerOrGasPayer();
+    error VerifierCannotBeLeadSupplier();
+    error OnlyBuyerOrArbiter();
     error AlreadyFundedOrClaimed();
     error InsufficientBalanceToActivate();
-    error CannotDisputeAfterExpiry();
     error NotFunded();
     error NotAwaitingVerification();
     error CannotDisputeNow();
@@ -102,20 +118,19 @@ contract CompletionEscrowContract is ReentrancyGuard {
     address public FACTORY;       // Factory contract that created this escrow
     IERC20 public tokenAddress;   // The ERC20 token contract (microUSDC, etc.)
     address public BUYER;         // Deposits funds and raises disputes
-    address public SELLER;        // Supplier - marks work complete and votes in disputes
+    address public LEAD_SUPPLIER;        // Supplier - marks work complete and votes in disputes
     address public VERIFIER;      // Verifies completion on the buyer's behalf (defaults to BUYER)
-    address public GAS_PAYER;     // Platform/arbiter - can vote in disputes, NOT take money
-    address public FEE_RECIPIENT; // Address that receives the platform fee
+    address public ARBITER;     // Platform/arbiter - can vote in disputes, NOT take money
+    address public PLATFORM_FEE_WALLET; // Address that receives the platform fee
 
     // 💰 PAYOUT RECIPIENTS: escrowed funds are split between these by basis points.
-    // recipients[i] receives recipientBps[i] / 10000 of the escrow; the bps sum to 10000.
-    // 1..MAX_RECIPIENTS recipients are allowed; a single recipient just has bps [10000].
-    address[] public recipients;
-    uint256[] public recipientBps;
+    // payees[i] receives payeeBps[i] / 10000 of the escrow; the bps sum to 10000.
+    // 1..MAX_PAYEES payees are allowed; a single payee just has bps [10000].
+    address[] public payees;
+    uint256[] public payeeBps;
 
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
     uint256 public AMOUNT;           // Total amount BUYER must deposit (includes platform fee)
-    uint256 public EXPIRY_TIMESTAMP; // When the BUYER's dispute window closes
     uint256 public CREATOR_FEE;      // Platform fee (deducted from AMOUNT at deposit)
     uint256 public createdAt;        // Timestamp when the contract was created
 
@@ -133,12 +148,13 @@ contract CompletionEscrowContract is ReentrancyGuard {
 
     // 📢 PUBLIC EVENTS
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
-    event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
-    event MarkedComplete(address seller, uint256 timestamp);
+    event PlatformFeeCollected(address feeWallet, uint256 feeAmount, uint256 timestamp);
+    event MarkedComplete(address leadSupplier, uint256 timestamp);
     event CompletionVerified(address buyer, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
-    event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
-    event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
+    // supplierPercentage is the whole supplier-side share, split across ALL payees
+    event DisputeResolved(uint256 buyerPercentage, uint256 supplierPercentage, uint256 timestamp);
+    event FundsClaimed(address payee, uint256 amount, uint256 timestamp);
     event VoteSubmitted(address indexed voter, uint256 buyerPercentage);
 
     // 🛡️ MODIFIERS
@@ -148,8 +164,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
         _;
     }
 
-    modifier onlySeller() {
-        if (msg.sender != SELLER) revert OnlySeller();
+    modifier onlyLeadSupplier() {
+        if (msg.sender != LEAD_SUPPLIER) revert OnlyLeadSupplier();
         _;
     }
 
@@ -158,8 +174,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
         _;
     }
 
-    modifier onlyBuyerOrGasPayer() {
-        if (msg.sender != BUYER && msg.sender != GAS_PAYER) revert OnlyBuyerOrGasPayer();
+    modifier onlyBuyerOrArbiter() {
+        if (msg.sender != BUYER && msg.sender != ARBITER) revert OnlyBuyerOrArbiter();
         _;
     }
 
@@ -174,18 +190,17 @@ contract CompletionEscrowContract is ReentrancyGuard {
     }
 
     // Initialization parameters, passed as a single calldata struct so the many fields
-    // (including the dynamic recipient arrays) live in calldata rather than on the stack.
+    // (including the dynamic payee arrays) live in calldata rather than on the stack.
     struct InitParams {
         address tokenAddress;
         address buyer;
-        address seller;
-        address gasPayer;
+        address leadSupplier;
+        address arbiter;
         uint256 amount;
-        uint256 expiryTimestamp;
         uint256 creatorFee;
-        address feeRecipient;
-        address[] recipients;
-        uint256[] recipientBps;
+        address platformFeeWallet;
+        address[] payees;
+        uint256[] payeeBps;
         address verifier;
     }
 
@@ -195,58 +210,55 @@ contract CompletionEscrowContract is ReentrancyGuard {
         FACTORY = msg.sender;
         if (p.tokenAddress == address(0)) revert InvalidTokenAddress();
         if (p.buyer == address(0)) revert InvalidBuyerAddress();
-        if (p.seller == address(0)) revert InvalidSellerAddress();
-        if (p.gasPayer == address(0)) revert InvalidGasPayerAddress();
-        if (p.buyer == p.seller) revert BuyerSellerMustBeDifferent();
+        if (p.leadSupplier == address(0)) revert InvalidLeadSupplierAddress();
+        if (p.arbiter == address(0)) revert InvalidArbiterAddress();
+        if (p.buyer == p.leadSupplier) revert BuyerAndLeadSupplierMustDiffer();
         // A nominated verifier acts for the buyer - it must never be the supplier,
         // or the supplier could approve its own work. Unset (0) defaults to the buyer.
-        if (p.verifier == p.seller) revert VerifierCannotBeSeller();
-        // Expiry must be a real future timestamp - this variant has no instant transfer
-        if (p.expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
+        if (p.verifier == p.leadSupplier) revert VerifierCannotBeLeadSupplier();
         if (p.creatorFee >= p.amount) revert CreatorFeeMustBeLessThanAmount();
 
-        _validateRecipients(p.recipients, p.recipientBps);
+        _validatePayees(p.payees, p.payeeBps);
 
         tokenAddress = IERC20(p.tokenAddress);
         BUYER = p.buyer;
-        SELLER = p.seller;
+        LEAD_SUPPLIER = p.leadSupplier;
         // Default the verifier to the buyer when none is nominated at creation
         VERIFIER = p.verifier == address(0) ? p.buyer : p.verifier;
-        GAS_PAYER = p.gasPayer;
-        FEE_RECIPIENT = p.feeRecipient;
-        recipients = p.recipients;
-        recipientBps = p.recipientBps;
+        ARBITER = p.arbiter;
+        PLATFORM_FEE_WALLET = p.platformFeeWallet;
+        payees = p.payees;
+        payeeBps = p.payeeBps;
         AMOUNT = p.amount;
-        EXPIRY_TIMESTAMP = p.expiryTimestamp;
         CREATOR_FEE = p.creatorFee;
         createdAt = block.timestamp;
         _state = 0; // unfunded
 
         // Initialize votes as "not voted" (255)
         resolutionVotes[p.buyer].buyerPercentage = 255;
-        resolutionVotes[p.seller].buyerPercentage = 255;
-        resolutionVotes[p.gasPayer].buyerPercentage = 255;
+        resolutionVotes[p.leadSupplier].buyerPercentage = 255;
+        resolutionVotes[p.arbiter].buyerPercentage = 255;
     }
 
     /**
-     * Validates the recipient split: 1..MAX recipients, matching bps arrays, every
-     * recipient non-zero with a positive share, and the shares summing to exactly 100%.
+     * Validates the payee split: 1..MAX payees, matching bps arrays, every
+     * payee non-zero with a positive share, and the shares summing to exactly 100%.
      */
-    function _validateRecipients(
-        address[] calldata _recipients,
-        uint256[] calldata _recipientBps
+    function _validatePayees(
+        address[] calldata _payees,
+        uint256[] calldata _payeeBps
     ) internal pure {
-        uint256 n = _recipients.length;
-        if (n == 0) revert NoRecipients();
-        if (n > MAX_RECIPIENTS) revert TooManyRecipients();
-        if (n != _recipientBps.length) revert RecipientArrayLengthMismatch();
+        uint256 n = _payees.length;
+        if (n == 0) revert NoPayees();
+        if (n > MAX_PAYEES) revert TooManyPayees();
+        if (n != _payeeBps.length) revert PayeeArrayLengthMismatch();
         uint256 bpsSum;
         for (uint256 i = 0; i < n; i++) {
-            if (_recipients[i] == address(0)) revert InvalidRecipientAddress();
-            if (_recipientBps[i] == 0) revert InvalidRecipientBps();
-            bpsSum += _recipientBps[i];
+            if (_payees[i] == address(0)) revert InvalidPayeeAddress();
+            if (_payeeBps[i] == 0) revert InvalidPayeeBps();
+            bpsSum += _payeeBps[i];
         }
-        if (bpsSum != BPS_DENOMINATOR) revert RecipientBpsSumNot10000();
+        if (bpsSum != BPS_DENOMINATOR) revert PayeeBpsSumNot10000();
     }
 
     /**
@@ -255,7 +267,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
      * BUYER's money is locked in this contract; the platform fee is paid out upfront;
      * the remainder stays locked until dual-verify or dispute resolution.
      */
-    function depositFunds() external onlyBuyerOrGasPayer initialized nonReentrant {
+    function depositFunds() external onlyBuyerOrArbiter initialized nonReentrant {
         if (_state != 0) revert AlreadyFundedOrClaimed();
 
         uint256 escrowAmount;
@@ -269,7 +281,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
         // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
         emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
         if (CREATOR_FEE > 0) {
-            emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
+            emit PlatformFeeCollected(PLATFORM_FEE_WALLET, CREATOR_FEE, block.timestamp);
         }
 
         // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
@@ -277,14 +289,14 @@ contract CompletionEscrowContract is ReentrancyGuard {
 
         // 💳 STEP 3: Platform gets their fee (the ONLY money the platform receives)
         if (CREATOR_FEE > 0) {
-            tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
+            tokenAddress.safeTransfer(PLATFORM_FEE_WALLET, CREATOR_FEE);
         }
     }
 
     /**
      * 💰 SELF-FUND FROM EXISTING BALANCE - FOR TREE FAN-OUT
      *
-     * When this escrow is itself a recipient of a parent node, the parent pays it by
+     * When this escrow is itself a payee of a parent node, the parent pays it by
      * transferring tokens directly to this address (no approval/transferFrom is
      * possible). This function activates the escrow using funds it already holds in
      * `tokenAddress` (the only currency it recognizes), instead of pulling from BUYER.
@@ -293,7 +305,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
      * exactly as in depositFunds(). Any balance beyond AMOUNT is left untouched, so
      * orchestrators should size each node's AMOUNT to match the payout it will receive.
      */
-    function checkAndActivate() external onlyBuyerOrGasPayer initialized nonReentrant {
+    function checkAndActivate() external onlyBuyerOrArbiter initialized nonReentrant {
         if (_state != 0) revert AlreadyFundedOrClaimed();
         if (tokenAddress.balanceOf(address(this)) < AMOUNT) revert InsufficientBalanceToActivate();
 
@@ -308,34 +320,34 @@ contract CompletionEscrowContract is ReentrancyGuard {
         // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
         emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
         if (CREATOR_FEE > 0) {
-            emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
+            emit PlatformFeeCollected(PLATFORM_FEE_WALLET, CREATOR_FEE, block.timestamp);
         }
 
         // 💳 STEP 2: Platform gets their fee out of the funds already held here
         if (CREATOR_FEE > 0) {
-            tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
+            tokenAddress.safeTransfer(PLATFORM_FEE_WALLET, CREATOR_FEE);
         }
     }
 
     /**
-     * ✅ SELLER MARKS THE WORK COMPLETE
+     * ✅ LEAD_SUPPLIER MARKS THE WORK COMPLETE
      *
      * Moves the contract into "pending verification". The BUYER must still verify
-     * before funds pay out. The BUYER may instead dispute (before expiry).
+     * before funds pay out. The BUYER may instead dispute, at any point before payout.
      */
-    function markComplete() external onlySeller initialized {
+    function markComplete() external onlyLeadSupplier initialized {
         if (_state != 1) revert NotFunded();
 
         _state = 3; // completePendingVerify
 
-        emit MarkedComplete(SELLER, block.timestamp);
+        emit MarkedComplete(LEAD_SUPPLIER, block.timestamp);
     }
 
     /**
      * ✅ VERIFIER VERIFIES COMPLETION - FUNDS PAY OUT IN THIS CALL
      *
-     * Once the SELLER has marked complete and the VERIFIER verifies, the full escrowed
-     * amount is split between the recipients immediately. There is no separate claim.
+     * Once the LEAD_SUPPLIER has marked complete and the VERIFIER verifies, the full escrowed
+     * amount is split between the payees immediately. There is no separate claim.
      * The VERIFIER is the buyer's nominated delegate for this step, and defaults to the
      * BUYER when none was nominated at creation.
      */
@@ -352,20 +364,24 @@ contract CompletionEscrowContract is ReentrancyGuard {
 
         emit CompletionVerified(VERIFIER, block.timestamp);
 
-        // Distribute the entire escrow to the recipients per the configured split
-        _distributeToRecipients(escrowAmount);
+        // Distribute the entire escrow to the payees per the configured split
+        _distributeToPayees(escrowAmount);
     }
 
     /**
      * 🚨 BUYER PROTECTION - RAISE A DISPUTE
      *
      * The BUYER can dispute while the contract is funded (state 1) OR while it is
-     * awaiting their verification (state 3), as long as it is before expiry. Disputing
-     * freezes the funds until the 2-of-3 vote resolves.
+     * awaiting verification (state 3). Disputing freezes the funds until the 2-of-3
+     * vote resolves.
+     *
+     * There is no deadline. The right to dispute ends when the money moves - i.e. when
+     * the VERIFIER signs off (state 4), which is the buyer's own act or that of their
+     * nominated delegate. This guarantees the buyer always has a path to recover funds,
+     * so an escrow can never be stranded by a missed date.
      */
     function raiseDispute() external onlyBuyer initialized {
         if (_state != 1 && _state != 3) revert CannotDisputeNow();
-        if (block.timestamp >= EXPIRY_TIMESTAMP) revert CannotDisputeAfterExpiry();
 
         _state = 2; // disputed - funds frozen until resolution
 
@@ -375,16 +391,16 @@ contract CompletionEscrowContract is ReentrancyGuard {
     /**
      * ⚖️  DISPUTE RESOLUTION - 2-OF-3 VOTING SYSTEM
      *
-     * Buyer, seller (supplier), and arbiter each vote on the % refunded to the BUYER.
+     * Buyer, leadSupplier (supplier), and arbiter each vote on the % refunded to the BUYER.
      * When any 2 votes agree, the resolution executes automatically. The supplier-side
-     * share (everything not refunded to the BUYER) is split between the recipients by
+     * share (everything not refunded to the BUYER) is split between the payees by
      * the same configured basis-point split.
      */
     function submitResolutionVote(uint256 _buyerPercentage) external initialized {
         if (_state != 2) revert ContractMustBeDisputed();
         if (consensusReached) revert ConsensusAlreadyReached();
         if (_buyerPercentage > 100) revert InvalidPercentage();
-        if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != GAS_PAYER) revert NotAuthorizedToVote();
+        if (msg.sender != BUYER && msg.sender != LEAD_SUPPLIER && msg.sender != ARBITER) revert NotAuthorizedToVote();
 
         // casting to uint8 is safe: _buyerPercentage is bounded to <= 100 above
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -397,24 +413,24 @@ contract CompletionEscrowContract is ReentrancyGuard {
 
     function _checkAndExecuteConsensus() internal {
         uint8 buyerVote = resolutionVotes[BUYER].buyerPercentage;
-        uint8 sellerVote = resolutionVotes[SELLER].buyerPercentage;
-        uint8 adminVote = resolutionVotes[GAS_PAYER].buyerPercentage;
+        uint8 leadSupplierVote = resolutionVotes[LEAD_SUPPLIER].buyerPercentage;
+        uint8 adminVote = resolutionVotes[ARBITER].buyerPercentage;
 
         bool buyerVoted = (buyerVote != 255);
-        bool sellerVoted = (sellerVote != 255);
+        bool leadSupplierVoted = (leadSupplierVote != 255);
         bool adminVoted = (adminVote != 255);
 
         uint256 agreedPercentage;
         bool hasConsensus = false;
 
-        if (buyerVoted && sellerVoted && buyerVote == sellerVote) {
+        if (buyerVoted && leadSupplierVoted && buyerVote == leadSupplierVote) {
             agreedPercentage = buyerVote;
             hasConsensus = true;
         } else if (buyerVoted && adminVoted && buyerVote == adminVote) {
             agreedPercentage = buyerVote;
             hasConsensus = true;
-        } else if (sellerVoted && adminVoted && sellerVote == adminVote) {
-            agreedPercentage = sellerVote;
+        } else if (leadSupplierVoted && adminVoted && leadSupplierVote == adminVote) {
+            agreedPercentage = leadSupplierVote;
             hasConsensus = true;
         }
 
@@ -447,34 +463,34 @@ contract CompletionEscrowContract is ReentrancyGuard {
             tokenAddress.safeTransfer(BUYER, buyerAmount);
         }
 
-        // 🔒 Supplier-side share is split between the recipients per the configured split
-        _distributeToRecipients(supplierAmount);
+        // 🔒 Supplier-side share is split between the payees per the configured split
+        _distributeToPayees(supplierAmount);
     }
 
     /**
-     * Splits `amount` between the recipients by their configured basis-point shares.
-     * Each recipient but the last gets floor(amount * bps[i] / 10000); the last recipient
+     * Splits `amount` between the payees by their configured basis-point shares.
+     * Each payee but the last gets floor(amount * bps[i] / 10000); the last payee
      * gets whatever remains, so any rounding dust always lands on it and nothing is stuck.
-     * (For a single recipient it simply gets the whole amount.)
+     * (For a single payee it simply gets the whole amount.)
      */
-    function _distributeToRecipients(uint256 amount) internal {
-        uint256 n = recipients.length;
+    function _distributeToPayees(uint256 amount) internal {
+        uint256 n = payees.length;
         uint256 distributed;
         for (uint256 i = 0; i < n; i++) {
             uint256 share;
             if (i + 1 == n) {
-                // Last recipient absorbs the remainder (no dust left behind)
+                // Last payee absorbs the remainder (no dust left behind)
                 unchecked {
                     // Safe: distributed <= amount, since each share <= its bps fraction
                     share = amount - distributed;
                 }
             } else {
-                share = (amount * recipientBps[i]) / BPS_DENOMINATOR;
+                share = (amount * payeeBps[i]) / BPS_DENOMINATOR;
                 distributed += share;
             }
             if (share > 0) {
-                emit FundsClaimed(recipients[i], share, block.timestamp);
-                tokenAddress.safeTransfer(recipients[i], share);
+                emit FundsClaimed(payees[i], share, block.timestamp);
+                tokenAddress.safeTransfer(payees[i], share);
             }
         }
     }
@@ -485,9 +501,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
 
     function getContractInfo() external view initialized returns (
         address _buyer,
-        address _seller,
+        address _leadSupplier,
         uint256 _amount,
-        uint256 _expiryTimestamp,
         uint8 _currentState,
         uint256 _currentTimestamp,
         uint256 _creatorFee,
@@ -496,9 +511,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
     ) {
         return (
             BUYER,
-            SELLER,
+            LEAD_SUPPLIER,
             AMOUNT,
-            EXPIRY_TIMESTAMP,
             _state,
             block.timestamp,
             CREATOR_FEE,
@@ -507,15 +521,11 @@ contract CompletionEscrowContract is ReentrancyGuard {
         );
     }
 
-    function getRecipients() external view initialized returns (
-        address[] memory _recipients,
-        uint256[] memory _recipientBps
+    function getPayees() external view initialized returns (
+        address[] memory _payees,
+        uint256[] memory _payeeBps
     ) {
-        return (recipients, recipientBps);
-    }
-
-    function isExpired() external view initialized returns (bool) {
-        return block.timestamp >= EXPIRY_TIMESTAMP;
+        return (payees, payeeBps);
     }
 
     function isFunded() external view initialized returns (bool) {
@@ -548,7 +558,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
         return _state == 4;
     }
 
+    /// @notice True while the buyer can still dispute - i.e. any time before payout.
     function canDispute() external view initialized returns (bool) {
-        return (_state == 1 || _state == 3) && block.timestamp < EXPIRY_TIMESTAMP;
+        return _state == 1 || _state == 3;
     }
 }
