@@ -4,10 +4,50 @@ This file tracks all deployed contract addresses across different networks.
 
 ## Base Mainnet (Production)
 
+### Legacy pair (single-recipient escrow)
+
+Used by **chainservice**. Retains `EXPIRY_TIMESTAMP`, where expiry is load-bearing:
+it gates `claimFunds()`, and `EXPIRY_TIMESTAMP == 0` means instant transfer.
+
 | Contract | Address | BaseScan Link | Deployment Date |
 |----------|---------|---------------|-----------------|
 | EscrowContract (Implementation) | `0xCbfD53842f0ACc885a55b7A0eDb18eF5ac9237f9` | [View on BaseScan](https://basescan.org/address/0xCbfD53842f0ACc885a55b7A0eDb18eF5ac9237f9) | 2024-2025 |
 | EscrowContractFactory | `0x00b1D1A005022D1f140062Ba5aB0A44788089F88` | [View on BaseScan](https://basescan.org/address/0x00b1D1A005022D1f140062Ba5aB0A44788089F88) | 2024-2025 |
+
+### Completion (fan-out) pair — CURRENT
+
+Used by **fanOutChainService**; powers the Projects feature. This pair has **no
+expiry**: the buyer may dispute until payout, and funds move only on dual-verify
+or dispute resolution. Roles are BUYER / LEAD_SUPPLIER / VERIFIER / ARBITER with
+a 1–10 way `payees[]` split.
+
+| Contract | Address | BaseScan Link | Deployment Date |
+|----------|---------|---------------|-----------------|
+| CompletionEscrowContract (Implementation) | `0x86f1959b235573b1daa4cecf96214c500c7a1160` | [View on BaseScan](https://basescan.org/address/0x86f1959b235573b1daa4cecf96214c500c7a1160) | 2026-07-27 |
+| CompletionEscrowContractFactory | `0x821575b2311635e54a662fdcfb92fe8df17f36b7` | [View on BaseScan](https://basescan.org/address/0x821575b2311635e54a662fdcfb92fe8df17f36b7) | 2026-07-27 |
+
+Set on fanOutChainService:
+
+```bash
+FANOUT_ESCROW_IMPLEMENTATION_ADDRESS=0x86f1959b235573b1daa4cecf96214c500c7a1160
+FANOUT_CONTRACT_FACTORY_ADDRESS=0x821575b2311635e54a662fdcfb92fe8df17f36b7
+```
+
+Both MUST be set explicitly. `application.yml` falls back to
+`CONTRACT_FACTORY_ADDRESS` / `ESCROW_IMPLEMENTATION_ADDRESS` (the legacy pair)
+when they are absent, which points the completion ABI at the legacy factory.
+
+### Superseded completion pair
+
+Escrows created by any earlier completion factory are **not readable** by the
+current ABI (`getRecipients()` was renamed `getPayees()`; `getContractInfo()`
+lost a field). They remain on-chain and their parties can still call them
+directly, but the app will not list them. Record the prior factory address here
+if such escrows still hold funds.
+
+| Contract | Address | Notes |
+|----------|---------|-------|
+| CompletionEscrowContractFactory (previous) | _TBD — fill in if pre-2026-07-27 escrows still hold funds_ | Unreadable by current ABI |
 
 ## Base Sepolia (Testnet)
 
