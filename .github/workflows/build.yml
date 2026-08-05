@@ -29,9 +29,11 @@ jobs:
           echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
           echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> .env
           echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> .env
-          # Only add FEE_RECIPIENT_ADDRESS if it's set
-          if [ -n "${{ secrets.FEE_RECIPIENT_ADDRESS }}" ]; then
-            echo "FEE_RECIPIENT_ADDRESS=${{ secrets.FEE_RECIPIENT_ADDRESS }}" >> .env
+          # Fee recipient comes from the environment's FEE_RECIPIENT_ADDRESS
+          # variable. Only written when set; the deploy script defaults the
+          # recipient to the factory OWNER (relayer) when the variable is absent.
+          if [ -n "${{ vars.FEE_RECIPIENT_ADDRESS }}" ]; then
+            echo "FEE_RECIPIENT_ADDRESS=${{ vars.FEE_RECIPIENT_ADDRESS }}" >> .env
           fi
 
       - name: Install dependencies
@@ -80,12 +82,10 @@ jobs:
           echo "Completion implementation: $FANOUT_IMPLEMENTATION_ADDRESS"
           echo "Completion factory: $FANOUT_FACTORY_ADDRESS"
 
-          # Get fee recipient for summary (from secrets now)
-          FEE_RECIPIENT="${{ secrets.FEE_RECIPIENT_ADDRESS }}"
-          if [ -z "$FEE_RECIPIENT" ]; then
+          # Fee recipient for the summary (vars are public, safe to print).
+          FEE_RECIPIENT_DISPLAY="${{ vars.FEE_RECIPIENT_ADDRESS }}"
+          if [ -z "$FEE_RECIPIENT_DISPLAY" ]; then
             FEE_RECIPIENT_DISPLAY="Default (OWNER)"
-          else
-            FEE_RECIPIENT_DISPLAY="From secret"
           fi
 
           # Create a summary with important addresses

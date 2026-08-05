@@ -1,9 +1,9 @@
 # Stabledrop Liquidity Marketplace — Contract OpenSpec
 
-**Version:** 0.4.2
-**Date:** 2026-07-06
-**Status:** Escrow side fully implemented (incl. §3.2 atomic-swap support); spec re-reviewed end-to-end; `MarketplaceEscrow` contract pending
-**Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic.
+**Version:** 0.6.1
+**Date:** 2026-08-05
+**Status:** §3.2 (atomic swap) implemented ✅. **§3.3 (sale-triggered arbiter reset) specified but NOT implemented ⏳ — it closes the corrupt-arbiter variant of the self-dealt-escrow attack (§8.1a) and is a launch blocker.** `MarketplaceEscrow` contract pending. New `EscrowContract` implementation + factory must ship before the marketplace has any inventory (§3.4). **All §13 design decisions are settled — the spec is build-ready**; remaining opens are deploy-day parameters (§13.1/13.2), the Safe's composition (§13.8), chainservice migration (§13.9), and counsel (§13.14). Test & audit plan: §14. UI & off-chain obligations: §15. Path to production: §16.
+**Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic. Serves `EscrowContract` clones only — see §3.0.
 
 ---
 
@@ -21,12 +21,39 @@ The Stabledrop Liquidity Marketplace enables escrow recipients (sellers) to sell
 |---|---|
 | **Seller** | Current recipient of a StabledropEscrow (read live via `recipient()`). Wants immediate liquidity at a discount. |
 | **LP (Liquidity Provider)** | Any wallet except the escrow's buyer or arbiter. Makes offers by depositing the escrow's token into the MarketplaceEscrow contract. |
-| **Protocol** | Collects a configurable fee from LP deposits, accrued at acceptance time. |
+| **Protocol** | Collects a configurable fee, accrued at acceptance time. **The seller bears it:** the LP deposits exactly `offerAmount` and the seller receives `offerAmount − fee − holdback` at acceptance (§5.1, §6.1.8; the holdback comes back to them at settlement if the cashflow collects in full, §5.3). The fee is deducted from the LP's deposit in transit, but its economic incidence is on the seller's proceeds, not on the LP's cost. See §8.5a. |
 | **Owner** | Controls the fee rate and default offer duration (Ownable2Step). Cannot interfere with individual escrow transactions or touch LP deposits. |
 
 ---
 
 ## 3. Escrow Interface
+
+### 3.0 Supported escrow types — `EscrowContract` only
+
+The marketplace serves clones of **`EscrowContract`** (the legacy, single-recipient,
+expiry-based escrow) and nothing else. `CompletionEscrowContract` clones are **out of
+scope** — not deferred, but structurally incompatible. Two independent reasons:
+
+1. **No maturity.** `CompletionEscrowContract` has no `EXPIRY_TIMESTAMP`. Funds move on
+   `verifyComplete()` or on dispute resolution — never on a clock. The marketplace exists
+   to discount a cashflow that unlocks at a known time T; here there is no T. This voids
+   the `maturity() != 0` gate, the `offerExpiry < maturity()` invariant (§5.2.2), and the
+   bound on LP downside: on `EscrowContract` the buyer's dispute window closes at expiry,
+   whereas `CompletionEscrowContract` permits `raiseDispute` in both the funded and
+   pending-verify states with nothing to run out. Worse, `VERIFIER` defaults to `BUYER`,
+   so the LP's counterparty would control whether the LP is ever paid, indefinitely.
+2. **No single recipient role.** Payout is an `address[] payees` / `payeeBps[]` split of
+   1..10 entries. There is no one role to transfer, so §3.2's one-shot approval has no
+   analogue. Supporting it would require a per-payee transfer approval on the escrow, a
+   three-part offer key `(escrow, payeeIndex, lp)`, and per-slice pricing
+   (`payoutAmount() * payeeBps[i] / 10000`).
+
+Selling completion-escrow slices is therefore a **different product with a different risk
+model**, not a codehash added to a set. Should it ever be built, it warrants its own spec.
+
+`EXPECTED_ESCROW_CODEHASH` is a single `immutable` (§5.1) precisely because there is exactly
+one supported implementation. Any future multi-implementation support is a constructor and
+state-layout change, not a configuration change.
 
 ### 3.1 Already implemented on `EscrowContract` ✅
 
@@ -61,6 +88,494 @@ function transferRecipientFrom(address newRecipient) external;
 
 > Deployment note: existing deployed escrows are immutable and will not have these functions. The marketplace serves clones of the **new** implementation only, enforced by the codehash check (§8.1) — old-implementation clones have a different codehash and are rejected automatically.
 
+### 3.3 Required escrow changes — NOT yet implemented ⏳
+
+These address the self-dealt-escrow attack (§8.1a) — specifically its **corrupt-arbiter
+variant**, where the attacker pre-loads an arbiter they control. What remains afterwards is
+the ordinary risk that an arbiter rules wrongly on the merits, which is true of every
+arbitration in every system and is not specific to this design; see §8.1a for what is and is
+not closed.
+
+They are changes to `EscrowContract` itself, not to the marketplace, and they ship in the
+same new implementation as §3.2. At the **contract** level they are confined to sold
+escrows — an escrow that never sells keeps today's dispute mechanics exactly. At the
+**service** level two things change platform-wide: the creation arbiter becomes the
+`DEFAULT_ARBITER` Safe rather than chainservice's hot wallet, and agreed settlements are
+pushed on-chain by the two disputants themselves (§3.3A2a, §13.9) — the hot wallet retains
+no dispute power on any escrow.
+
+**A. Arbiter is chosen at creation — and unseated by a sale.**
+`initialize` **keeps** its arbiter parameter, and an escrow that is never sold behaves
+exactly as today: the creation arbiter holds office and the current 2-of-3 runs unchanged,
+with none of the machinery below ever invoked. The change is confined to the moment a
+cashflow is sold through the marketplace:
+
+```
+transferRecipientFrom(lp)              // the atomic sale, §3.2
+  → ARBITER := address(0)              // incumbent UNSEATED, automatically, in the same tx
+  → buyer and new recipient may re-seat by agreement at any time:
+      both nominate the same address → seated immediately
+      (nominating the incumbent re-confirms them — two transactions, done)
+  → if a dispute is raised while unseated:
+      nomination window opens → on expiry unmatched, DEFAULT_ARBITER is seatable (fallback)
+  → throughout, buyer + recipient matching votes still settle 2-of-3 —
+    no arbiter is needed when the parties agree on the outcome
+
+Once seated, ordinary 2-of-3 resolution proceeds with NO deadline (see A2).
+```
+
+`changeRecipient` does **not** unseat: a seller rotating their own payout wallet should not
+evict a legitimate arbiter, and an OTC buyer taking the role outside the marketplace gets
+none of the marketplace's other protections either. Unseating is a property of the **sale**.
+
+**Why unseating is automatic, not objection-based.** An opt-in objection ("the new recipient
+may object to the incumbent after buying") loses a race the attacker controls: in the
+self-dealt escrow the attacker *is* the seller, so they choose the block the sale lands in
+and can bundle `acceptOffer` → `raiseDispute` → buyer votes 100 → pre-loaded arbiter votes
+100 — consensus executes before any objection can land. Unseating inside
+`transferRecipientFrom` makes that bundle fail (the old arbiter is no longer an authorised
+voter), and costs an honest incumbent nothing: both parties re-confirm them at leisure.
+
+**Why this closes the corrupt-arbiter variant.** The §8.1a attack needs a pre-loaded arbiter
+still holding office when the dispute fires. After any sale the incumbent is out, and every
+path back to a seat runs through the new recipient: re-confirmation and replacement both
+need their matching nomination, and the fallback is a party the attacker does not control.
+The 2-of-3 majority cannot be manufactured — and refusing to agree does not deadlock the
+escrow, it hands the seat to the default arbiter. The attack fails rather than relocating.
+
+**A1. Nomination window is per-escrow, set at creation, and immutable.**
+`arbiterNominationWindow` is supplied to the factory at escrow creation, with `0` meaning
+"use `DEFAULT_NOMINATION_WINDOW`" (72 hours) — the same idiom `createOffer` uses for
+`offerDurationSeconds`. It is read only when a **sold** escrow raises a dispute while
+unseated; an escrow that never sells never consults it. (Decision: kept as a factory
+parameter for per-escrow flexibility, accepting the `initialize` ABI change — §13.9.)
+
+**There is deliberately no maximum.** A hostile window is self-limiting: the value is
+public on-chain before anyone buys, the LP must actively choose to purchase, and the
+attacker must lock real capital to have a listable escrow at all. An escrow with an absurd
+window attracts no bids and the attacker has wasted their deposit. Capping it in the escrow
+would constrain legitimate long-running non-marketplace deals to solve a problem the market
+already solves. No minimum either — a zero window simply means "go straight to the admin
+fallback", which is not exploitable given A2.
+
+> ⚠️ **The self-limiting argument depends entirely on immutability.**
+> `arbiterNominationWindow` MUST be fixed at `initialize` and unchangeable thereafter. If
+> it could be altered post-creation, an attacker would list with a 48-hour window, let the
+> LP price that, take their money, and then set it to ten years. "Visible at purchase" only
+> protects the buyer if what they saw is what they get. Enforce and test this.
+
+**A1a. Nomination and seating mechanism.**
+
+```solidity
+address public immutable DEFAULT_ARBITER;   // fallback arbitrator ONLY — set in the IMPLEMENTATION constructor, see below
+// Named DEFAULT_ARBITER (not "admin") deliberately: this address has no operational role.
+// It never touches escrow creation, offers, or acceptances — its sole capability is being
+// seated as the fallback arbiter on a SOLD escrow and then casting a dispute vote. That is
+// why multisig latency is acceptable for it (§13.8) and why it needs no other powers.
+uint64  public arbiterNominationWindow;     // storage; set once in initialize, no setter
+
+address public ARBITER;                     // set at initialize; address(0) while unseated after a sale
+address public nominatedByBuyer;
+address public nominatedByRecipient;
+uint64  public nominationDeadline;          // set when a dispute and the unseated state coincide
+
+function nominateArbiter(address candidate) external;   // buyer or current recipient
+function seatDefaultArbiter() external;                // permissionless, after deadline
+```
+
+**Where each value lives is security-relevant, not stylistic:**
+
+- **`DEFAULT_ARBITER` is a true Solidity `immutable`, set in the implementation's constructor**
+  and therefore shared by every clone. It MUST NOT be an `initialize` parameter: `initialize`
+  is permissionless (§8.1a), so a per-escrow admin would let a self-dealt clone install its
+  own fallback — zero nomination window, dispute, refuse to nominate, and the fallback seats
+  an attacker-controlled arbiter. The corrupt-arbiter attack would return straight through
+  the mechanism built to kill it. Baking the address into the implementation bytecode makes
+  it unforgeable by direct clones at no cost.
+
+  Consequence: rotating `DEFAULT_ARBITER` means a new implementation, hence a new codehash,
+  factory, and marketplace. **It must therefore be a multisig** (rotate signers inside it;
+  the address never changes) — this upgrades §13.8's "ideally a multisig" to a requirement.
+
+- **`arbiterNominationWindow` is per-escrow, so it CANNOT be a Solidity `immutable`**
+  (immutables live in the implementation's bytecode and would be shared by all clones). It is
+  a storage variable written once in `initialize` with no setter — the same
+  set-once-no-setter pattern as `EXPIRY_TIMESTAMP`, which is what §3.3A1's immutability
+  requirement actually means at the Solidity level.
+
+**`_unseatArbiter()` (internal) — called by `transferRecipientFrom` only, after the role
+moves.** Not by `changeRecipient`, and not inside the shared `_transferRecipient` (which
+both paths use):
+
+```solidity
+address previous = ARBITER;
+ARBITER = address(0);
+nominatedByBuyer = address(0);
+nominatedByRecipient = address(0);
+if (_state == 2) nominationDeadline = uint64(block.timestamp + arbiterNominationWindow);
+emit ArbiterUnseated(previous);
+```
+
+The `_state == 2` branch covers a sale executed mid-dispute (§3.2 permits the transfer in
+funded *or* disputed state — though the marketplace itself never sells into a dispute, a
+direct operator flow could): the new recipient gets a full window from the moment they hold
+the role. For the normal funded-state sale, the deadline is instead set by `raiseDispute()`:
+**if `ARBITER == address(0)` at that point, `raiseDispute` sets `nominationDeadline =
+block.timestamp + arbiterNominationWindow`.**
+
+**`nominateArbiter(candidate)`**
+1. Require `ARBITER == address(0)` (revert `ArbiterAlreadySeated`) — only a sold, unseated
+   escrow accepts nominations. Require `_state == 1 || _state == 2`: agreement is allowed
+   **before** any dispute (settle governance while relations are good) as well as during
+   one.
+2. Require `msg.sender == BUYER || msg.sender == SELLER` (revert `NotDisputeParty`).
+3. Require `candidate != address(0) && candidate != BUYER && candidate != SELLER`
+   (revert `InvalidArbiterCandidate`) — an arbiter who is also a party would hold 2-of-3
+   alone, the precise failure `initialize` guards against today. This is the **only**
+   constraint on a candidate; nominations are otherwise free-form (§3.3B), and nominating
+   the unseated incumbent to re-confirm them is the expected common case.
+4. Record the nomination for the caller's side. Nominations are **mutable** until seated:
+   re-nominating overwrites.
+5. If both sides have nominated and the two addresses are equal → `_seatArbiter(candidate)`
+   **immediately**, in this same transaction.
+6. Emit `ArbiterNominated(msg.sender, candidate)`.
+
+There is deliberately **no deadline check on nominations**: a match is always better than
+the fallback, so a late agreement still seats right up until `seatDefaultArbiter` actually
+executes. The deadline's only role is to *enable* the fallback, never to block agreement.
+
+**`seatDefaultArbiter()`**
+1. Require `_state == 2` and `ARBITER == address(0)`.
+2. Require `block.timestamp > nominationDeadline` (revert `NominationWindowStillOpen`).
+3. `_seatArbiter(DEFAULT_ARBITER)`.
+
+Permissionless by design, mirroring `checkAndActivate`: it takes no discretion and can only
+do the one thing the elapsed window already determined. A zero `arbiterNominationWindow`
+therefore just means the fallback is seatable as soon as a dispute exists.
+
+**`_seatArbiter(address a)` (internal)**
+```solidity
+ARBITER = a;
+resolutionVotes[a].buyerPercentage = 255;   // ⚠️ MANDATORY — see §3.3D
+emit ArbiterSeated(a, /* byAgreement */ a != DEFAULT_ARBITER);
+```
+
+The vote reset also covers a re-confirmed incumbent who had already voted before the sale
+unseated them mid-dispute — they return to office with a clean slate.
+
+**`evictArbiter()` — remedy for a seated-but-silent arbiter.**
+
+```solidity
+uint256 public constant ARBITER_SILENCE_TIMEOUT = 30 days;
+uint64  public lastArbiterActionAt;   // see update rules below
+
+function evictArbiter() external;     // either disputant, after the timeout
+```
+
+`lastArbiterActionAt` is stamped `block.timestamp` at three points: when `raiseDispute`
+fires with an arbiter already seated (the clock must start at the dispute, not at creation —
+an unsold escrow's Safe may sit quietly for months before any dispute exists); inside
+`_seatArbiter`; and inside `submitResolutionVote` whenever `msg.sender == ARBITER` (casting
+*or changing* a vote resets the clock).
+
+1. Require `_state == 2` (eviction is meaningless outside a dispute) and
+   `ARBITER != address(0)` (revert `NoArbiterSeated`).
+2. Require `msg.sender == BUYER || msg.sender == SELLER` (revert `NotDisputeParty`).
+3. Require `block.timestamp > lastArbiterActionAt + ARBITER_SILENCE_TIMEOUT`
+   (revert `ArbiterNotSilent`).
+4. Clear the seat and nominations exactly as `_unseatArbiter` does, restart
+   `nominationDeadline = block.timestamp + arbiterNominationWindow`, emit
+   `ArbiterEvicted(previous)`.
+
+Eviction **only swaps the third voter** — it moves no funds and closes nothing, so it cannot
+become a forced-resolution backdoor (§3.3A2). After eviction the ordinary path resumes:
+match-nominate a replacement (or the same arbiter again), or let the window lapse and seat
+the Safe. Two deliberate properties:
+
+- It also covers the arbiter who voted once and vanished: a standing figure that matches
+  neither party is the same deadlock as silence, and the rolling clock (silence since *last*
+  vote) makes it evictable.
+- On an **unsold** escrow it is the parties' exit from a slow Safe: evict, then
+  match-nominate a private arbiter of their choosing — the platform is not a mandatory
+  bottleneck even where it holds the creation seat. If they can't match, the same Safe
+  simply re-seats after the window.
+
+Accepted cost: a party who dislikes an honest arbiter's standing figure can wait out the
+timeout and evict — effectively appealing to the Safe. Bounded (they cannot choose the
+replacement unilaterally), and slow by construction.
+
+**Recipient changes while unseated clear the recipient's nomination.** `_transferRecipient`
+MUST reset `nominatedByRecipient = address(0)` alongside the existing vote reset — a
+nomination made by a previous recipient must never bind the new one. (This lives in the
+shared `_transferRecipient` because it must also cover `changeRecipient` while unseated.)
+
+**`_transferRecipient` must also reject `newSeller == DEFAULT_ARBITER`.** Otherwise an escrow
+whose recipient is the default arbiter would have no valid fallback, and seating one would
+collapse two of the three voting roles into a single address. This sits alongside the
+existing `newSeller == ARBITER` rejection, which remains live whenever an arbiter is seated
+(i.e. always, except between a sale and a re-seating).
+
+> **A candidate is not validated for competence.** Nothing checks that a nominated address
+> can actually vote. If both parties agree on a contract with no `submitResolutionVote`
+> path, the third voter is seated and permanently dead. Buyer and recipient can still
+> settle 2-of-3 between themselves, but the tiebreaker is gone for good. This is the main
+> cost of dropping the registry (§3.3B); `evictArbiter` (below) is the remedy — after 30
+> days of silence the dead seat is cleared and nomination reopens.
+
+**A2. No resolution deadline — the arbiter proposes, a party disposes.**
+Once an arbiter is seated, ordinary 2-of-3 resolution runs with **no time limit and no
+forced closure**. `_checkAndExecuteConsensus` is unchanged; the arbiter is simply a third
+voter whose figure becomes focal.
+
+This is deliberate, and it is what keeps the platform out of the payout decision:
+
+- **The platform can never move funds alone.** Every settlement requires a *disputing
+  party* to actively vote the number that executes. The admin's vote alone does nothing.
+  This is a materially stronger and simpler claim than any weighted or averaged formula,
+  and it is the property to lead with in any regulatory conversation. **(Not legal advice —
+  confirm the perimeter with counsel; see §13.14.)**
+- **A single stubborn party cannot deadlock.** The arbiter plus one party is already 2-of-3,
+  so if the buyer stonewalls, the arbiter can vote the recipient's figure and it settles
+  without the buyer, and vice versa. Holding out is not a blocking move; it is a bet that
+  the arbiter will not endorse the other side.
+- **Time pressure drives convergence.** The recipient — after a sale, the LP — is holding a
+  discounted position and bleeding time-value on frozen capital, so they are strongly
+  incentivised to converge on the arbiter's figure. They control their own settlement
+  timing by choosing to accept it.
+
+Rejected alternatives, recorded so they are not revisited: making the seated arbiter's vote
+**binding** after the window (gives the platform unilateral control of funds — the exact
+exposure this design exists to avoid); resolving to the **mean of the three votes** (not
+strategy-proof — honest voting becomes dominated, both parties pin to the extremes, and
+every dispute refunds the buyer ~33% regardless of merit, which in this marketplace is a
+guaranteed extraction from the LP and would collapse the discount range); resolving to the
+**median** (strategy-proof, but with polarised parties the median *is* the arbiter's vote,
+i.e. unilateral control with extra steps).
+
+**A2a. Agreed settlements — two party votes, negotiation stays off-chain. (ALL escrows.)**
+Today chainservice settles an agreed dispute by completing the vote pair itself: one party
+casts `submitResolutionVote(X)` on-chain and the platform, holding the arbiter seat with its
+hot wallet, casts the matching vote. **That mechanism is retired everywhere, not only for
+sold escrows** — because of the companion decision:
+
+> **The creation arbiter is the `DEFAULT_ARBITER` Safe on every chainservice-created
+> escrow.** The operational hot wallet holds no dispute power on any escrow, and a 2-of-3
+> multisig cannot act as an automated vote-completer. This also makes the §3.3A2 claim —
+> the platform can never move funds alone — true of the whole platform, not just the
+> marketplace. (On a sold escrow the sale still unseats the Safe and the fallback re-seats
+> it; unseat-on-sale remains load-bearing for hostile direct clones, whose creator picks
+> their own creation arbiter.)
+
+The flow for **every** dispute, sold or unsold: negotiate off-chain exactly as now; when a
+figure is agreed, the UI prompts **both disputants** to push it on-chain —
+`submitResolutionVote(X)` from each party's own wallet — and consensus fires on the second
+vote, executing the payout in the same transaction. **The arbiter takes no action of any
+kind in an agreed settlement**, seated or not. No new contract code, and the total on-chain
+cost is unchanged from today: two vote transactions — only the second signature moves from
+the platform to the second party. chainservice watches `VoteSubmitted` and prompts the
+outstanding side.
+
+Gas: both votes route through the existing **gas-sponsorship path** used for all user-wallet
+actions — a party with zero ETH settles fine. The only integration requirement is that the
+vote transaction goes through that path like every other user action (§13.9).
+
+If a party agrees off-chain but never pushes their vote, there is simply no on-chain
+agreement — the dispute stays open and resolves the way any contested dispute does:
+arbiter adjudication (the Safe on an unsold escrow; the seated or fallback arbiter on a
+sold one, §3.3A1a).
+
+> Considered and rejected: a gasless `settleBySignatures(pct, buyerSig, recipientSig)`
+> (EIP-712, permissionless relay — the platform carries the parties' signature bytes but
+> never authority). Cryptographically sound and a standard pattern, but it requires reliable
+> typed-data signing in the webapp wallet layer, which the current provider stack does not
+> deliver across the user base (embedded/contract wallets would additionally force ERC-1271
+> verification onto the escrow). Revisit only if the wallet stack changes.
+
+**A3. Residual risks of no deadline — disclose, do not "fix".**
+
+1. **Hold-up against the time-pressured party.** The LP's time incentive is visible to the
+   buyer, so a patient bad-faith buyer can hold out for a better split than the merits
+   justify. Bounded — the buyer risks the arbiter endorsing the LP's figure outright — but
+   real, and LPs will price it into their discount.
+2. **Arbiter negligence.** Deadlock is now reachable only if the arbiter's figure matches
+   neither party, neither party moves, *and* the arbiter will not adopt either figure. A
+   conscientious arbiter can always break it; an absent one cannot — which is why a
+   seated-but-silent arbiter is **evictable** after `ARBITER_SILENCE_TIMEOUT` (§3.3A1a,
+   `evictArbiter`): the freeze is bounded at 30 days plus a nomination round, never forever.
+
+**B. No arbiter registry — nominations are free-form.**
+
+Earlier drafts required nominations to come from a curated list, at first for all escrows
+and then for resold ones only. **Both are dropped.** Nominations are unconstrained beyond
+"not the zero address and not a party" (§3.3A1a step 4). There is no registry contract, no
+curator role, and no `wasResold` flag.
+
+**Why a registry is unnecessary.** Three facts compose:
+
+1. **Any arbiter chosen before the sale is unseated at the moment of sale** (§3.3A) — the
+   LP is never subject to an incumbent they did not personally re-confirm.
+2. **An LP can never buy into a disputed escrow.** `createOffer` and `acceptOffer` both
+   require `!hasActiveDispute()` (§6.1.4, §6.2.4), and an offer on an escrow that becomes
+   disputed turns immediately withdrawable (§6.4).
+3. **Seating requires a match**, so either party can veto any candidate by simply not
+   matching, and a non-match falls through to the default arbiter (§3.3A1a).
+
+Together these mean an LP is *never* bound by an arbiter chosen before they arrived, and
+can never be outvoted onto an arbiter they did not personally agree to. The veto — not a
+list — is what prevents collusion, and the veto works identically with or without one. A
+registry would have added a quality bar on top of a protection that was already complete.
+
+**It also improves the regulatory position (§13.14).** Curating a panel is itself a form of
+influence over dispute outcomes. Removing the curator removes that question rather than
+having to answer it: the platform now maintains no list, vets no one, and appears in a
+dispute only as the fallback third voter that neither party can outvote alone.
+
+**What is genuinely given up:** resistance to social engineering. Nothing on-chain now stops
+an LP being talked into matching a plausible-looking address that is in fact the buyer's
+associate. This moves from a contract guarantee to a **UI responsibility** — the nomination
+step must warn clearly that matching an unknown arbiter is irreversible and that declining
+to match is always safe, because it falls back to the admin. Note the LP has to take
+positive action against their own interest for this to bite; the default path is safe.
+
+**Second cost:** no candidate is checked for competence — see the warning in §3.3A1a. This
+is remedied by `evictArbiter` (§3.3A1a) — a dead seat clears after 30 days of silence.
+
+**C. Residual holdback — specified on the marketplace, not here.**
+
+The residual is a term of the **sale**, not of the escrow: the LP advances part of the
+agreed price and retains a reserve, released to the seller once the cashflow is collected.
+It is therefore funded out of the **seller's proceeds** and never touches the buyer's refund
+rights. Full specification is §5.3 / §6.7.
+
+One escrow change is required to support it:
+
+**Persist the dispute outcome.** `_executeResolution(agreedPercentage)` currently emits the
+figure but does not store it, so an external contract cannot read how a dispute resolved.
+The marketplace needs it to compute the LP's shortfall. Add:
+
+```solidity
+uint8 public resolvedBuyerPercentage = 255;   // 255 = no dispute resolution has occurred
+```
+
+Set in `_executeResolution` before the transfers. The 255 sentinel matches the convention
+already used by `resolutionVotes` and distinguishes "resolved at 0% to buyer" from "never
+disputed".
+
+Note that distinction is **not** load-bearing for §6.7: both cases yield `loss == 0` and pay
+the reserve back to the funder in full, so a plain `0` default would compute identically. The
+sentinel is kept for observability — indexers and the UI can tell a dispute that went the
+recipient's way from one that never happened — and because the escrow already uses 255 for
+exactly this meaning. If the extra branch is unwanted, defaulting to `0` is safe.
+
+**⚠️ D. The unseated-arbiter vote trap — implementation-critical.**
+
+**Getting this wrong hands any seller the entire escrow.** In `resolutionVotes`, "not
+voted" is the sentinel **255**, and it must be *written*, because a default mapping read
+returns **0** — which is a valid vote meaning "0% to buyer", i.e. **100% to the seller**.
+This is why `initialize` explicitly sets all three parties to 255 (`EscrowContract.sol`
+lines 399–401) and why `_transferRecipient` resets a new recipient to 255.
+
+§3.3A unseats `ARBITER` at every sale, so `address(0)` is now a live mid-life state — which
+walks straight into this trap twice:
+
+1. **While unseated.** If `ARBITER == address(0)`, then `resolutionVotes[address(0)]`
+   reads 0, so `_checkAndExecuteConsensus` computes `adminVoted == true` with a vote of
+   100%-to-seller already cast. The branch `sellerVoted && adminVoted && sellerVote ==
+   adminVote` then fires the moment the seller votes 0 — **the seller unilaterally takes
+   the full escrow, before the nomination window has even opened.** The attack §3.3 exists
+   to prevent is replaced by a strictly worse one that needs no collusion at all.
+2. **At seating.** A newly seated arbiter's slot also defaults to 0, so seating them
+   silently casts a 100%-to-seller vote on their behalf. If the seller has already voted
+   0, consensus fires in the same transaction that seats the arbiter.
+
+Required, both of them:
+
+```solidity
+// (1) Never treat an unseated arbiter as a voter.
+bool adminVoted = ARBITER != address(0) && adminVote != 255;
+
+// (2) Seating an arbiter must reset their vote, exactly as _transferRecipient does
+//     for a new recipient.
+ARBITER = seatedArbiter;
+resolutionVotes[seatedArbiter].buyerPercentage = 255;
+```
+
+Belt-and-braces: also write `resolutionVotes[address(0)].buyerPercentage = 255` at
+`initialize`, so the zero address can never read as a live voter even if a future edit
+drops the guard in (1).
+
+**Test this explicitly.** Minimum cases: seller votes 0 with no arbiter seated (must NOT
+resolve); seller votes 0, then an arbiter is seated (must NOT resolve); buyer and seller
+both vote 50 with no arbiter seated (MUST resolve — this is the no-arbiter-needed path,
+`_checkAndExecuteConsensus` branch 1, and it is the common case).
+
+**E. Trust consequences and knock-on changes.**
+These follow from §3.3 as a whole — principally from A (arbiter selection) and its
+default-arbiter fallback.
+
+**Trust consequences to disclose:**
+- The platform becomes a **trusted backstop** for any *sold-escrow* dispute the parties do
+  not settle themselves. The escrow is trust-*minimised*, not trustless. Both buyers and LPs
+  need to know this. Note the limit of that trust: the default arbiter is one voter of three
+  and can never move funds alone (§3.3A2).
+- The default-arbiter Safe is load-bearing and **MUST be a distinct address from the marketplace
+  owner** (ideally a multisig). A single key that both sets fees and arbitrates disputes is
+  a total-compromise target. See §13.8.
+- Any party can force platform arbitration for free by never agreeing — on an unsold escrow
+  the Safe already holds the seat; on a sold one the fallback re-seats it after the window.
+  This is an ops-load question, not a security hole, but plan for it: **the Safe signs in
+  every contested dispute platform-wide** (agreed settlements never involve it, §3.3A2a),
+  so signer responsiveness is an operational SLA — see §13.8.
+
+**Knock-on changes to `EscrowContract`:**
+- `initialize` **keeps** its arbiter parameter (the primary market is unchanged) but
+  **gains** `arbiterNominationWindow` (§3.3A1) — a factory ABI change that affects
+  chainservice whether or not it ever touches the marketplace (§13.9). The window must be
+  unchangeable after `initialize`.
+- `transferRecipientFrom` additionally calls `_unseatArbiter()` after the role moves
+  (§3.3A1a). `changeRecipient` does not.
+- `raiseDispute` sets `nominationDeadline` when `ARBITER == address(0)` (§3.3A1a).
+- `_checkAndExecuteConsensus` must not treat an unseated arbiter as a voter (§3.3D). Note
+  `submitResolutionVote` itself needs **no** change on this account: it gates on
+  `msg.sender != ARBITER`, and `msg.sender` can never be the zero address.
+- `_transferRecipient` keeps its `newSeller == ARBITER` rejection — live whenever an arbiter
+  is seated — and **gains** a `newSeller == DEFAULT_ARBITER` rejection, plus a reset of
+  `nominatedByRecipient` (all three per §3.3A1a).
+- `_executeResolution` must persist `resolvedBuyerPercentage` (§3.3C).
+
+### 3.4 Launch precondition — a new implementation must ship first
+
+**The marketplace has zero addressable inventory until a new `EscrowContract`
+implementation is deployed.** This is a hard precondition, not a migration detail.
+
+The implementation currently live on Base mainnet is
+`0xCbfD53842f0ACc885a55b7A0eDb18eF5ac9237f9` (`DEPLOYMENT_ADDRESSES.md`), which predates
+both §3.2 and §3.3. Every escrow in existence today is a clone of it, so every escrow in
+existence today has a codehash that `EXPECTED_ESCROW_CODEHASH` will reject — correctly,
+since none of them can perform the approve-and-pull swap. Clones are immutable; there is
+no retrofit.
+
+Launch therefore requires, in order:
+
+1. Deploy the new `EscrowContract` implementation carrying **both** §3.2 (approve/pull)
+   and §3.3 (sale-triggered arbiter reset, `resolvedBuyerPercentage` persistence).
+2. Deploy the matching `EscrowContractFactory`, and repoint chainservice at it
+   (§13.9 — note §3.3 changes `initialize`'s signature, so this is an ABI break, not a
+   config change).
+3. Deploy `MarketplaceEscrow` with `TRUSTED_IMPLEMENTATION` set to (1).
+4. Record all three in `DEPLOYMENT_ADDRESSES.md`.
+
+Inventory then accrues only from escrows created **after** step 2. The marketplace opens
+empty and fills at the rate new escrows are written — worth knowing before any launch
+messaging promises liquidity on existing deals.
+
+| Contract | Address |
+|---|---|
+| `EscrowContract` implementation (new, §3.2 + §3.3) | _TBD — blocks launch_ |
+| `EscrowContractFactory` (new) | _TBD — blocks launch_ |
+| `MarketplaceEscrow` | _TBD_ |
+| `DEFAULT_ARBITER` multisig ("stabledropAdmin" Safe, must differ from marketplace owner, §3.3) | `0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C` ✅ (Safe v1.4.1 on Base, 2-of-3, no modules — verified 2026-08-05; **test transaction still pending**, nonce 0) |
+
 ---
 
 ## 4. Offer Lifecycle
@@ -70,7 +585,7 @@ LP deposits token → Offer created (OPEN)
         │
         ├─ Seller: escrow.approveRecipientTransfer(marketplace, lp)  (tx 1, on escrow, 5-min TTL)
         │  Seller: marketplace.acceptOffer(escrow, lp)            (tx 2, atomic swap)
-        │        → role pulled to LP, seller paid, fee accrued → COMPLETED
+        │        → role pulled to LP, seller paid, fee accrued, offer slot freed
         │        → all other OPEN offers on this escrow become STALE (recipient changed)
         │          and their LPs may withdraw in full
         │
@@ -95,48 +610,145 @@ struct Offer {
     address seller;           // recipient() at offer creation — offer is valid only while this holds
     address lp;               // LP wallet that made the offer
     address token;            // escrow.token() at creation; all transfers for this offer use it
-    uint256 offerAmount;      // Gross amount deposited by LP (before fee)
-    uint256 netAmount;        // Amount seller receives (offerAmount − fee)
+    uint256 offerAmount;      // Gross amount deposited by LP (before fee and holdback)
+    uint256 holdback;         // Reserve retained at acceptance, released later (§5.3)
+    uint256 netAmount;        // Amount seller receives AT ACCEPTANCE (offerAmount − fee − holdback)
     uint256 fee;              // Protocol fee, computed at creation, accrued only on acceptance
     uint256 offerExpiry;      // Timestamp after which the LP may withdraw
-    OfferStatus status;       // OPEN | COMPLETED | CANCELLED
+    OfferStatus status;       // OPEN | CANCELLED
 }
 
-enum OfferStatus { NONE, OPEN, COMPLETED, CANCELLED }   // NONE = empty slot (default)
+enum OfferStatus { NONE, OPEN, CANCELLED }   // NONE = empty slot (default)
+// There is deliberately no COMPLETED state. An accepted offer's slot is deleted inside
+// acceptOffer (§6.2) — the deposit has already left the contract, so there is nothing
+// left to track, and a persisted COMPLETED would be write-only dead state that barred
+// that (escrow, LP) pair from ever bidding again. Completion is recorded by the
+// OfferAccepted event, which is where history belongs.
 
 mapping(bytes32 => Offer) public offers;
 // Key: keccak256(abi.encodePacked(escrowContract, lp))
-// One offer record per (escrow, LP). Slot is freed (deleted) on withdrawal.
+// One LIVE offer record per (escrow, LP). The slot is freed on acceptance (§6.2) and on
+// withdrawal (§6.4) — i.e. whenever the deposit is no longer held for that pair.
 
 address public immutable TRUSTED_IMPLEMENTATION;        // the audited EscrowContract implementation
 bytes32 public immutable EXPECTED_ESCROW_CODEHASH;       // ERC-1167 clone hash embedding it (§8.1)
 uint256 public feeRateBps;                              // e.g. 100 = 1%; hard cap 1000 (10%)
+uint256 public minOfferBps;                             // floor as bps of payoutAmount(); launch 1000 (10%); cap 10000
 uint256 public defaultOfferDuration;                    // e.g. 24 hours; always > 0
 mapping(address => uint256) public accruedFees;         // per-token protocol fees (§8.5)
 mapping(address => uint256) public totalDeposits;       // per-token sum of live LP deposits (§8.6)
+mapping(address => uint256) public totalHoldbacks;      // per-token sum of live holdbacks (§5.3)
 ```
 
 ### 5.1a Constructor
 
 ```solidity
-constructor(address trustedImplementation, uint256 initialFeeRateBps, uint256 initialDefaultOfferDuration, address initialOwner)
+constructor(address trustedImplementation, uint256 initialFeeRateBps, uint256 initialMinOfferBps, uint256 initialDefaultOfferDuration, address initialOwner)
 ```
 
-- Require `trustedImplementation != address(0)`, `initialFeeRateBps <= 1000`, `initialDefaultOfferDuration > 0`, `initialOwner != address(0)` (Ownable2Step initial owner).
+- Require `trustedImplementation != address(0)`, `initialFeeRateBps <= 1000`, `initialMinOfferBps <= 10000`, `initialDefaultOfferDuration > 0`, `initialOwner != address(0)` (Ownable2Step initial owner).
 - `EXPECTED_ESCROW_CODEHASH = keccak256(abi.encodePacked(hex"363d3d373d3d3d363d73", trustedImplementation, hex"5af43d82803e903d91602b57fd5bf3"))` — the ERC-1167 minimal-proxy runtime code that OpenZeppelin `Clones` deploys, with the implementation address embedded.
 
 There is **no offer-enumeration array**. Competing offers are invalidated lazily by the staleness rule, so no O(N) cancellation loop exists (removes the sybil gas-DoS on `acceptOffer`).
 
 ### 5.2 Key Invariants
 
-1. **Slot integrity:** `createOffer` requires the (escrow, lp) slot to be `NONE`. A cancelled/expired-but-unwithdrawn offer still owns its slot and its deposit; it can never be overwritten.
-2. **Sellable escrow only:** at `createOffer` AND `acceptOffer` the escrow must be **verifiably genuine** (`escrow.codehash == EXPECTED_ESCROW_CODEHASH` — unforgeable, unlike any self-reported value), funded, undisputed, unclaimed, non-instant (`maturity() != 0`), and `offerExpiry < maturity()`.
+1. **Slot integrity:** `createOffer` requires the (escrow, lp) slot to be `NONE`. **A slot is occupied exactly while the contract still holds that LP's deposit for that escrow**, and is freed the moment it does not — on acceptance (§6.2, funds paid out) or on withdrawal (§6.4, funds returned). A cancelled/expired-but-unwithdrawn offer therefore still owns its slot and its deposit and can never be overwritten; an accepted one does not. This keeps re-bidding possible: an LP who bought an escrow and later resold it may bid on it again.
+2. **Sellable escrow only:** the escrow must be **verifiably genuine** (`escrow.codehash == EXPECTED_ESCROW_CODEHASH` — unforgeable, unlike any self-reported value), funded, undisputed, unclaimed, non-instant (`maturity() != 0`), and `offerExpiry < maturity()`.
+
+   Genuineness is checked **once, at `createOffer`**. It is deliberately *not* re-checked at `acceptOffer`: a deployed clone's codehash is immutable, and a minimal proxy has no `SELFDESTRUCT` path, so the value cannot change between the two calls — re-reading it would be pure gas. The mutable conditions (funded / undisputed / unclaimed / live seller) *are* re-checked at acceptance, because those genuinely can change.
 3. **Live seller:** an offer is acceptable only while `escrow.recipient() == offer.seller` and only by that address. Any recipient change makes every existing offer on that escrow permanently stale (withdrawable, never acceptable). Payment always goes to `msg.sender == offer.seller == recipient()` — a stale snapshot can never be paid.
-4. **Minimum offer:** `offerAmount >= max(escrow.payoutAmount() / 2, 1)` (at least 50% of face value, and never zero — guards the dust-escrow edge where `payoutAmount() <= 1` would round the floor to 0).
+4. **Minimum offer:** `offerAmount >= max(escrow.payoutAmount() * minOfferBps / 10000, 1)` — never zero even at `minOfferBps == 0` (guards the dust edge where the product rounds to 0).
+
+   `minOfferBps` is **owner-configurable** (§6.5), launching at **1000 (10%)**, hard cap 10000. The floor is a spam guard, not a price policy: with no enumeration array a dust offer harms nothing on-chain (it occupies only its own slot and locks the spammer's own capital), so the real cost of a high floor is banning deep-discount bids — which §8.1a shows are the *safest* trades for LPs (attacker profit scales with `r − d`). An earlier fixed 50% floor was rejected for exactly that reason. Changes apply to **new offers only**; a live offer was validated at creation and its terms are firm.
 4a. **Firm quotes:** an LP **cannot cancel their own OPEN offer**. Offers are irrevocable commitments until expiry/rejection/staleness — otherwise an LP could bait with a high offer and front-run the seller's `acceptOffer` with a cancellation. LPs control their exposure via `offerDurationSeconds`.
 5. **Fee containment:** protocol fees accrue to `accruedFees[token]` only at acceptance. `withdrawFees` is capped by `accruedFees[token]` — the owner can never touch LP deposits. Cancelled/expired/stale offers refund the **full gross** amount including the computed fee.
 6. **No custody:** the marketplace address is never the escrow recipient at rest. The role moves seller → LP within a single `acceptOffer` transaction.
-7. **Conservation:** for every token, `balanceOf(marketplace) >= totalDeposits[token] + accruedFees[token]` (excess = accidental transfers, sweepable §8.7).
+7. **Conservation:** for every token, `balanceOf(marketplace) >= totalDeposits[token] + accruedFees[token] + totalHoldbacks[token]` (excess = accidental transfers, sweepable §8.7).
+8. **Holdback segregation:** a reserve is owed to either its funder or the escrow's current recipient and to nobody else. It is never withdrawable by the owner, never counted in `accruedFees`, and is settled exactly once. `toFunder + toRecipient == amount` — settlement redistributes the reserve, it never creates or destroys value.
+9. **One reserve per escrow, set on the first sale only.** A resale neither creates nor releases one; the existing reserve follows the position because its beneficiary is read live at settlement (§5.3).
+10. **Pause asymmetry — exits are never pausable.** `whenNotPaused` guards exactly two functions: `createOffer` and `acceptOffer` (the inflows). `withdrawFunds`, `releaseHoldback`, and `rejectOffer` MUST carry no pause check, ever — a paused marketplace is one where nothing new starts but every LP recovers every deposit and every holdback still settles. The pause is a stop button, structurally incapable of being a seize button: even a malicious owner pausing forever produces only a dead venue from which everyone exits whole.
+
+### 5.3 Residual holdback
+
+Invoice-factoring semantics: the LP advances part of the agreed price and retains a
+**holdback**, released to the party who funded it once the cashflow is collected. If the
+cashflow is impaired, the holdback covers the current holder's loss first. It is funded out
+of the **original seller's proceeds** — it never touches the buyer's refund rights and needs
+no buyer consent.
+
+> **Terminology.** **Holdback** is the canonical name and matches the code (`Holdback`,
+> `releaseHoldback`); *reserve* is used interchangeably in prose, and *residual* means the
+> same thing where it survives from earlier drafts. The parties are named precisely, because
+> "seller" is ambiguous once an escrow has been resold:
+>
+> - **funder** — the original seller, the supplier who performs the work and out of whose
+>   proceeds the holdback is retained. Fixed at the first sale.
+> - **beneficiary** — `escrow.recipient()` read at settlement, i.e. whoever holds the
+>   cashflow at the end. After a resale this is **not** the LP who set the holdback.
+
+```solidity
+struct Holdback {
+    address token;
+    address funder;      // the seller in the escrow's FIRST marketplace sale
+    uint256 amount;
+}
+mapping(address => Holdback) public holdbacks;    // ONE per escrow
+mapping(address => bool)     public hasBeenSold;  // set on first acceptance; blocks stacking
+```
+
+> Precision on `funder`: the contract records the seller of the escrow's first *marketplace*
+> sale. In the normal case that is the original supplier; if the position reached the
+> marketplace via an OTC `changeRecipient` first, it is that OTC holder — the marketplace
+> cannot tell the difference and does not need to. Whoever chooses to sell first under a
+> holdback accepts the funder role as a term of their sale.
+
+**The beneficiary is deliberately not stored.** It is `escrow.recipient()`, read live at
+settlement. The reserve therefore **follows the position automatically**: when LP1 sells to
+LP2, nothing is created, released, or reassigned — LP2 simply becomes the party the reserve
+protects, and LP1 exits flat. There is no state to keep in sync and no action required on a
+resale.
+
+**The reserve is set once, on the first sale, and only there.** `holdback` is a field of the
+LP's bid — different LPs have different risk appetites and the advance rate is part of what
+they quote — but `createOffer` rejects a non-zero holdback once `hasBeenSold[escrow]` is
+true (§6.1.8).
+
+**Why only the first sale: the reserve is recourse against the party who performs.** The
+supplier did the work. If the buyer disputes and wins, it is because the supplier did not
+deliver, so the supplier bearing first loss is exactly right — this is recourse factoring.
+A reselling LP performed nothing. If the buyer wins, that is still the *supplier's* failure;
+LP1 is no more culpable than LP2, so "LP1 funds LP2's first loss" does not follow from the
+logic that makes the original reserve sensible. Instead the original reserve travels with the
+cashflow it protects, and the supplier stays on the hook regardless of who holds the paper.
+
+**Settlement — two payments, two contracts.** The cashflow itself never passes through the
+marketplace: the escrow pays its recipient directly, and the marketplace settles only the
+holdback. A complete payout is therefore two independent, permissionless transactions, and
+neither blocks the other. Writing `L = payoutAmount × b / 100` for the buyer's award:
+
+| | Escrow pays (`claimFunds` / `_executeResolution`) | Marketplace pays (`releaseHoldback`) |
+|---|---|---|
+| **Undisputed** | full `payoutAmount` → beneficiary | full holdback → funder |
+| **Disputed, `b`% to buyer** | `L` → buyer; remainder → beneficiary | `min(holdback, L)` → beneficiary; remainder → funder |
+
+Read the rows together for the economic picture: undisputed, the beneficiary collects the
+whole cashflow and the funder gets their holdback back; disputed, the beneficiary is made
+whole out of the holdback up to its size, and only what it cannot cover is a real loss to
+them.
+
+**Effect on the §8.1a attack.** The reserve is not sized as a deterrent (§3.3A does that
+job), but it does subtract directly from attacker profit, which becomes `P(r − d) − R`
+rather than `P(r − d)` — the attacker is the supplier, so they forfeit the reserve in exactly
+the scenario they are engineering, and forfeit it to whoever holds the position at the end.
+
+> **Deferred: seller skin-in-the-game on resale.** A reselling LP may know something the buyer
+> does not — that a dispute is imminent — and a reserve retained from *them* would be
+> adverse-selection protection rather than performance recourse. That is a different
+> instrument that happens to share a shape, and it is **out of scope for v1**. Note the
+> general form (a reserve per sale, settling as a waterfall in which each level's loss is the
+> level above's payout) is a strict superset of what is specified here, so adding it later
+> forecloses nothing. See §13.5.
 
 ---
 
@@ -148,8 +760,9 @@ There is **no offer-enumeration array**. Competing offers are invalidated lazily
 function createOffer(
     address escrowContract,
     uint256 offerAmount,
+    uint256 holdback,              // reserve retained at acceptance (§5.3); 0 = advance in full
     uint256 offerDurationSeconds   // 0 = use defaultOfferDuration
-) external nonReentrant            // NOT payable — this is an ERC20 contract
+) external nonReentrant whenNotPaused   // NOT payable — this is an ERC20 contract
 ```
 
 **Logic:**
@@ -160,16 +773,20 @@ function createOffer(
 4. Require sellable: `isFunded() && !hasActiveDispute() && !isClaimed()` (revert `EscrowNotSellable`). Protects the LP from offering on unfunded or already-settled escrows.
 5. `offerExpiry = block.timestamp + (offerDurationSeconds == 0 ? defaultOfferDuration : offerDurationSeconds)`; require `offerExpiry < maturity()` (revert `OfferExpiryExceedsEscrowMaturity`).
 6. `seller = escrow.recipient()`; require `msg.sender != seller && msg.sender != BUYER() && msg.sender != ARBITER()` (revert `LpCannotBeEscrowParty`) — the escrow re-checks buyer/arbiter at the pull; this is a clean early error.
-7. Require `offerAmount >= max(escrow.payoutAmount() / 2, 1)` (revert `OfferBelowMinimum`).
-8. `fee = offerAmount * feeRateBps / 10000`; `netAmount = offerAmount − fee`.
+7. Require `offerAmount >= max(escrow.payoutAmount() * minOfferBps / 10000, 1)` (revert `OfferBelowMinimum`).
+8. `fee = offerAmount * feeRateBps / 10000`; require `fee + holdback <= offerAmount` (revert `HoldbackExceedsOffer`); `netAmount = offerAmount − fee − holdback`.
+
+   Additionally require `holdback == 0` if `hasBeenSold[escrowContract]` (revert `HoldbackOnResale`) — a reserve may only be set on an escrow's **first** sale, because it is recourse against the party who performs (§5.3). A resale passes the existing reserve on untouched.
+
+   No cap is placed on `holdback` beyond that. It is self-limiting in the same way as the escrow's nomination window (§3.3A1) — an LP quoting a 90% holdback is quoting a 10% advance, which the seller can see in the offer and simply will not accept. The discipline here comes from the **seller**, who is the party whose proceeds fund it.
 9. `token = escrow.token()`. Pull deposit with a **balance-delta check**: measure `balanceOf(this)` before/after `safeTransferFrom(msg.sender, this, offerAmount)`; require delta `== offerAmount` (revert `TransferAmountMismatch`) — rejects fee-on-transfer tokens, mirroring the escrow's own deposit guard.
 10. `totalDeposits[token] += offerAmount`. Store `Offer{..., status: OPEN}`.
-11. Emit `OfferCreated(escrowContract, msg.sender, seller, token, offerAmount, netAmount, fee, offerExpiry)`.
+11. Emit `OfferCreated(escrowContract, msg.sender, seller, token, offerAmount, netAmount, fee, holdback, offerExpiry)`.
 
 ### 6.2 `acceptOffer`
 
 ```solidity
-function acceptOffer(address escrowContract, address lp) external nonReentrant
+function acceptOffer(address escrowContract, address lp) external nonReentrant whenNotPaused
 ```
 
 **Pre-condition (tx 1, seller, on the escrow):** `escrow.approveRecipientTransfer(marketplace, lp)` — binds the operator AND the exact LP, valid 5 minutes. Without it (or after expiry), step 6 reverts and nothing moves; the seller simply re-approves.
@@ -180,22 +797,28 @@ function acceptOffer(address escrowContract, address lp) external nonReentrant
 2. Require `block.timestamp <= offer.offerExpiry` (revert `OfferExpired`).
 3. `seller = escrow.recipient()` (live read). Require `msg.sender == seller` (revert `NotEscrowRecipient`) and `seller == offer.seller` (revert `OfferStale`).
 4. Require sellable: `isFunded() && !hasActiveDispute() && !isClaimed()` (revert `EscrowNotSellable`).
-5. **Effects:** `offer.status = COMPLETED`; `totalDeposits[token] −= offer.offerAmount`; `accruedFees[token] += offer.fee`.
+5. **Effects:** cache `(token, offerAmount, netAmount, fee, holdback)` into locals **first** — this step deletes the struct, so every later step must read the locals, not `offer`. Then: `totalDeposits[token] −= offerAmount`; `accruedFees[token] += fee`; `delete offers[key]`.
+
+   Then `hasBeenSold[escrowContract] = true`. If `holdback > 0` (only possible on a first sale, per §6.1.8): store `Holdback{token, funder: seller, amount: holdback}` and `totalHoldbacks[token] += holdback`. Nothing is written on a resale — the existing reserve already follows the position, since its beneficiary is read live (§5.3).
+
+   The `delete` is what marks the offer consumed — the slot reads `NONE`, so a re-entrant `acceptOffer` fails the `status == OPEN` check at step 1. No `COMPLETED` state is written: it would be dead state that permanently barred this (escrow, LP) pair from bidding again (§5.1). Conservation holds because `netAmount + fee + holdback == offerAmount`.
 6. **Interactions:**
    a. `escrow.transferRecipientFrom(lp)` — pulls the role directly seller → LP using the one-shot approval. The escrow enforces lp ≠ zero/buyer/arbiter and resets the LP's dispute vote.
-   b. `token.safeTransfer(seller, offer.netAmount)`.
-7. Emit `OfferAccepted(escrowContract, lp, seller, offer.netAmount, offer.fee)`.
+   b. `token.safeTransfer(seller, netAmount)`.
+7. Emit `OfferAccepted(escrowContract, lp, seller, netAmount, fee, holdback)`. With no holdback this event is the **only** record that the sale happened; with one, the `Holdback` record survives until §6.7 settles it.
 
 All other OPEN offers on this escrow are now stale (`recipient()` changed) — each LP withdraws their full gross deposit via `withdrawFunds`. No loop, no gas ceiling, no event storm.
 
 ### 6.3 `rejectOffer`
 
 ```solidity
-function rejectOffer(address escrowContract, address lp) external
+function rejectOffer(address escrowContract, address lp) external nonReentrant
 ```
 
 1. Require `status == OPEN`; require `msg.sender == offer.seller` and `escrow.recipient() == offer.seller` (only the current recipient may reject — a stale offer needs no rejection, it is already withdrawable).
 2. `offer.status = CANCELLED`. Emit `OfferRejected(escrowContract, lp)`.
+
+> The slot is **not** freed here — the contract still holds the LP's deposit, so it must keep tracking it (§5.2.1). The LP calls `withdrawFunds` to recover the deposit and free the slot. Consequence: an LP who wants to re-bid higher after a rejection needs three transactions (reject → withdraw → new offer). Acceptable for v1; see §13.11.
 
 ### 6.4 `withdrawFunds`
 
@@ -218,14 +841,65 @@ function withdrawFunds(address escrowContract) external nonReentrant
 
 ```solidity
 function setFeeRate(uint256 newFeeRateBps) external onlyOwner;          // require <= 1000 (10% cap); applies to NEW offers only
+function setMinOfferBps(uint256 newMinOfferBps) external onlyOwner;     // require <= 10000; applies to NEW offers only (§5.2.4)
+function pause() external onlyOwner;                                    // OZ Pausable — halts createOffer + acceptOffer ONLY
+function unpause() external onlyOwner;
 function setDefaultOfferDuration(uint256 durationSeconds) external onlyOwner; // require > 0 (a 0 default would make offers expire at creation)
 function withdrawFees(address token, address to, uint256 amount) external onlyOwner;
 // require amount <= accruedFees[token]; decrement before transfer. LP deposits are unreachable.
 ```
 
-### 6.6 `sweepToken` (optional, recommended)
+### 6.6 `sweepToken` — ships in v1
 
-Sweeps only the **excess** of a token above `totalDeposits[token] + accruedFees[token]` (accidental direct transfers). Can never touch live deposits or accrued fees.
+```solidity
+function sweepToken(address token, address to) external onlyOwner nonReentrant
+```
+
+Recovers tokens accidentally transferred straight to the marketplace address (a routine
+occurrence for any well-known contract). Sweeps only the **excess** of a token above
+`totalDeposits[token] + accruedFees[token] + totalHoldbacks[token]`; reverts
+(`NothingToSweep`) when the books and the balance agree. Structurally incapable of touching
+live deposits, accrued fees, or holdbacks — the subtraction excludes everything the contract
+owes anyone (invariant §5.2.7). Not pausable (it is an owner recovery path, not an inflow).
+Emits `TokenSwept(token, to, amount)`.
+
+### 6.7 `releaseHoldback`
+
+```solidity
+function releaseHoldback(address escrowContract) external nonReentrant
+```
+
+Permissionless and single-shot — it takes no discretion, and both destinations are fixed by
+the escrow's own final state. Anyone may trigger it; the funds can only reach the recorded
+funder and the escrow's current recipient.
+
+1. Load `h = holdbacks[escrowContract]`; require `h.amount > 0` (revert `NoHoldback`).
+2. Require the escrow has **finally settled**: `escrow.isClaimed()` (revert `EscrowNotSettled`). This covers both terminal paths — claimed at maturity and dispute-resolved — because `_executeResolution` also sets `_state = 4`. An escrow still funded or still disputed is not settleable, and reverting keeps the reserve in place until the outcome is known.
+3. `beneficiary = escrow.recipient()` — read **live**, so the reserve lands on whoever holds the position, no matter how many times it changed hands (§5.3).
+4. Read `b = escrow.resolvedBuyerPercentage()` (§3.3C) and split:
+   ```
+   loss        = (b == 255) ? 0 : escrow.payoutAmount() * b / 100
+   toRecipient = min(h.amount, loss)
+   toFunder    = h.amount − toRecipient
+   ```
+5. **Effects first (CEI):** cache `(token, funder, amount, toRecipient, toFunder)`; then `totalHoldbacks[token] −= amount`; `delete holdbacks[escrowContract]`. The delete is what makes this single-shot — a second call finds `amount == 0` and reverts.
+6. Transfer `toRecipient` to the beneficiary and `toFunder` to the funder, skipping zero-value transfers (one side is zero in the common cases).
+7. Emit `HoldbackReleased(escrowContract, h.funder, beneficiary, toFunder, toRecipient)`.
+
+> **Read the beneficiary, never store it.** Storing it at sale time would need reassigning on
+> every resale, and any missed path — a direct `changeRecipient`, say — would strand the
+> reserve on a party who no longer holds the cashflow. Reading `recipient()` at settlement is
+> correct by construction for every transfer route.
+
+> **`payoutAmount()` is read at settlement, not snapshotted at sale.** It is derived from
+> `AMOUNT − CREATOR_FEE`, both immutable after `initialize`, so it cannot drift. Reading it
+> late avoids storing a redundant copy per holdback.
+
+**Liveness note.** A holdback is only releasable once the escrow reaches `_state == 4`. Since
+§3.3A2 removes the resolution deadline, a dispute that never resolves leaves the reserve
+locked alongside the escrow itself. That is the same freeze surface as §3.3A3.2 and has the
+same remedy (`evictArbiter`, §3.3A1a) — it is not a separate risk, but it does mean the
+holdback inherits the escrow's liveness rather than having its own.
 
 ---
 
@@ -244,29 +918,64 @@ Sweeps only the **excess** of a token above `totalDeposits[token] + accruedFees[
 
 ## 8. Design Notes
 
-1. **Provenance (codehash, not self-report):** the marketplace verifies `escrow.codehash == EXPECTED_ESCROW_CODEHASH` — the ERC-1167 minimal-proxy bytecode embedding the trusted implementation. This is read from the EVM's record of deployed code, which a hostile contract cannot forge. (v0.4 originally specified checking `escrow.FACTORY() == TRUSTED_FACTORY`, which asked the escrow to vouch for itself — a fake contract could return the real factory's address, report a fake `payoutAmount()`/`recipient()`, accept a real-token deposit from an LP, and no-op the role transfer. Fixed in v0.4.2.) The factory is permissionless, so anyone can create a genuine escrow — genuineness of *code* plus the funded-state gate (real tokens actually deposited) is the security property, not who created it.
+1. **Provenance (codehash, not self-report):** the marketplace verifies `escrow.codehash == EXPECTED_ESCROW_CODEHASH` — the ERC-1167 minimal-proxy bytecode embedding the trusted implementation. This is read from the EVM's record of deployed code, which a hostile contract cannot forge. (v0.4 originally specified checking `escrow.FACTORY() == TRUSTED_FACTORY`, which asked the escrow to vouch for itself — a fake contract could return the real factory's address, report a fake `payoutAmount()`/`recipient()`, accept a real-token deposit from an LP, and no-op the role transfer. Fixed in v0.4.2.) The factory is permissionless, so anyone can create a genuine escrow — genuineness of *code* plus the funded-state gate (real tokens actually deposited) is the security property, not who created it. **This is necessary but not sufficient: genuine code says nothing about collusive parties — see §8.1a.**
+1a. **The self-dealt escrow — why the codehash alone is not enough.** `EscrowContract.initialize()` is permissionless: any caller becomes `FACTORY`. Because §8.1 verifies only *code*, an attacker can `Clones.clone` the trusted implementation directly, bypass the factory entirely, and initialize with parameters of their choosing — the only constraint being that buyer, seller and arbiter are three distinct addresses, which costs them nothing.
+
+   The attack: clone and initialize with buyer and arbiter wallets you control and yourself as seller; fund it with real tokens so it passes the funded/undisputed/unclaimed gate; list it; an LP buys the cashflow at a discount; your "buyer" then disputes and buyer + arbiter vote 2-of-3 for a full refund. You recover the deposit and keep the LP's payment. The dispute window is open for the entire offer life, because `offerExpiry < maturity()` is required.
+
+   This is a **profitable, repeatable attack, not a pricing problem.** With deposit `D`, payout `P ≈ D`, LP discount `d` and refund fraction `r`:
+
+   > profit = `P(1−d) + rP − P` = **`P(r − d)`**
+
+   Two things follow. First, capping the buyer's *refund* cannot fix this: it is unprofitable only when `r < d`, i.e. the cap must sit *below* the LP's discount — at a realistic 10% discount that means capping honest buyers' refunds under 10%, gutting legitimate dispute protection for everyone to deter a marketplace-specific attack. That approach was specified and abandoned; the residual became a seller-funded holdback instead (§5.3), which subtracts from attacker profit directly — `P(r − d) − R` — without touching any buyer's refund rights. Second, attacker profit scales with `(r − d)`, so **deeper discounts are inherently safer for LPs** — a useful property to surface in the UI.
+
+   **What §3.3A does and does not close.** The attack requires a pre-loaded attacker-controlled arbiter still in office when the dispute fires; unseating the arbiter automatically at every sale — with re-seating requiring the new recipient's matching nomination and a default-arbiter fallback — makes that 2-of-3 majority unmanufacturable — the *corrupt arbiter* variant is dead. What remains is the ordinary risk that an arbiter rules wrongly on the merits, which is true of every arbitration in every system and is not specific to this design. It bites harder here only because of the evidence asymmetry noted in §11: the LP was never party to the underlying deal. The LP's levers are care in agreeing an arbiter, the holdback, and short-dated purchases.
+
 2. **Atomicity:** the marketplace holds the recipient role for zero blocks. Every custody-window failure mode (dispute payout landing on the marketplace, maturity claim landing on the marketplace, stranded role) is structurally impossible rather than handled.
 3. **One-shot approval:** consumed on use, cleared on any recipient change, revocable by approving `address(0)`. An approval can never be replayed or survive a seller change.
 4. **Staleness over enumeration:** `recipient()` is the single source of truth. Any change of recipient — sale through this marketplace, direct `changeRecipient`, resale by an LP — automatically invalidates all outstanding offers without touching them.
 5. **Fee accounting:** `accruedFees[token]` is the only balance the owner can withdraw. Refunds are always full-gross, so an LP never pays a fee on a deal that didn't happen.
+
+5a. **Fee incidence — the seller pays.** An LP bidding `X` transfers `X` and the seller receives `X − fee − holdback` at acceptance (the holdback returns to them at settlement if the cashflow collects in full, §5.3; the fee never does). The fee travels inside the LP's deposit but comes out of the seller's proceeds. **This must be surfaced in the UI at bid entry and at acceptance**, or a seller who sees "offer: 10,000" and receives 9,900 will read it as a bug. Two consequences: (a) an LP's headline bid overstates what the seller actually nets, so bids are not directly comparable to `payoutAmount()` without deducting the fee; (b) because `fee` is snapshotted at `createOffer`, a later `setFeeRate` never changes what a live offer pays out — the seller's quote is firm from the moment the offer appears. The alternative convention (LP deposits `offerAmount + fee`, seller receives `offerAmount` in full) is economically equivalent once LPs adjust their bids; it was considered and **rejected — seller-pays is confirmed** (§13.10): simplest to implement, and LPs price it into their bids. The fee here is the **marketplace** fee (§13.1, expected 25–50 bps) — distinct from the 1% creation fee the escrow already collected at deposit.
 6. **`totalDeposits[token]`** exists to enforce invariant 7 and to make `sweepToken` safe; it is not consulted in the hot path beyond ±= updates.
-7. **Resale supported naturally:** an LP who acquired the role is simply the new `recipient()`; new offers snapshot them as seller and the same flow applies.
+7. **Resale supported naturally:** an LP who acquired the role is simply the new `recipient()`; new offers snapshot them as seller and the same flow applies. This is also why acceptance frees the offer slot (§5.2.1): a persisted `COMPLETED` would bar an LP from ever bidding on an escrow they had previously bought and resold, quietly capping resale to one round-trip per address.
 
 ---
 
 ## 9. Events
 
 ```solidity
-event OfferCreated(address indexed escrowContract, address indexed lp, address indexed seller, address token, uint256 offerAmount, uint256 netAmount, uint256 fee, uint256 offerExpiry);
-event OfferAccepted(address indexed escrowContract, address indexed lp, address indexed seller, uint256 netAmount, uint256 fee);
+event OfferCreated(address indexed escrowContract, address indexed lp, address indexed seller, address token, uint256 offerAmount, uint256 netAmount, uint256 fee, uint256 holdback, uint256 offerExpiry);
+event OfferAccepted(address indexed escrowContract, address indexed lp, address indexed seller, uint256 netAmount, uint256 fee, uint256 holdback);
+event HoldbackReleased(address indexed escrowContract, address indexed funder, address indexed beneficiary, uint256 toFunder, uint256 toBeneficiary);
 event OfferRejected(address indexed escrowContract, address indexed lp);
 event FundsWithdrawn(address indexed escrowContract, address indexed lp, address token, uint256 amount);
 event FeeRateUpdated(uint256 newFeeRateBps);
+event MinOfferUpdated(uint256 newMinOfferBps);
 event DefaultOfferDurationUpdated(uint256 durationSeconds);
 event FeesWithdrawn(address indexed token, address to, uint256 amount);
+event TokenSwept(address indexed token, address to, uint256 amount);   // §6.6
 ```
 
 On the escrow (implemented): `RecipientTransferApproved(address indexed operator, address indexed newRecipient, uint256 expiry)`; `RecipientChanged` already existed.
+
+On the escrow (§3.3, pending):
+
+```solidity
+event ArbiterUnseated(address indexed previousArbiter);
+event ArbiterNominated(address indexed nominator, address indexed candidate);
+event ArbiterSeated(address indexed arbiter, bool byAgreement);
+event ArbiterEvicted(address indexed previousArbiter);
+
+error NotDisputeParty(address caller);
+error ArbiterAlreadySeated(address arbiter);
+error NoArbiterSeated();
+error ArbiterNotSilent(uint256 lastActionAt);
+error NominationWindowStillOpen(uint256 deadline);
+error InvalidArbiterCandidate(address candidate);
+// note: there is no NominationWindowClosed — late matches remain seatable until the
+// fallback actually executes (§3.3A1a); the deadline only enables seatDefaultArbiter
+```
 
 ## 10. Errors
 
@@ -280,12 +989,22 @@ error NotEscrowRecipient(address caller);
 error EscrowNotSellable(address escrowContract);              // unfunded, disputed, or claimed
 error InstantEscrowNotSupported(address escrowContract);
 error OfferExpiryExceedsEscrowMaturity(uint256 offerExpiry, uint256 maturity);
-error OfferBelowMinimum(uint256 offerAmount, uint256 minimum); // < payoutAmount()/2
+error OfferBelowMinimum(uint256 offerAmount, uint256 minimum); // < payoutAmount() × minOfferBps / 10000
+error MinOfferTooHigh(uint256 requested, uint256 max);         // setMinOfferBps > 10000
 error LpCannotBeEscrowParty(address lp);
 error TransferAmountMismatch();                                // fee-on-transfer token rejected
 error NothingToWithdraw(address escrowContract, address lp);
-error FeeTooHigh(uint256 requested, uint256 max);
+error HoldbackExceedsOffer(uint256 holdback, uint256 fee, uint256 offerAmount);
+error HoldbackOnResale(address escrowContract);    // a reserve may only be set on the first sale
+error NoHoldback(address escrowContract);          // none exists, or already settled
+error EscrowNotSettled(address escrowContract);
+error FeeTooHigh(uint256 requested, uint256 max);              // constructor AND setFeeRate
 error InsufficientAccruedFees(address token, uint256 requested, uint256 available);
+
+// Constructor / owner-input validation (§5.1a, §6.5)
+error ZeroAddress();                                           // implementation, owner, or `to`
+error ZeroOfferDuration();                                     // constructor and setDefaultOfferDuration
+error NothingToSweep(address token);                           // §6.6
 ```
 
 ---
@@ -295,6 +1014,7 @@ error InsufficientAccruedFees(address token, uint256 requested, uint256 availabl
 | Risk | Mitigation |
 |---|---|
 | Reentrancy (arbitrary ERC20s may have hooks) | `nonReentrant` on every state-mutating external function (**mandatory**, not optional) + strict checks-effects-interactions everywhere. |
+| Bug discovered in live contract | Emergency pause on inflows (`createOffer`, `acceptOffer`) bounds the damage to existing state; exits (`withdrawFunds`, `releaseHoldback`, `rejectOffer`) are structurally unpausable, so LPs always recover deposits and holdbacks always settle (§5.2.10). Pause abuse is bounded to killing the venue — it can never trap funds. |
 | Owner drains LP deposits | Structurally impossible: `withdrawFees` capped by `accruedFees[token]`; deposits tracked separately. |
 | Custody-window failures (dispute/maturity payouts landing on marketplace, stranded role) | Eliminated by design — the marketplace is never the recipient (§8.2). |
 | Stale-seller payment/restore theft | Eliminated — acceptance requires live `recipient() == offer.seller == msg.sender`; payment goes to the live recipient; no restore path exists. |
@@ -302,30 +1022,198 @@ error InsufficientAccruedFees(address token, uint256 requested, uint256 availabl
 | Deposit-slot overwrite | `createOffer` requires an empty (`NONE`) slot; slots free only on withdrawal. |
 | Fee-on-transfer / deflationary tokens | Balance-delta check on deposit (revert), mirroring the escrow. |
 | Malicious escrow contract | ERC-1167 codehash check — only clones of the trusted implementation are accepted; deployed code cannot be forged. A self-reported value (e.g. `FACTORY()`) is never trusted. |
+| **Self-dealt escrow** (attacker controls buyer + arbiter, sells to an LP, then disputes for a full refund) | The codehash check cannot catch this — the code *is* genuine; only the parties are collusive (§8.1a). Closed by §3.3A: every sale automatically unseats the incumbent arbiter, and re-seating requires the new recipient's matching nomination with a default-arbiter fallback — so buyer + arbiter can never be pre-loaded into a 2-of-3 majority. An LP can never buy into a disputed escrow (§6.1.4, §6.2.4), so they are never bound by a selection made before they arrived. Attacker profit is additionally reduced by the §5.3 holdback — the attacker is the seller, so they forfeit the reserve in precisely the scenario they are engineering. |
+| Arbiter-selection deadlock / stonewalling | Refusing to agree does not freeze funds and does not revert to an attacker-chosen arbiter — it falls back to the default arbiter (§3.3A). Free to trigger, so treat platform arbitration as the common path for ops-capacity planning. |
+| Default-arbiter compromise | **Residual risk.** The fallback arbiter can form a 2-of-3 majority on any unsettled sold-escrow dispute. MUST be a multisig, distinct from the marketplace owner (§3.3E, §13.8). |
 | LP bait-and-switch (cancel at acceptance) | Impossible: LPs cannot cancel OPEN offers (§5.2.4a firm quotes); their exposure window is the duration they chose. |
 | Blacklistable tokens (e.g. USDC) | **Accepted residual risk:** if the marketplace address were blacklisted by a token issuer, deposits in that token would be stuck until unblacklisted. Not fixable on-chain; scope of harm is one token's live offers. |
-| **LP inherits dispute risk (disclose!)** | After acceptance the LP is the escrow's seller-side party: the buyer can still dispute before maturity, and buyer + arbiter can outvote the LP 2-of-3, up to a 100% buyer refund. LPs must price buyer/arbiter reputation into their discount. This is inherent to buying the cashflow, not a defect. |
+| **LP inherits dispute risk (disclose!)** | After acceptance the LP is the escrow's seller-side party: the buyer can still dispute before maturity, and a 2-of-3 vote can go against the LP up to a full buyer refund. §3.3A gives the LP a **veto over who arbitrates**, so the counterparty cannot both dispute and judge, and the §5.3 holdback means the seller absorbs first loss — but an honest arbiter may still rule against the LP on the merits. Inherent to buying the cashflow, not a defect. |
+| **LP cannot evidence the underlying deal** | Sharper than the row above, and worth surfacing separately in the UI: an LP who buys the recipient role inherits a dispute about work they never performed. They have no delivery records, no correspondence with the buyer, and the original supplier has been paid and has no incentive to assist. If the buyer alleges non-delivery, the LP is structurally unable to rebut it. Their only real levers are **care in agreeing an arbiter** (§3.3A1a), the **holdback** (§5.3), and preferring **short-dated purchases** where the remaining dispute window is small. |
 | Seller approves marketplace but never accepts | Harmless: the approval moves nothing by itself, is revocable (`approveRecipientTransfer(address(0))`), and is cleared by any recipient change. |
 | Front-running `acceptOffer` | Only the current recipient can call it; the approval is only usable by the marketplace inside that call. An LP withdrawing a stale/expired offer cannot be raced into an acceptance (stale/expired offers are never acceptable). |
 
 ---
 
-## 12. Out of Scope (unchanged)
+## 12. Out of Scope
 
 - Offer discovery / indexing (off-chain: UI + subgraph)
 - Yield on deposited funds
 - Upgradability / proxy pattern
 - Timelock on fee/owner changes (pilot: Ownable2Step EOA)
-- Whitelisting of escrow contracts beyond factory provenance
+- Whitelisting of *escrow contracts* — provenance is the codehash check (§8.1) plus the collusion mitigations of §3.3, not a listing allowlist.
+- Curation of **arbiters** — considered and dropped; the nomination veto already provides the protection a list would have (§3.3B).
+- `CompletionEscrowContract` / payee-slice sales — structurally incompatible, see §3.0
 
 ## 13. Open Questions (before audit)
 
-1. **Fee rate at launch** — TBD.
+1. **Fee rate at launch** — TBD, but note it is **distinct from and smaller than the 1% creation fee** (`CREATOR_FEE`, taken at escrow deposit). The marketplace fee taxes the same cashflow a second time, stacks with the LP's discount in the seller's all-in cost of liquidity, and is charged on **every** sale including resales — so a chain of sales compounds it. Proposed starting point: **25–50 bps**, adjustable via `setFeeRate` (new offers only; live offers are snapshotted).
 2. **`defaultOfferDuration` at launch** — 24h proposed.
-3. Should `sweepToken` (§6.6) ship in v1 or be deferred?
+3. ~~`sweepToken`~~ — **settled: ships in v1** (§6.6). Owner-only recovery of accidental direct transfers; structurally unable to touch deposits, fees, or holdbacks.
 
-## 14. Changelog
+**Sub-decisions opened by §3.3 (arbiter selection):**
 
+4. ~~**Re-seating a silent arbiter**~~ — **settled** (§3.3A1a, `evictArbiter`): either disputant may evict after 30 days (`ARBITER_SILENCE_TIMEOUT`) with no vote cast or changed; the seat clears, nominations reopen, the window restarts, and the Safe re-seats on expiry. Only ever swaps the third voter — moves no funds. The rolling clock also covers an arbiter who voted once and vanished; on unsold escrows it doubles as the parties' exit from a slow Safe.
+5. ~~**Holdback**~~ — **settled** (§5.3, §6.7). Factoring semantics; one reserve per escrow, funded out of the original supplier's proceeds on the first sale only; the beneficiary is read live at settlement so the reserve follows the position through any number of resales; split by the recipient's loss when the escrow settles. Deferred, not rejected: a **seller skin-in-the-game reserve on resale**, which is adverse-selection protection rather than performance recourse and is a strictly larger mechanism (a reserve per sale, settling as a waterfall). Revisit if secondary-market adverse selection proves real.
+6. ~~**Curated arbiter registry**~~ — **settled: there is no registry** (§3.3B). The nomination veto already provides the protection a list would have, since an LP can never buy into a disputed escrow and so is never bound by a selection made before they arrived. Residual: social-engineering resistance is now a **UI responsibility** at the nomination step, not a contract guarantee.
+7. ~~**"Resold" detection**~~ — **moot.** It existed only to scope the registry; with no registry there is no `wasResold` flag and nothing to detect.
+8. ~~**`DEFAULT_ARBITER` multisig**~~ — **created: "stabledropAdmin" Safe `0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C`** (Base, Safe v1.4.1, threshold 2-of-3, signers `0x2956…7F62` / `0x1936…0b05` / `0x431F…b607`, no modules — all verified on-chain 2026-08-05). **Outstanding before the implementation deploys: one test transaction executed at threshold** (nonce is 0 — the 2-of-3 has never actually fired). Note `0x1936…0b05` is also the legacy factory OWNER EOA; acceptable, but its compromise then touches two roles — worth a conscious sign-off. Note the role is **arbitration only**: it never signs escrow creations (chainservice's own hot wallet does those), offers, acceptances, or agreed settlements (§3.3A2a). But since it is now the creation arbiter on every escrow, it adjudicates **every contested dispute platform-wide** — size the signer set and threshold for that volume and responsiveness, not for a rare edge case. No resolution deadline exists (§3.3A2), so latency is an SLA concern, never a fund-safety one. Constraint from §3.3A1a: `DEFAULT_ARBITER` is baked into the implementation bytecode, so rotating it means a whole new implementation + factory + marketplace. **It must be a multisig** (a Safe whose signers can rotate while the address stays fixed) — decide its composition before deploying the implementation, because it is the one address that cannot be changed afterwards.
+9. **Migration** — §3.3 changes `initialize`'s signature and the factory ABI. What happens to chainservice's existing integration, and to escrows already live on the current implementation? Additionally, chainservice changes (§3.3A2a): it passes the `DEFAULT_ARBITER` Safe as the creation arbiter (never its hot wallet), and retires the complete-the-pair arbiter vote entirely. For **every** dispute it instead watches `VoteSubmitted` and prompts each disputant to push the agreed % on-chain, routing those vote transactions through the existing **gas-sponsorship path** like all other user-wallet actions. Detect "sold" via the `ArbiterUnseated` event where the UI needs to distinguish.
+10. ~~**Fee incidence**~~ — **settled: seller pays, as specified** (§8.5a). LP deposits `X`; seller receives `X − fee − holdback` at acceptance. Simplest to implement, and LPs price the convention into their bids. The UI must show the seller their net figure at bid display and at acceptance.
+11. ~~**`reviseOffer`**~~ — **settled: deferred, confirmed.** A rejected LP re-bids via reject → withdraw → new offer (three transactions; gas-sponsored, so the cost is clicks, not money). Revisit only if real usage shows haggling dominating — that means a marketplace redeploy (offers are short-lived, so migration is a natural wind-down), and any future design must preserve §5.2.4a: revision only by the LP, only on a **rejected** offer, never on a live `OPEN` one.
+12. ~~**Minimum-offer floor**~~ — **settled: owner-configurable `minOfferBps`, launching at 1000 (10%)**, hard cap 10000, new offers only (§5.2.4, §6.5). The fixed 50% floor was rejected: it banned the deep-discount bids §8.1a identifies as the safest LP trades, while the spam it guarded against is harmless on-chain (no enumeration; dust locks the spammer's own capital) and filterable off-chain.
+13. ~~**Emergency pause**~~ — **settled: yes, inflows only** (§5.2.10, §6.5). OZ `Pausable`; `whenNotPaused` on `createOffer` + `acceptOffer`; `withdrawFunds`, `releaseHoldback`, and `rejectOffer` are never pausable. Incident response becomes "stop, let everyone out, fix" instead of "watch". The lever is bounded: it can halt the venue, never touch or trap funds.
+14. **Regulatory perimeter — confirm with counsel.** §3.3A2 is designed so the platform can never move funds alone: the default arbiter is one voter of three, and every settlement requires a *disputing party* to vote the executing figure. That is the property to put in front of an adviser. Dropping the arbiter registry (§3.3B) deliberately narrows the surface: the platform now curates nothing and vets no one, and appears in a dispute only as a fallback third voter that neither party can outvote alone. What still warrants a view is whether being that fallback voter — in the subset of disputes where the parties fail to agree — is itself enough to constitute influence over client funds. Get this confirmed **before** launch: if the answer is no, the fallback has to become something other than the default arbiter, and that is a contract change rather than a policy one.
+
+## 14. Test & Audit Plan
+
+Foundry throughout, extending the existing suites (`test/EscrowContract.t.sol` already
+covers §3.2; `test/InvariantEscrow.t.sol` already exercises the approval/transfer surface).
+Every test named here is **mandatory before audit** — most encode a specific bug this spec
+caught on paper, and the auditor should be handed this section as the map of what we believe
+and why.
+
+### 14.1 Escrow (§3.3) — unit & scenario tests
+
+**The vote trap (§3.3D) — the three cases, verbatim:**
+1. Sold escrow (arbiter unseated), seller votes 0 → MUST NOT resolve.
+2. Seller votes 0, arbiter then seated → seating MUST NOT fire consensus.
+3. Buyer and seller both vote 50, no arbiter seated → MUST resolve (branch 1, the common case).
+
+**Unseating:**
+- `transferRecipientFrom` unseats, clears both nominations, emits `ArbiterUnseated`.
+- `changeRecipient` does NOT unseat.
+- Mid-dispute transfer restarts `nominationDeadline` with a full window.
+- Old arbiter's `submitResolutionVote` reverts after unseating (`NotAuthorizedToVote`).
+
+**Nomination & seating (§3.3A1a):**
+- Party-only; candidate ≠ zero/buyer/seller; nominations mutable; single nomination never seats.
+- Match seats immediately, in the matching transaction; incumbent re-confirmation works.
+- Re-seated incumbent who had voted pre-unseat returns with vote reset to 255.
+- `seatDefaultArbiter`: only disputed + unseated + deadline passed; zero-window escrow → seatable as soon as disputed; **late match still seats after the deadline, right up until the fallback executes**.
+- `arbiterNominationWindow`: `0` at initialize → 72h default; **no code path can change it after initialize** (this is the load-bearing property of §3.3A1 — test it explicitly).
+
+**Eviction (§3.3A1a):**
+- Rolling clock: stamped at `raiseDispute` (arbiter already seated), at seating, and on every arbiter vote/vote-change; eviction reverts inside the 30 days from each.
+- Party-only, disputed-only; clears seat + nominations, restarts window; moves no funds.
+- Covers the voted-once-then-vanished arbiter; on an unsold escrow, evicting the Safe and match-nominating a private arbiter works.
+
+**The attack, end-to-end (§8.1a):** attacker direct-clones the implementation, initializes with their own buyer/arbiter/window, funds it, lists it, sells to an LP, then bundles `raiseDispute` + buyer-vote-100 + old-arbiter-vote-100 in the block after `acceptOffer` — MUST fail (arbiter unseated by the sale). This is the single most important test in the suite.
+
+**State & persistence:**
+- `resolvedBuyerPercentage`: 255 until a dispute resolves; set before transfers in `_executeResolution`; equals the executed percentage for b ∈ {0, 1, 50, 99, 100}.
+- `_transferRecipient` rejects `DEFAULT_ARBITER` and (when seated) `ARBITER`; resets `nominatedByRecipient` and the new recipient's vote.
+- `initialize` writes `resolutionVotes[address(0)] = 255` (belt-and-braces, §3.3D).
+
+### 14.2 Marketplace — unit tests
+
+**`createOffer`:** codehash gate rejects EOAs, wrong-implementation clones, and the raw implementation itself; slot occupancy; `maturity() != 0`; sellable gate; `offerExpiry < maturity()`; party exclusion; floor at `minOfferBps` including the dust edge (`max(…, 1)` with `payoutAmount ∈ {0, 1, 2}`); `fee + holdback <= offerAmount`; `HoldbackOnResale` once `hasBeenSold`; balance-delta check against a fee-on-transfer mock token; reverts when paused.
+
+**`acceptOffer`:** requires OPEN, unexpired, live seller (`msg.sender == recipient() == offer.seller`), sellable; reverts with no approval / expired approval / approval bound to a different LP; slot deleted (re-entrant second accept fails at step 1); `hasBeenSold` set; `Holdback` recorded with `funder = seller` on first sale only; seller receives exactly `offerAmount − fee − holdback`; reverts when paused.
+
+**`rejectOffer` / `withdrawFunds`:** the withdrawability matrix — CANCELLED, expired, stale (recipient changed), disputed, claimed — each refunds **full gross** and frees the slot; a live acceptable offer reverts `NothingToWithdraw`; no state exists where an offer is simultaneously acceptable and withdrawable (fuzz this).
+
+**`releaseHoldback`:** reverts before `isClaimed()`; undisputed → full holdback to funder; disputed at `b`% → `min(holdback, payoutAmount × b / 100)` to the **live** `recipient()`, remainder to funder; **rounding must match `_executeResolution`'s division exactly** (fuzz b over 0–100 and assert the two contracts' splits are consistent to the wei); beneficiary read after a resale and after a direct `changeRecipient` lands on the current holder; second call reverts (`NoHoldback`); the 255 sentinel and a 0% resolution both pay the funder in full.
+
+**Owner surface:** fee cap 1000; `minOfferBps` cap 10000; duration > 0; `withdrawFees` capped by `accruedFees`; `sweepToken` moves only the excess and reverts at zero excess; **pause asymmetry — while paused, `withdrawFunds`, `releaseHoldback`, and `rejectOffer` all succeed** (§5.2.10).
+
+### 14.3 Invariants (fuzz / invariant suites)
+
+1. **Conservation (§5.2.7):** per token, `balanceOf(marketplace) ≥ totalDeposits + accruedFees + totalHoldbacks`, across arbitrary interleavings of every external function.
+2. **Slot ⇔ deposit (§5.2.1):** an offer slot is non-`NONE` iff the contract still holds that LP's gross deposit.
+3. **Holdback conservation (§5.2.8):** `toFunder + toRecipient == amount`, settled exactly once, owner can never withdraw it.
+4. **No manufactured consensus:** with `ARBITER == address(0)`, no sequence of calls produces a resolution without buyer AND seller voting the same figure.
+5. **Role integrity:** no sequence moves the recipient role without a live approval from the then-current recipient (extends the existing invariant suite).
+6. **Eviction is fund-neutral:** `evictArbiter` never changes any balance.
+
+### 14.4 Audit scope & known-accepted residuals
+
+- **Prior review assumptions are void:** §3.3 changes the dispute model (arbiter no longer fixed for life; new unseat/nominate/evict surface). Any earlier review of `EscrowContract` predates this.
+- In scope: full `EscrowContract` (new implementation = §3.2 + §3.3), full `MarketplaceEscrow`, and their interaction under adversarial ERC-20s (hooks, fee-on-transfer, blacklisting).
+- Accepted residuals, documented not fixed (point the auditor at them rather than re-discovering): deceived-arbiter / evidence asymmetry (§8.1a, §11), buyer hold-up under no-deadline (§3.3A3.1), blacklistable tokens (§11), Safe responsiveness as SLA (§13.8), social engineering of nominations as UI responsibility (§3.3B).
+- Deploy-order checks (§3.4): Safe exists and has executed a test transaction before the implementation deploys; `EXPECTED_ESCROW_CODEHASH` recomputed against the **final** deployed implementation address.
+
+## 15. UI & Off-Chain Obligations
+
+The §1 principle stands — the contracts are fully operable raw, with no UI dependency for
+*correctness*. But several protections were **deliberately delegated from the contract to
+the UI** during design, and the flows below are load-bearing for user safety. This section
+collects every such obligation so the frontend and chainservice teams have one place to
+build from. Each item cites the section that created it.
+
+### 15.1 Safety-critical disclosures
+
+| Screen | Obligation | Source |
+|---|---|---|
+| Arbiter nomination (sold-escrow dispute) | Warn that **matching an unknown candidate is irreversible** and seats them; declining to match is **always safe** — the default arbiter takes the seat after the window. This replaced the dropped registry: social-engineering resistance is a UI guarantee now, not a contract one. | §3.3B |
+| Seller's offer list + accept confirmation | The headline figure the seller sees MUST be their **net at acceptance** (`offerAmount − fee − holdback`), with the holdback's return-at-settlement explained. A seller shown "10,000" who receives 8,900 reads it as theft. Fee and holdback are separate `OfferCreated` fields precisely so offers can be compared on both. | §8.5a, §13.10, §5.3 |
+| LP bid entry / purchase confirmation | Disclose the **evidence asymmetry** before purchase: an LP inherits a dispute they cannot evidence; their levers are care in agreeing an arbiter, the holdback they set, and short-dated purchases. Surface **time-to-maturity (= remaining dispute window)** as the primary risk metric, and note deeper discounts mechanically reduce attack exposure (`r − d`). | §11, §8.1a |
+| Buying a previously-sold escrow | Show the **existing holdback** (amount, funder) — the reserve travels with the position and the new buyer becomes its beneficiary — plus the escrow's nomination window (public, immutable, priced in). | §5.3, §3.3A1 |
+
+### 15.2 Flow choreography (multi-transaction sequences the UI orchestrates)
+
+- **Accept flow:** tx 1 `approveRecipientTransfer(marketplace, lp)` on the escrow → tx 2 `acceptOffer` on the marketplace, within the **5-minute TTL** (§3.2). On expiry, simply re-prompt — an expired approval is inert and nothing is at risk.
+- **Agreed dispute settlement (ALL escrows):** after off-chain agreement, prompt **both disputants** to `submitResolutionVote(X)`; watch `VoteSubmitted` and chase the outstanding side; route votes through the **gas-sponsorship path** like every other user-wallet action (§3.3A2a, §13.9).
+- **Contested sold-escrow dispute:** nomination entry (free-form address + the §15.1 warning); a permissionless "seat default arbiter" action once the window lapses; a "request new arbiter" (`evictArbiter`) action once a seated arbiter has been silent 30 days (§3.3A1a).
+- **LP housekeeping:** expiry, staleness, rejection, and dispute-triggered withdrawability are all **lazy** — nothing on-chain notifies the LP. The indexer must detect each condition and prompt `withdrawFunds`; likewise prompt (or keeper-fire) `releaseHoldback` once the escrow settles — it is permissionless by design (§6.4, §6.7).
+
+### 15.3 Discovery & indexing (off-chain by design, §12)
+
+- Subgraph over the §9 marketplace events plus escrow events; the sellable list = new-implementation clones passing the §5.2.2 composite, computed client-side.
+- Offer books from `OfferCreated` / `OfferAccepted` / `OfferRejected` / `FundsWithdrawn`; `ArbiterUnseated` marks an escrow "sold" where dispute flows branch (§13.9).
+- **Listing-level curation is the chokepoint for the §8.1a residual** — the contract stays permissionless, but the UI need not list everything. Tells worth screening: buyer/seller wallets funded from a common source, freshly created parties, listing immediately after funding.
+
+## 16. Path to Production
+
+Phases 1–2 are sequential builds; phase 0 and phase 4 run in parallel with them. The three
+hard gates: **the Safe exists before the implementation deploys** (its address is baked into
+bytecode), **counsel reports before audit ends** (a "no" on the fallback design is a
+contract change — the one external input that can still reshape §3.3), and **audit clears
+before mainnet**.
+
+**Phase 0 — start now, in parallel**
+1. ~~Create the `DEFAULT_ARBITER` Safe~~ **done: `0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C`** (2-of-3, verified §13.8). **Still outstanding: execute one test transaction at threshold** — nonce is 0, and this gates the implementation deploy (phase 6.1).
+2. Engage counsel on §13.14. Front-load it: this is the only open item that can still change contract code.
+3. Fix launch parameters: marketplace fee (25–50 bps proposed), `minOfferBps` (1000), `defaultOfferDuration` (24h proposed) — needed at phase 6, decided cheaply now.
+
+**Phase 1 — escrow implementation (§3.3)**
+1. `EscrowContract`: unseat-on-sale (A), `arbiterNominationWindow` in `initialize` (A1), nominate/seat/evict (A1a), the §3.3D consensus guards, `resolvedBuyerPercentage` (C), and every §3.3E knock-on.
+2. `EscrowContractFactory`: new `initialize` signature (window param), passes through unchanged otherwise.
+3. Tests: all of §14.1 — the end-to-end §8.1a attack replay is the acceptance criterion — plus invariants §14.3.4–6 extending `test/InvariantEscrow.t.sol`.
+
+**Phase 2 — marketplace implementation**
+1. `MarketplaceEscrow` per §5/§6: offers, atomic accept, lazy withdrawal, holdback, `minOfferBps`, `Pausable` (inflows only), `sweepToken`, Ownable2Step.
+2. Tests: §14.2 plus invariants §14.3.1–3. Integration tests run against real phase-1 clones — the codehash check makes mocks useless by design.
+
+**Phase 3 — audit**
+1. Hand over both contracts, this spec, and §14.4 as the scope sheet (lead with: prior `EscrowContract` reviews are void — the dispute model changed).
+2. Remediation loop; re-run §14 suites after every fix. **Gate: no mainnet while criticals are open.**
+
+**Phase 4 — off-chain builds (parallel with 1–3)**
+1. chainservice (§13.9): new factory ABI; pass the Safe as creation arbiter; retire complete-the-pair; watch-and-prompt vote choreography; sponsorship routing for votes; `ArbiterUnseated` handling.
+2. Webapp: §15.1 disclosures and §15.2 flows — the dispute screens (nominate / seat-default / evict / both-party vote prompts) are new surface, not a reskin.
+3. Subgraph/indexer: §15.3 — offer books, lazy-withdrawability detection, sold-escrow marking.
+
+**Phase 5 — testnet dry run (Base Sepolia)**
+1. Deploy the full stack (Safe can be a test Safe) and walk every §4 path end-to-end: create → fund → list → offer → accept → resale; agreed settlement (both-vote flow, sponsored); contested dispute → nomination → fallback seat → evict; holdback release both ways; pause/unpause; sweep.
+2. Verify `EXPECTED_ESCROW_CODEHASH` accepts a real factory clone and rejects an old-implementation clone on-chain.
+
+**Phase 6 — mainnet deploy (order is load-bearing, §3.4)**
+1. Confirm the production Safe has executed its test transaction.
+2. Deploy `EscrowContract` implementation (constructor: Safe address).
+3. Deploy `EscrowContractFactory` pointing at it.
+4. Deploy `MarketplaceEscrow` (implementation address, phase-0 parameters, owner — **distinct from the Safe**).
+5. Verify all three on BaseScan; recompute the codehash against the **final** implementation address; record everything (addresses, Safe signers/threshold) in `DEPLOYMENT_ADDRESSES.md` and the §3.4 table.
+
+**Phase 7 — cutover & launch**
+1. Repoint chainservice env at the new factory/implementation (same pattern as the completion-pair variables in `DEPLOYMENT_ADDRESSES.md`).
+2. Inventory reality (§3.4): the marketplace opens **empty** and fills at the rate new escrows are created. Launch messaging must not promise liquidity on existing deals. Old-implementation escrows stay live to their own terms, permanently invisible to the marketplace.
+3. Runbooks before announcement: pause criteria and who holds the owner key; Safe arbitration SLA (§13.8); mistaken-transfer recovery via `sweepToken`.
+
+## 17. Changelog
+
+- **v0.6.1 (2026-08-05):** **Added §3.3A2a — agreed settlements are pushed on-chain by the two disputants themselves, on ALL escrows.** Companion decision: **the creation arbiter is the `DEFAULT_ARBITER` Safe on every chainservice-created escrow** — the operational hot wallet retains no dispute power anywhere, retiring the complete-the-pair mechanism platform-wide and extending "the platform can never move funds alone" to unsold escrows. The arbiter takes no action of any kind in an agreed settlement; both disputants are UI-prompted to cast `submitResolutionVote(X)` (same two-transaction cost as today, second signature moves from platform to second party), with votes routed through the existing gas-sponsorship path so zero-ETH wallets settle fine. `settleBySignatures` (EIP-712 relay) considered and rejected — the webapp wallet-provider stack does not reliably support typed-data signing. §13.8 re-scoped: the Safe adjudicates every contested dispute platform-wide, so signer set/threshold are sized for volume; no fund-safety deadline exists. §13.9 extended with the chainservice changes (pass the Safe at creation, retire auto-complete, watch-and-prompt, sponsorship routing). **Settled §13.4:** `evictArbiter` — either disputant may clear a seat silent for 30 days (rolling clock: seating, dispute-raise, or last vote change); nominations reopen, window restarts, Safe re-seats on expiry; swaps the third voter only, never moves funds. **Settled §13.10:** fee incidence stays seller-pays (simplest; LPs price it in); noted the marketplace fee is distinct from the 1% creation fee and expected at 25–50 bps (§13.1). **Settled §13.12:** minimum-offer floor becomes owner-configurable `minOfferBps` (launch 1000 = 10%, cap 10000, new offers only) — the fixed 50% floor banned the deep discounts §8.1a shows are the safest LP trades. **Settled §13.13:** emergency pause, inflows only (`createOffer` + `acceptOffer`); exits structurally unpausable (§5.2.10). **Settled §13.3:** `sweepToken` ships in v1 (§6.6). **Settled §13.11:** `reviseOffer` deferred, confirmed. **Added §14 Test & Audit Plan** — mandatory pre-audit test set (vote-trap trio, end-to-end §8.1a attack replay, window immutability, eviction clock, holdback/`_executeResolution` rounding consistency, pause asymmetry), six fuzz invariants, audit scope with prior-review-void warning and the accepted-residuals list. **Added §15 UI & Off-Chain Obligations** — collects every protection deliberately delegated from contract to UI (nomination warning, seller-net disclosure, LP evidence-asymmetry disclosure, holdback-travels display), the multi-tx choreography (5-min accept TTL, both-party vote prompts, lazy withdrawal detection), and indexing/curation duties. **Added §16 Path to Production** — seven phases with the three hard gates (Safe before implementation deploy; counsel before audit ends; audit before mainnet). Changelog renumbered → §17.
+- **v0.6.0 (2026-08-04):** **§3.3A redesigned: sale-triggered arbiter reset replaces dispute-time selection.** `initialize` keeps its arbiter parameter and the primary market keeps today's dispute flow exactly — the machinery now activates only when a cashflow is sold. `transferRecipientFrom` automatically unseats the incumbent arbiter in the same transaction as the sale (automatic, not objection-based: an opt-in objection loses the race where the attacker-seller bundles `acceptOffer` → dispute → both votes in one block). Re-seating requires buyer + new recipient matching nominations (re-confirming the incumbent is the expected common case, allowed pre-dispute); a dispute while unseated opens the nomination window; on expiry the default-arbiter fallback becomes seatable, but a late match still wins until the fallback actually executes. `changeRecipient` does not unseat (wallet rotation shouldn't evict a legitimate arbiter; OTC transfers get no marketplace protections). Also fixed a Solidity-level error in A1a: `DEFAULT_ARBITER` must be an implementation-constructor immutable (a permissionless-`initialize` parameter would let self-dealt clones install their own fallback, resurrecting the attack through the fallback itself) — hence it must be a multisig, since rotation now requires a full redeploy; `arbiterNominationWindow` cannot be a Solidity `immutable` in a clone (storage, set once in `initialize`, no setter — kept as a factory parameter by decision, accepting the ABI change). Holdback fee lines (§2, §8.5a) updated for `netAmount = X − fee − holdback`; `funder` precision note (first *marketplace* sale); header/§3.4/§8.1a/§11 aligned. **Renamed `SYSTEM_ADMIN` → `DEFAULT_ARBITER`** (and `seatFallbackArbiter` → `seatDefaultArbiter`): the role is fallback arbitration only — it has no operational powers and never signs escrow creations, so the "admin" name invited confusion with chainservice's hot wallet and the marketplace owner.
+- **v0.5.0 (2026-08-04):** Spec review against the implemented contracts. **Identified the self-dealt-escrow attack (§8.1a):** `initialize()` is permissionless, so the §8.1 codehash check proves the *code* is genuine but says nothing about the *parties* — an attacker controlling buyer + arbiter can sell to an LP and then vote a full refund, at a profit of `P(r − d)`. Closed by new **§3.3**: the arbiter is chosen at dispute time with a current-recipient veto and a default-arbiter fallback (so a 2-of-3 majority cannot be pre-loaded). **The residual became an invoice-factoring holdback** (§5.3, §6.7): the LP advances part of the price and retains a reserve, released to the seller once the cashflow is collected and applied to the LP's shortfall if it is not. Funded from the **seller's** proceeds, so it gives LPs first-loss protection without touching any buyer's refund rights — an earlier draft capped the buyer's refund instead, which taxed honest buyers in ordinary escrows to deter a marketplace-specific attack. **One reserve per escrow, set on the first sale only**, with the beneficiary read live at settlement so it follows the position through any number of resales: the reserve is recourse against the party who *performs*, and a reselling LP performed nothing. A per-sale waterfall was specified and then dropped as a strictly larger mechanism answering a different question (adverse selection, not performance) — deferred, not foreclosed. Resolution has **no deadline** and the arbiter's vote is **never binding on its own** — the platform can therefore never move funds alone, which is both the security property and the regulatory one (§3.3A2, §13.14). A curated arbiter registry was specified and then dropped: an LP can never buy into a disputed escrow, so the nomination veto already provides what a list would have (§3.3B). §3.3 is an `EscrowContract` change and is **not yet implemented**. Added **§3.0** (`CompletionEscrowContract` is out of scope — no maturity, and `payees[]` has no single transferable role) and **§3.4** (launch precondition: the live implementation predates §3.2/§3.3, so the marketplace opens with zero inventory until a new implementation and factory ship). **Removed `OfferStatus.COMPLETED`** — it was write-only dead state that permanently barred an (escrow, LP) pair from re-bidding, quietly capping resale at one round-trip per address; `acceptOffer` now deletes the slot (§5.2.1, §6.2.5). Resolved the §2-vs-§5.1 contradiction on fee incidence (the **seller** bears it, §8.5a). Corrected invariant §5.2.2 (codehash is checked once at creation — a clone's codehash is immutable, so re-checking is pure gas). Added `nonReentrant` to `rejectOffer` per §11. Documented the 50% floor as a spam guard with price-floor side effects. Added missing errors/events, and §13.4–13.14 (silent-arbiter re-seating, residual sizing, admin key, migration, fee convention, `reviseOffer`, the minimum-offer floor, emergency pause, regulatory perimeter). Settled during review: §13.4's window (per-escrow, 72h default, immutable, unbounded — a hostile window is self-limiting because it is public before purchase), §13.5's holdback mechanism (only resale chains remain open), §13.6 (no registry) and §13.7 (moot).
 - **v0.4.2 (2026-07-06):** Full-spec re-review. **Fixed spoofable provenance:** replaced the `FACTORY()` self-report with an unforgeable ERC-1167 codehash check (`EXPECTED_ESCROW_CODEHASH`) — no factory/escrow changes needed. Widened `withdrawFunds` so LPs exit immediately when an escrow becomes permanently unacceptable (disputed/settled; state 2 never returns to 1). Documented firm quotes (LPs cannot cancel OPEN offers — prevents accept-front-run bait-and-switch). Minimum offer now `max(payout/2, 1)` (dust edge). `setDefaultOfferDuration` requires `> 0`. Added constructor spec (§5.1a), blacklist-token residual risk, and the per-grant (reusable) one-shot clarification.
 - **v0.4.1 (2026-07-06):** Escrow §3.2 implemented. Approval now binds **operator + exact destination** (decision: even a malicious operator can only execute the sanctioned move) and carries a **5-minute TTL** (decision: covers only the human gap between the two signed transactions; prevents indefinite dangling approvals). Event finalized as `RecipientTransferApproved(operator, newRecipient, expiry)`.
 - **v0.4 (2026-07-06):** Adversarial review. Replaced two-tx custody flow with atomic approve-and-pull (kills stale-seller theft, custody-window fund stranding, expire-restore griefing, reclaim deadlock). Added: factory provenance check, funded/undisputed/unclaimed gate at create+accept, per-escrow token support with per-token fee accounting (`accruedFees`), deposit/fee segregation (`totalDeposits`), empty-slot requirement (fixes deposit overwrite), 50%-of-payout minimum offer, balance-delta deposit guard, mandatory `nonReentrant`, lazy expiry/staleness (removed `expireOffer`, `reclaimRecipient`, enumeration array, O(N) cancel loop, `EXPIRED`/`BLOCKED` states, `payable`). Escrow additions specified: `approveRecipientTransfer` / `transferRecipientFrom` (one-shot operator).
