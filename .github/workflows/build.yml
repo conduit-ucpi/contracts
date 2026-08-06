@@ -29,12 +29,34 @@ jobs:
           echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
           echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> .env
           echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> .env
+          # DEFAULT_ARBITER_ADDRESS is the fallback arbitrator Safe. It is baked into the
+          # escrow IMPLEMENTATION's bytecode and can NEVER be changed afterwards - rotating
+          # it means a new implementation, a new codehash, a new factory and a new
+          # marketplace. There is deliberately no default: an unset value must fail the
+          # deploy, not silently pick something.
+          echo "DEFAULT_ARBITER_ADDRESS=${{ vars.DEFAULT_ARBITER_ADDRESS }}" >> .env
           # Fee recipient comes from the environment's FEE_RECIPIENT_ADDRESS
           # variable. Only written when set; the deploy script defaults the
           # recipient to the factory OWNER (relayer) when the variable is absent.
           if [ -n "${{ vars.FEE_RECIPIENT_ADDRESS }}" ]; then
             echo "FEE_RECIPIENT_ADDRESS=${{ vars.FEE_RECIPIENT_ADDRESS }}" >> .env
           fi
+
+      # Fail before touching the chain rather than mid-broadcast. This value is
+      # unchangeable once deployed, so a missing or malformed one must stop the run here.
+      - name: Validate the fallback-arbitrator Safe
+        run: |
+          ADDR="${{ vars.DEFAULT_ARBITER_ADDRESS }}"
+          if [ -z "$ADDR" ]; then
+            echo "::error::DEFAULT_ARBITER_ADDRESS is not set for this environment."
+            echo "::error::It is baked into the implementation bytecode and can never be changed - set it before deploying."
+            exit 1
+          fi
+          if ! echo "$ADDR" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then
+            echo "::error::DEFAULT_ARBITER_ADDRESS is not a valid address: $ADDR"
+            exit 1
+          fi
+          echo "Fallback arbitrator Safe: $ADDR"
 
       - name: Install dependencies
         run: |
@@ -97,6 +119,7 @@ jobs:
           echo "Completion implementation: $FANOUT_IMPLEMENTATION_ADDRESS"
           echo "Completion factory:        $FANOUT_FACTORY_ADDRESS"
           echo "Fee Recipient:             $FEE_RECIPIENT_DISPLAY"
+          echo "Fallback arbiter (Safe):   ${{ vars.DEFAULT_ARBITER_ADDRESS }}  (IMMUTABLE)"
           echo "==================================================="
           echo "LEGACY FACTORY ADDRESS FOR UI CONFIG: $FACTORY_ADDRESS"
           echo "fanOutChainService env:"

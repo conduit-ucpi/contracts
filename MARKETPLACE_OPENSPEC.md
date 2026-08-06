@@ -14,6 +14,9 @@
 > progress · ✅ done · ⏸️ blocked.
 >
 > **Build started:** 2026-08-06 · **Branch:** `marketplace`
+> **Phases 1 and 2 complete: 2026-08-06.** `forge test` — **309 passing, 0 failing**
+> across 9 suites. Next gate is §16 phase 3 (audit); see §0.5 for what is deliberately
+> out of this build.
 
 ### 0.1 Phase status
 
@@ -21,10 +24,10 @@
 |---|---|---|---|---|
 | 1.1 | `EscrowContract` §3.3 arbiter changes | §3.3A–E | ✅ | `src/EscrowContract.sol` |
 | 1.2 | `EscrowContractFactory` new `initialize` signature | §3.3A1, §3.3E | ✅ | `src/EscrowContractFactory.sol` |
-| 1.3 | Escrow tests | §14.1 | ⬜ | `test/EscrowArbiter.t.sol` |
-| 2.1 | `MarketplaceEscrow` contract | §5, §6 | ⬜ | `src/MarketplaceEscrow.sol` |
-| 2.2 | Marketplace tests | §14.2 | ⬜ | `test/MarketplaceEscrow.t.sol` |
-| 2.3 | Invariant suites | §14.3 | ⬜ | `test/InvariantMarketplace.t.sol` |
+| 1.3 | Escrow tests | §14.1 | ✅ | `test/EscrowArbiter.t.sol` + `test/ArbiterNominationWindow.t.sol` |
+| 2.1 | `MarketplaceEscrow` contract | §5, §6 | ✅ | `src/MarketplaceEscrow.sol` |
+| 2.2 | Marketplace tests | §14.2 | ✅ | `test/MarketplaceEscrow.t.sol` |
+| 2.3 | Invariant suites | §14.3 | ✅ | `test/InvariantMarketplace.t.sol` |
 
 ### 0.2 Detailed checklist — Phase 1.1 (`EscrowContract` §3.3)
 
@@ -48,16 +51,16 @@
 
 ### 0.3 Detailed checklist — Phase 2.1 (`MarketplaceEscrow`)
 
-- [ ] State + constructor (§5.1, §5.1a) incl. ERC-1167 `EXPECTED_ESCROW_CODEHASH` derivation
-- [ ] `createOffer` (§6.1) — 11 steps incl. codehash gate, balance-delta guard, `HoldbackOnResale`
-- [ ] `acceptOffer` (§6.2) — CEI, slot delete before interactions, atomic pull + pay
-- [ ] `rejectOffer` (§6.3) — slot **not** freed
-- [ ] `withdrawFunds` (§6.4) — lazy withdrawability matrix, full-gross refund
-- [ ] Owner surface (§6.5) — `setFeeRate`, `setMinOfferBps`, `setDefaultOfferDuration`, `withdrawFees`, `pause`/`unpause`
-- [ ] `sweepToken` (§6.6) — excess only
-- [ ] `releaseHoldback` (§6.7) — permissionless, single-shot, live beneficiary
-- [ ] Pause asymmetry (§5.2.10): `whenNotPaused` on **exactly** `createOffer` + `acceptOffer`
-- [ ] All §9 events, all §10 errors
+- [x] State + constructor (§5.1, §5.1a) incl. ERC-1167 `EXPECTED_ESCROW_CODEHASH` derivation
+- [x] `createOffer` (§6.1) — 11 steps incl. codehash gate, balance-delta guard, `HoldbackOnResale`
+- [x] `acceptOffer` (§6.2) — CEI, slot delete before interactions, atomic pull + pay
+- [x] `rejectOffer` (§6.3) — slot **not** freed
+- [x] `withdrawFunds` (§6.4) — lazy withdrawability matrix, full-gross refund
+- [x] Owner surface (§6.5) — `setFeeRate`, `setMinOfferBps`, `setDefaultOfferDuration`, `withdrawFees`, `pause`/`unpause`
+- [x] `sweepToken` (§6.6) — excess only
+- [x] `releaseHoldback` (§6.7) — permissionless, single-shot, live beneficiary
+- [x] Pause asymmetry (§5.2.10): `whenNotPaused` on **exactly** `createOffer` + `acceptOffer`
+- [x] All §9 events, all §10 errors
 
 ### 0.4 Deviations from spec (deliberate, with rationale)
 
@@ -67,14 +70,152 @@
    is permissionless, so an escrow initialized with a party equal to the fallback would let
    anyone collapse two of the three voting roles into one address. The creation `ARBITER`
    may still be `DEFAULT_ARBITER` — that is the normal platform-created case (§3.3A2a).
-2. **`_nominationDeadlineFromNow()` saturates at `type(uint64).max`** instead of casting
-   `block.timestamp + arbiterNominationWindow` directly. The window is caller-chosen and
-   deliberately unbounded (§3.3A1), so a near-max value would otherwise truncate the sum
-   back into the past and make the fallback instantly seatable. Not exploitable in the
-   attacker's favour (it seats the honest fallback sooner), but wrong, so it is fixed.
-3. **`arbiterNominationWindow` is a `uint64` parameter** on `initialize` and
-   `createEscrowContract`, matching the storage width §3.3A1a specifies rather than taking
-   a `uint256` and narrowing.
+2. **⚠️ `arbiterNominationWindow` is GONE. The window is a 72-hour constant,
+   `NOMINATION_WINDOW`.** This supersedes §3.3A1 entirely — that section specifies a
+   per-escrow value supplied to the factory, `0` meaning a 72h default, deliberately
+   unbounded and immutable after `initialize`. **All of that is removed.** §3.3A1, §3.3E's
+   `initialize` bullet, §13.9's ABI-break note, and §15.1's "show the nomination window" row
+   must be rewritten before audit.
+
+   **Why the parameter was wrong, in one line:** the value would be chosen by whoever
+   *creates* the escrow, while the cost falls on the LP who buys the cashflow *later* — and
+   in the §8.1a attack the creator **is** the adversary. While the window runs on a disputed
+   sold escrow the seat is empty (`seatDefaultArbiter` is deadline-gated, `evictArbiter`
+   refuses an empty seat), so there are exactly two live voters and a stonewalling buyer
+   holds the recipient's capital. A creator-chosen window is a creator-chosen hostage
+   duration.
+
+   **And it bought the honest parties nothing.** `nominateArbiter` has no deadline check —
+   a match seats right up until `seatDefaultArbiter` actually executes — so a longer window
+   never creates more time to agree. It only delays the LP's guaranteed arrival at a third
+   voter. 72 hours is therefore the *shortest humane* window, not a compromise ceiling.
+   (30 days was briefly mandated instead; that would have universalised the worst tolerable
+   case and is why the constant is the old default, not the old cap.)
+
+   **What this deletes:** the `initialize` parameter (so the signature returns to its
+   pre-marketplace form — **the factory ABI break of §13.9 disappears; integrators repoint
+   at a new address and change no call sites**), the storage slot, `MAX_NOMINATION_WINDOW`,
+   `NominationWindowTooLong`, the saturation branch in `_nominationDeadlineFromNow`, and the
+   LP's obligation to discover and price a per-escrow value.
+
+3. **`_nominationDeadlineFromNow()` must never clamp or wrap.** An earlier revision added
+   saturation at `type(uint64).max` and justified it as fixing a benign truncation. That was
+   backwards: a truncating cast wraps the deadline into the *past* (fallback instantly
+   seatable — benign), whereas saturation makes `block.timestamp > nominationDeadline`
+   unsatisfiable, i.e. a **permanently unseatable fallback** and a permanent hostage state.
+   With a constant window the sum cannot approach the boundary, so the branch is gone. If
+   the window ever becomes caller-influenced again, overflow must **revert**, never clamp.
+   `test_SaturatedDeadlineWouldBrickTheEscrow` retains the demonstration.
+
+4. **The fallback arbitrator stays an implementation-constructor `immutable`** and is
+   deliberately **not** read from the factory. `initialize` sets `FACTORY = msg.sender` and
+   is permissionless, so on a direct clone the "factory" is the attacker's own contract and
+   could return any address — a self-reported value, the exact class §8.1 exists to avoid
+   trusting. Because `DEFAULT_ARBITER` lives in the implementation's bytecode and a clone
+   merely delegatecalls into it, an attacker's clone reads the honest Safe and cannot alter
+   it; `test_DirectCloneCannotForgeDefaultArbiter` pins this. Rotation is handled by the
+   Safe rotating its own signers behind a fixed address.
+
+5. **Existing test `testPulledSellerNotCountedAsVoted` was rewritten**, not merely
+   re-plumbed. Its original body had the creation arbiter voting after a
+   `transferRecipientFrom`, which §3.3A now correctly rejects with `NotAuthorizedToVote`.
+   The rewrite asserts that rejection, re-seats the incumbent by matching nomination, and
+   then makes the original assertion (a pulled-in recipient must not read as having voted).
+
+### 0.4a Test coverage map (§14 → file)
+
+| §14 requirement | Where |
+|---|---|
+| 14.1 vote-trap trio | `EscrowArbiter.t.sol::testVoteTrap_*` (3 tests + zero-address sentinel) |
+| 14.1 unseating | `testUnseat_*` (5) — incl. `changeRecipient` does NOT unseat, mid-dispute restart |
+| 14.1 nomination & seating | `testNominate_*` (6), `testSeat*` (6) — incl. late-match-still-wins |
+| 14.1 eviction | `testEvict_*` (8) — incl. rolling clock, unsold-escrow exit, fund-neutrality |
+| 14.1 window immutability | `testWindow_IsAConstantSharedByEveryClone` + `test_DirectCloneCannotForgeTheWindow` |
+| Fallback unforgeability on a direct clone | `test_DirectCloneCannotForgeDefaultArbiter`, `test_DirectCloneIsCodehashGenuine` |
+| **Fallback-liveness guard (new, not in §14)** | `testFuzz_AnyAcceptedWindowLeavesFallbackReachable`, `test_FallbackReachableAtEveryRepresentativeWindow`, `test_CapIsSizedAgainstSilenceTimeout`, `test_SaturatedDeadlineWouldBrickTheEscrow`, `test_DuringWindowThereIsNoEscapeHatch` — see §0.4b |
+| 14.1 `resolvedBuyerPercentage` | `testResolvedPercentage_*` — b ∈ {0,1,50,99,100} |
+| **14.1 §8.1a attack replay** | **`testAttack_SelfDealtEscrowFailsAfterSale`** + `testAttack_MidDisputeSaleStillUnseats` |
+| 14.2 `createOffer` | `testCreate_*` (14) — codehash gate, dust edge, fee-on-transfer, pause |
+| 14.2 `acceptOffer` | `testAccept_*` (10) — approval failure modes, slot delete, resale |
+| 14.2 reject/withdraw matrix | `testReject_*`, `testWithdraw_*` (10) + `testFuzz_NeverBothAcceptableAndWithdrawable` |
+| 14.2 `releaseHoldback` | `testHoldback_*` (7) + `testFuzz_HoldbackRoundingMatchesEscrow` |
+| 14.2 owner surface + pause asymmetry | `testOwner_*`, `testSweep_*`, `testPauseAsymmetry_AllExitsSucceedWhilePaused` |
+| 14.3.1–3 marketplace invariants | `InvariantMarketplace.t.sol` (7 invariants) |
+| 14.3.4–6 escrow invariants | `invariant_noManufacturedConsensus`, `invariant_marketplaceNeverHoldsTheRole`, `testEvict_MovesNoFunds` |
+
+> The invariant handler was verified **non-vacuous** with a temporary probe asserting the
+> fuzzer never reaches a sale; it failed as intended (sales and booked reserves are both
+> reached), and the probe was then removed.
+
+### 0.4b Fallback-liveness guard — and why the earlier tests missed it
+
+**Safety property:** *a disputed sold escrow must always reach a third voter within a
+bounded, plausible time.* Nothing in §14 states it. The original window tests could not
+detect its loss because **every one of them measured against the window/cap constants
+themselves** — one fuzz case even bounded its own input by the very constant whose removal
+it should have caught. Change the constant and they all still pass, by construction.
+
+`testFuzz_FallbackAlwaysReachableAndUnblocksTheLp` asserts the property directly against a
+fixed tolerance (`MAX_TOLERABLE_HOSTAGE = 90 days`, deliberately far looser than the 72-hour
+window so it is a real bound, not a restatement). It also pins that during the window there
+is genuinely no escape (no fallback, no seat to evict), and that once the fallback seats,
+the LP can settle **without the buyer**.
+
+**Mutation-tested at each design stage — a passing guard proves nothing until shown to fail:**
+
+| Design | Mutation | Cap/constant-relative tests | Liveness guard |
+|---|---|---|---|
+| per-escrow window | cap removed from `initialize` | 2 fail | **fail in 6 fuzz runs** (a ~546-million-year window accepted) |
+| per-escrow window | cap **kept and enforced**, raised to 10 years | **all 5 pass** ✅ | **3 fail** |
+| constant window | `NOMINATION_WINDOW` widened to 120 days | — | **3 fail** |
+
+The middle row was the original finding: a plausible "allow longer negotiations" change
+sailed through the entire old suite untouched.
+
+### 0.4c Security review findings (self-audit, 2026-08-06)
+
+Reviewed: `EscrowContract`, `EscrowContractFactory`, `MarketplaceEscrow`. This is an
+internal review, **not a substitute for §16 phase 3**.
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| H-1 | **High** | `acceptOffer` could overwrite a live holdback record, stranding the first reserve permanently | **Fixed** |
+| M-1 | Medium | `releaseHoldback` pays beneficiary and funder in one transaction; a blocked beneficiary blocks the funder, with no remedy after settlement | **Open — decision needed** |
+| L-1 | Low | `acceptOffer` transferred zero to the seller when a holdback consumed the whole offer | **Fixed** |
+| L-2 | Low | `renounceOwnership` is inherited and would permanently lock all accrued fees | **Open — decision needed** |
+
+**H-1 — holdback record overwrite (fixed).** `createOffer` validated `holdback == 0 ||
+!hasBeenSold[escrow]`, but `acceptOffer` did not re-check, and `hasBeenSold` can flip
+between the two calls. Two LPs may both bid with a holdback while an escrow is unsold (both
+legal). The seller accepts the first, recording the one permitted reserve. If the position
+then returns to that same seller — a direct `changeRecipient` back, or the seller buying
+their own cashflow back as an LP, since after the first sale they are no longer the
+recipient and so pass the party check — the second offer becomes live again and its
+acceptance **overwrote `holdbacks[escrow]` while still adding to `totalHoldbacks`**. The
+first reserve was then unreachable by everyone: no record remained to release it, and
+`sweepToken` subtracts `totalHoldbacks`, so the owner could not recover it either.
+Conservation still held, so no invariant caught it — the loss is liveness, not solvency.
+Fixed by re-checking at acceptance, plus making such an offer immediately withdrawable so
+the second LP is not locked in until expiry. Regression:
+`test/MarketplaceHoldbackRegression.t.sol`.
+
+**M-1 — coupled holdback payouts (open).** `releaseHoldback` sends to the beneficiary and
+the funder in the same transaction. If the beneficiary cannot receive (USDC blacklist, a
+reverting contract), the whole call reverts and the **funder's** unrelated refund is blocked
+too. Normally a beneficiary could rotate their payout address, but `releaseHoldback`
+requires `isClaimed()`, and at that state `_transferRecipient` reverts — so there is no
+remedy. Options: split into per-party pull claims (adds state), or accept and document
+alongside the existing blacklist residual in §11.
+
+**L-2 — `renounceOwnership` (open).** Inherited from `Ownable` and not overridden. Calling
+it makes `withdrawFees`, `sweepToken`, `pause`/`unpause` and every setter permanently
+unreachable, stranding all accrued fees. One-line fix if unwanted: override to revert.
+
+**Checked and found sound:** CEI ordering in all five state-mutating paths; `nonReentrant`
+coverage incl. cross-function reentry; the pause asymmetry; owner reach bounded by
+`accruedFees`; `EXPECTED_ESCROW_CODEHASH` against a real factory clone; fee snapshotting;
+slot lifecycle; the §3.3D vote-trap guards; `DEFAULT_ARBITER` unforgeability on a direct
+clone; `NOMINATION_WINDOW` liveness; holdback rounding against `_executeResolution`.
 
 ### 0.5 Not in this build
 

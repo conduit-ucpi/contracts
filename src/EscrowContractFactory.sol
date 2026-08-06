@@ -91,17 +91,11 @@ contract EscrowContractFactory {
      * - Platform can only facilitate - never access escrowed funds
      */
     /**
-     * @param arbiterNominationWindow Grace period for buyer + recipient to agree a
-     *        replacement arbiter after a marketplace sale unseats the incumbent
-     *        (EscrowContract §3.3A1). Pass 0 to use the escrow's DEFAULT_NOMINATION_WINDOW
-     *        of 72 hours. Per-escrow and IMMUTABLE once set - the escrow exposes no setter,
-     *        which is what lets an LP price the value they see before purchasing.
-     *
-     *        Capped at EscrowContract.MAX_NOMINATION_WINDOW (30 days); the escrow reverts
-     *        NominationWindowTooLong above it. The cap is enforced in EscrowContract.initialize
-     *        and NOT here, deliberately: initialize is permissionless and anyone can clone the
-     *        implementation directly, so a factory-side check would be trivially bypassed while
-     *        still producing an escrow with a valid codehash.
+     * NOTE: this signature is deliberately UNCHANGED from the pre-marketplace factory.
+     * The arbiter nomination window used after a marketplace sale is the escrow's
+     * NOMINATION_WINDOW constant (72 hours), not a per-escrow parameter — see
+     * EscrowContract.NOMINATION_WINDOW for why. Integrators therefore need only repoint at
+     * the new factory address; no call-site changes are required.
      */
     function createEscrowContract(
         address tokenAddress,
@@ -110,8 +104,7 @@ contract EscrowContractFactory {
         uint256 amount,
         uint256 expiryTimestamp,
         string memory description,
-        address arbiter,
-        uint64 arbiterNominationWindow
+        address arbiter
     ) external returns (address) {
         if (tokenAddress == address(0)) revert InvalidTokenAddress();
         if (buyer == address(0)) revert InvalidBuyerAddress();
@@ -148,8 +141,7 @@ contract EscrowContractFactory {
                 amount,
                 expiryTimestamp,
                 creatorFee, // Platform fee (transparent and upfront)
-                FEE_RECIPIENT, // Address that receives the platform fee
-                arbiterNominationWindow // §3.3A1 - set once, no setter, 0 = 72h default
+                FEE_RECIPIENT // Address that receives the platform fee
             );
 
         EscrowContract newContract = EscrowContract(clone);

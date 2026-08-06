@@ -81,7 +81,7 @@ contract VotingResolutionTest is Test {
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
-        , uint64(0));
+        );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -143,7 +143,7 @@ contract VotingResolutionTest is Test {
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
-        , uint64(0));
+        );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
 

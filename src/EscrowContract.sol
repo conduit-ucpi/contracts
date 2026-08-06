@@ -287,7 +287,6 @@ contract EscrowContract is ReentrancyGuard {
     error NominationWindowStillOpen(uint256 deadline);
     error InvalidArbiterCandidate(address candidate);
     error PartyCannotBeDefaultArbiter();
-    error NominationWindowTooLong(uint64 window, uint64 max);
 
     // 🔒 SECURITY: Set once at initialization. FACTORY, tokenAddress, BUYER, ARBITER
     //    and FEE_RECIPIENT can NEVER change. SELLER is the one exception: the current
@@ -366,22 +365,6 @@ contract EscrowContract is ReentrancyGuard {
     ///         MUST be a multisig whose signers rotate while the address stays fixed.
     address public immutable DEFAULT_ARBITER;
 
-    /// @notice Grace period for buyer + recipient to agree an arbiter on a sold escrow
-    ///         before the DEFAULT_ARBITER fallback becomes seatable.
-    /// @dev    Per-escrow, so it CANNOT be a Solidity `immutable` (immutables live in the
-    ///         implementation's bytecode and would be shared by all clones). Written once
-    ///         in `initialize` with NO setter — the same set-once-no-setter pattern as
-    ///         EXPIRY_TIMESTAMP.
-    ///
-    ///         ⚠️ Immutability after initialize is LOAD-BEARING. A hostile window is
-    ///         self-limiting only because it is public on-chain before anyone buys: the
-    ///         LP must actively choose to purchase, and an escrow with an absurd window
-    ///         attracts no bids. If this could be altered post-creation, an attacker would
-    ///         list with a 48-hour window, let the LP price that, take their money, and
-    ///         then set it to ten years. "Visible at purchase" only protects the buyer if
-    ///         what they saw is what they get.
-    uint64 public arbiterNominationWindow;
-
     /// @notice Deadline after which seatDefaultArbiter() may fire. Set when a dispute and
     ///         the unseated state coincide. Never blocks a matching nomination — a late
     ///         match still seats right up until the fallback actually executes.
@@ -403,31 +386,30 @@ contract EscrowContract is ReentrancyGuard {
     ///         and distinguishing "resolved at 0% to buyer" from "never disputed".
     uint8 public resolvedBuyerPercentage;
 
-    /// @notice Default nomination window when `initialize` is passed 0 — the same
-    ///         "0 means use the default" idiom the marketplace's createOffer uses for
-    ///         offer duration.
-    uint64 public constant DEFAULT_NOMINATION_WINDOW = 72 hours;
-
-    /// @notice Hard ceiling on `arbiterNominationWindow`, enforced in `initialize`.
+    /// @notice Grace period for buyer + current recipient to agree an arbiter on a SOLD
+    ///         escrow before the DEFAULT_ARBITER fallback becomes seatable.
     ///
-    /// @dev 🔒 THIS BOUND IS A SOLVENCY CONTROL, NOT A UX NICETY.
-    ///      The fallback arbitrator is the ONLY resolution path that does not require the
-    ///      buyer's cooperation. `seatDefaultArbiter` is gated on the nomination deadline,
-    ///      and `evictArbiter` refuses to act on an empty seat — so for as long as the
-    ///      window runs, a disputed sold escrow has exactly two live voters and a buyer who
-    ///      simply withholds agreement holds the recipient's capital hostage. An unbounded
-    ///      window makes that hostage state PERMANENT and hands the buyer an extortion
-    ///      lever over the very LP this mechanism exists to protect.
+    /// @dev 🔒 A CONSTANT, DELIBERATELY — NOT A PER-ESCROW PARAMETER.
     ///
-    ///      It MUST live here rather than in the factory. `initialize` is permissionless and
-    ///      `Clones` is callable by anyone against this implementation, so an attacker can
-    ///      mint a clone with an IDENTICAL runtime codehash — passing the marketplace's
-    ///      codehash check — while never touching the factory. A factory-side check would
-    ///      guard nothing.
+    ///      Making this configurable would hand the lever to the wrong party. The value
+    ///      would be chosen by whoever CREATES the escrow, while the cost falls entirely on
+    ///      the LP who arrives later and buys the cashflow — and in the self-dealt-escrow
+    ///      attack the creator IS the adversary. While the window runs on a disputed sold
+    ///      escrow the seat is empty: `seatDefaultArbiter` is gated on the deadline and
+    ///      `evictArbiter` refuses an empty seat, so there are exactly two live voters and a
+    ///      buyer who simply withholds agreement holds the recipient's capital hostage. A
+    ///      creator-chosen window is a creator-chosen hostage duration.
     ///
-    ///      Sized against ARBITER_SILENCE_TIMEOUT: agreeing on an arbiter should never be
-    ///      allowed to take longer than replacing a dead one.
-    uint64 public constant MAX_NOMINATION_WINDOW = 30 days;
+    ///      Nor does a longer window buy the honest parties anything. `nominateArbiter` has
+    ///      NO deadline check: a match seats right up until `seatDefaultArbiter` actually
+    ///      executes, so agreement is never foreclosed by this expiring. All a longer window
+    ///      does is delay the LP's guaranteed arrival at a third voter. 72 hours is
+    ///      therefore chosen as the SHORTEST humane window, not as a compromise ceiling.
+    ///
+    ///      A fixed value also keeps `initialize` at its original signature (no factory ABI
+    ///      break), removes a storage slot, and removes any need for an LP to discover and
+    ///      price a per-escrow value before buying.
+    uint64 public constant NOMINATION_WINDOW = 72 hours;
 
     /// @notice How long a seated arbiter may be silent before either disputant may evict
     ///         them. Eviction only ever swaps the third voter — it moves no funds and
@@ -491,8 +473,7 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _amount,
         uint256 _expiryTimestamp,
         uint256 _creatorFee,
-        address _feeRecipient,
-        uint64 _arbiterNominationWindow
+        address _feeRecipient
     ) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
@@ -530,24 +511,10 @@ contract EscrowContract is ReentrancyGuard {
         if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
         _state = 0; // Set to unfunded state
 
-        // §3.3A1: written ONCE here, with no setter anywhere in this contract. 0 means
-        // "use the default", the same idiom the marketplace uses for offer duration.
-        //
-        // 🔒 CAPPED. "Visible on-chain before anyone buys" is NOT sufficient protection on
-        // its own: nothing in the sale path reads this field, so the guarantee would rest
-        // entirely on an LP's client surfacing it. A long window is not merely slow - it
-        // strands a disputed sold escrow with two voters and no fallback, and at
-        // type(uint64).max it strands it forever (_nominationDeadlineFromNow saturates, and
-        // evictArbiter cannot clear an already-empty seat). That is the buyer holding the
-        // recipient's capital hostage, which is the exact outcome §3.3 exists to prevent.
-        //
-        // No minimum, unchanged: a short window just means "go straight to the fallback",
-        // which only ever accelerates arrival at an honest arbiter.
-        if (_arbiterNominationWindow > MAX_NOMINATION_WINDOW) {
-            revert NominationWindowTooLong(_arbiterNominationWindow, MAX_NOMINATION_WINDOW);
-        }
-        arbiterNominationWindow =
-            _arbiterNominationWindow == 0 ? DEFAULT_NOMINATION_WINDOW : _arbiterNominationWindow;
+        // NOTE: the arbiter nomination window is the NOMINATION_WINDOW constant and is
+        // deliberately NOT a parameter here - see its declaration for why. That keeps this
+        // signature identical to the pre-marketplace implementation, so the factory ABI is
+        // unchanged and integrators need only repoint at the new address.
 
         // §3.3C: 255 = "no dispute resolution has occurred". This MUST be written here
         // rather than as a declaration initializer - clone storage starts at zero, and a
@@ -945,20 +912,23 @@ contract EscrowContract is ReentrancyGuard {
     /**
      * Nomination deadline one full window from now.
      *
-     * ⚠️ The saturation below is now UNREACHABLE and must stay that way. It is dead-code
-     *    defence in depth only: initialize caps arbiterNominationWindow at
-     *    MAX_NOMINATION_WINDOW, so the sum cannot approach type(uint64).max for any
-     *    plausible block.timestamp. Saturation is deliberately NOT a substitute for that
-     *    cap - a saturated deadline is a PERMANENTLY unseatable fallback arbitrator, i.e.
-     *    the vulnerability itself, not a mitigation of it. If the cap is ever relaxed,
-     *    this must revert rather than saturate.
+     * ⚠️ This MUST NOT be allowed to saturate or wrap. A deadline at (or near)
+     *    type(uint64).max is a PERMANENTLY unseatable fallback arbitrator —
+     *    seatDefaultArbiter requires block.timestamp > nominationDeadline, evictArbiter
+     *    refuses an already-empty seat, and the disputed sold escrow is left with two
+     *    voters and a buyer free to stonewall forever. Saturating is therefore the
+     *    vulnerability, not a mitigation of it.
+     *
+     *    What makes that unreachable here is that NOMINATION_WINDOW is a 72-hour CONSTANT,
+     *    so the sum cannot come within astronomical distance of the uint64 boundary. Should
+     *    the window ever become caller-influenced again, this must REVERT on overflow —
+     *    never clamp.
      */
     function _nominationDeadlineFromNow() internal view returns (uint64) {
-        uint256 deadline = block.timestamp + arbiterNominationWindow;
-        // casting to 'uint64' is safe because the ternary clamps the value to
-        // type(uint64).max before the cast can truncate it
+        // casting to 'uint64' is safe because NOMINATION_WINDOW is a 72-hour constant, so
+        // the sum only exceeds type(uint64).max at timestamps ~584 billion years hence
         // forge-lint: disable-next-line(unsafe-typecast)
-        return deadline > type(uint64).max ? type(uint64).max : uint64(deadline);
+        return uint64(block.timestamp + NOMINATION_WINDOW);
     }
 
     /**
@@ -1019,9 +989,11 @@ contract EscrowContract is ReentrancyGuard {
      * ⚖️  SEAT THE FALLBACK ARBITRATOR ONCE THE NOMINATION WINDOW LAPSES (§3.3A1a)
      *
      * Permissionless by design, mirroring checkAndActivate: it takes no discretion and can
-     * only do the one thing the elapsed window already determined. A zero
-     * arbiterNominationWindow therefore just means the fallback is seatable as soon as a
-     * dispute exists.
+     * only do the one thing the elapsed window already determined. Anyone may call it, and
+     * the only outcome it can produce is seating DEFAULT_ARBITER.
+     *
+     * Note this never forecloses agreement: nominateArbiter has no deadline check, so a
+     * matching pair still seats right up until this actually executes.
      */
     function seatDefaultArbiter() external initialized {
         if (_state != 2) revert ContractMustBeDisputed();

@@ -139,7 +139,7 @@ contract InvariantEscrowTest is Test {
 
         address esc = factory.createEscrowContract(
             address(token), buyer, seller, AMOUNT, block.timestamp + 7 days, "inv", arbiter
-        , uint64(0));
+        );
         escrow = EscrowContract(esc);
         escrowAmount = escrow.payoutAmount();
 
