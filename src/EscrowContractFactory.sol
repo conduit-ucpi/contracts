@@ -96,6 +96,12 @@ contract EscrowContractFactory {
      *        (EscrowContract §3.3A1). Pass 0 to use the escrow's DEFAULT_NOMINATION_WINDOW
      *        of 72 hours. Per-escrow and IMMUTABLE once set - the escrow exposes no setter,
      *        which is what lets an LP price the value they see before purchasing.
+     *
+     *        Capped at EscrowContract.MAX_NOMINATION_WINDOW (30 days); the escrow reverts
+     *        NominationWindowTooLong above it. The cap is enforced in EscrowContract.initialize
+     *        and NOT here, deliberately: initialize is permissionless and anyone can clone the
+     *        implementation directly, so a factory-side check would be trivially bypassed while
+     *        still producing an escrow with a valid codehash.
      */
     function createEscrowContract(
         address tokenAddress,

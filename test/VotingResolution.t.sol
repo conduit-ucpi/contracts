@@ -62,7 +62,7 @@ contract VotingResolutionTest is Test {
 
     function setUp() public {
         usdc = new MockERC20();
-        EscrowContract implementation = new EscrowContract();
+        EscrowContract implementation = new EscrowContract(address(0xDEFA17));
         factory = new EscrowContractFactory(admin, address(implementation), address(0));
 
         expiryTimestamp = block.timestamp + 7 days;
@@ -81,7 +81,7 @@ contract VotingResolutionTest is Test {
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
-        );
+        , uint64(0));
 
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -143,7 +143,7 @@ contract VotingResolutionTest is Test {
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
-        );
+        , uint64(0));
 
         EscrowContract escrow = EscrowContract(escrowAddress);
 

@@ -134,12 +134,12 @@ contract InvariantEscrowTest is Test {
         token = new InvToken();
         token.mint(buyer, AMOUNT);
 
-        EscrowContract impl = new EscrowContract();
+        EscrowContract impl = new EscrowContract(address(0xDEFA17));
         factory = new EscrowContractFactory(arbiter, address(impl), feeRecipient);
 
         address esc = factory.createEscrowContract(
             address(token), buyer, seller, AMOUNT, block.timestamp + 7 days, "inv", arbiter
-        );
+        , uint64(0));
         escrow = EscrowContract(esc);
         escrowAmount = escrow.payoutAmount();
 
