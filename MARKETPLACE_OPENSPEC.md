@@ -29,7 +29,9 @@
 | 2.1 | `MarketplaceEscrow` contract | §5, §6 | ✅ | `src/MarketplaceEscrow.sol` |
 | 2.2 | Marketplace tests | §14.2 | ✅ | `test/MarketplaceEscrow.t.sol` |
 | 2.3 | Invariant suites | §14.3 | ✅ | `test/InvariantMarketplace.t.sol` |
-| 2.4 | `MarketplaceEscrow` deploy script | §3.4 step 3 | ⬜ | _not started_ |
+| 2.4 | `MarketplaceEscrow` deploy script | §3.4 step 3 | ✅ | `script/DeployMarketplace.s.sol` |
+| 3.1 | Escrow + factory deployed to Base mainnet | §3.4 steps 1–2 | ✅ | `DEPLOYMENT_ADDRESSES.md` |
+| 3.2 | `MarketplaceEscrow` deployed | §3.4 step 3 | ⬜ | blocked on §13.1/13.2/owner |
 
 **Open decisions blocking nothing but worth settling before audit:** §0.4c M-1 (coupled
 holdback payouts) and L-2 (`renounceOwnership`).
@@ -224,10 +226,10 @@ clone; `NOMINATION_WINDOW` liveness; holdback rounding against `_executeResoluti
 
 ### 0.5 Not in this build
 
-- **`MarketplaceEscrow` deploy script** — still outstanding (§3.4 step 3). The escrow +
-  factory path IS done: `script/DeploymentScript.s.sol` is hardened and wired into CI with
-  the `DEFAULT_ARBITER_ADDRESS` guards (§3.4).
-- `DEPLOYMENT_ADDRESSES.md` entries (§16 phase 6) — deploy-day work.
+- Nothing in the contract or deploy-tooling scope remains. Both deploy scripts exist and
+  `DEPLOYMENT_ADDRESSES.md` records the live addresses (§3.4).
+- Still outside this build: the §16 phase 4 off-chain work (chainservice, webapp,
+  subgraph), and the external gates below.
 - The §13.1/13.2 launch parameters — passed at deploy, not baked in.
 - Audit (§16 phase 3), counsel (§13.14), Safe test transaction (§13.8) — external gates.
 
@@ -813,9 +815,10 @@ messaging promises liquidity on existing deals.
 
 | Contract | Address |
 |---|---|
-| `EscrowContract` implementation (new, §3.2 + §3.3) | _TBD — blocks launch_ |
-| `EscrowContractFactory` (new) | _TBD — blocks launch_ |
-| `MarketplaceEscrow` | _TBD_ |
+| `EscrowContract` implementation (new, §3.2 + §3.3) | `0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B` ✅ deployed 2026-08-06 |
+| `EscrowContractFactory` (new) | `0x575AB01251cfc4DB9Ce90A13152a7a616Bd304b9` ✅ deployed 2026-08-06 |
+| `MarketplaceEscrow` | _pending — `script/DeployMarketplace.s.sol`, parameters below_ |
+| **ERC-1167 codehash of the above implementation** | `0x5c1d3f7f01cbe7c3aa294f7f7d426ad766c7c99513eb563742964c4f22477644` |
 | | |
 
 **Deploy tooling (added v0.7.0).** Steps 1–2 run through GitHub Actions
