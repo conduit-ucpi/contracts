@@ -278,6 +278,15 @@ contract EscrowContract is ReentrancyGuard {
     error CannotSweepEscrowToken();
     error NoTokensToSweep();
     error TransferAmountMismatch();
+    // §3.3 — sale-triggered arbiter reset
+    error InvalidDefaultArbiterAddress();
+    error NotDisputeParty(address caller);
+    error ArbiterAlreadySeated(address arbiter);
+    error NoArbiterSeated();
+    error ArbiterNotSilent(uint256 lastActionAt);
+    error NominationWindowStillOpen(uint256 deadline);
+    error InvalidArbiterCandidate(address candidate);
+    error PartyCannotBeDefaultArbiter();
 
     // 🔒 SECURITY: Set once at initialization. FACTORY, tokenAddress, BUYER, ARBITER
     //    and FEE_RECIPIENT can NEVER change. SELLER is the one exception: the current
@@ -288,7 +297,12 @@ contract EscrowContract is ReentrancyGuard {
     IERC20 public tokenAddress; // The ERC20 token contract (any ERC20) - immutable after initialization
     address public BUYER; // ONLY this address can deposit funds and raise disputes - immutable
     address public SELLER; // Receives funds after expiry or dispute - reassignable by the seller via changeRecipient()
-    address public ARBITER; // Arbiter address - can ONLY vote on disputes, NOT take your money - immutable, distinct from buyer/seller
+    // ⚖️  Arbiter address - can ONLY vote on disputes, NOT take your money. Distinct from
+    //    buyer/seller. Set at initialize and fixed for the life of an UNSOLD escrow; a
+    //    marketplace sale (transferRecipientFrom) UNSEATS it to address(0), after which
+    //    buyer + current recipient re-seat by matching nomination, or the DEFAULT_ARBITER
+    //    fallback takes the seat once the nomination window lapses. See §3.3A.
+    address public ARBITER;
     address public FEE_RECIPIENT; // Address that receives the platform fee - immutable
 
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
@@ -321,6 +335,83 @@ contract EscrowContract is ReentrancyGuard {
 
     uint256 public constant RECIPIENT_APPROVAL_TTL = 5 minutes;
 
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // ⚖️  §3.3 SALE-TRIGGERED ARBITER RESET
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // An escrow that is never sold behaves exactly as before: the creation arbiter holds
+    // office and the 2-of-3 runs unchanged, with none of the machinery below invoked.
+    // Everything here activates only at the moment a cashflow is SOLD through the
+    // marketplace, and it exists to close the corrupt-arbiter attack: an attacker who
+    // controls both the buyer and a pre-loaded arbiter could otherwise sell to an LP and
+    // then vote themselves a full refund 2-of-3. Unseating at the sale makes that
+    // majority unmanufacturable — every path back to a seat runs through the new
+    // recipient, and the fallback is a party the attacker does not control.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// @notice Fallback arbitrator, and NOTHING else. This address has no operational
+    ///         role: it never creates escrows, never touches offers or acceptances, and
+    ///         takes no action in an agreed settlement. Its sole capability is being
+    ///         seated as the fallback arbiter on a SOLD escrow and then casting one of
+    ///         three dispute votes — it can never move funds alone.
+    /// @dev    A true Solidity `immutable`, set in the IMPLEMENTATION's constructor and
+    ///         therefore shared by every clone. It MUST NOT be an `initialize` parameter:
+    ///         `initialize` is permissionless, so a per-escrow value would let a
+    ///         self-dealt clone install its own fallback — zero nomination window,
+    ///         dispute, refuse to nominate, and the attacker's own address takes the
+    ///         fallback seat. The attack would return straight through the mechanism
+    ///         built to kill it. Baking it into implementation bytecode makes it
+    ///         unforgeable by direct clones at no cost. Consequence: rotating it means a
+    ///         new implementation, hence a new codehash, factory and marketplace — so it
+    ///         MUST be a multisig whose signers rotate while the address stays fixed.
+    address public immutable DEFAULT_ARBITER;
+
+    /// @notice Grace period for buyer + recipient to agree an arbiter on a sold escrow
+    ///         before the DEFAULT_ARBITER fallback becomes seatable.
+    /// @dev    Per-escrow, so it CANNOT be a Solidity `immutable` (immutables live in the
+    ///         implementation's bytecode and would be shared by all clones). Written once
+    ///         in `initialize` with NO setter — the same set-once-no-setter pattern as
+    ///         EXPIRY_TIMESTAMP.
+    ///
+    ///         ⚠️ Immutability after initialize is LOAD-BEARING. A hostile window is
+    ///         self-limiting only because it is public on-chain before anyone buys: the
+    ///         LP must actively choose to purchase, and an escrow with an absurd window
+    ///         attracts no bids. If this could be altered post-creation, an attacker would
+    ///         list with a 48-hour window, let the LP price that, take their money, and
+    ///         then set it to ten years. "Visible at purchase" only protects the buyer if
+    ///         what they saw is what they get.
+    uint64 public arbiterNominationWindow;
+
+    /// @notice Deadline after which seatDefaultArbiter() may fire. Set when a dispute and
+    ///         the unseated state coincide. Never blocks a matching nomination — a late
+    ///         match still seats right up until the fallback actually executes.
+    uint64 public nominationDeadline;
+
+    /// @notice Rolling clock for evictArbiter(). Stamped when raiseDispute fires with an
+    ///         arbiter already seated (the clock must start at the dispute, not at
+    ///         creation — an unsold escrow's arbiter may sit quietly for months), inside
+    ///         _seatArbiter, and on every arbiter vote or vote change.
+    uint64 public lastArbiterActionAt;
+
+    address public nominatedByBuyer;
+    address public nominatedByRecipient;
+
+    /// @notice The buyer percentage a dispute actually resolved at, persisted so an
+    ///         external contract (the marketplace, to compute an LP's shortfall against a
+    ///         holdback) can read how the dispute went. 255 = no dispute resolution has
+    ///         occurred, matching the sentinel convention `resolutionVotes` already uses
+    ///         and distinguishing "resolved at 0% to buyer" from "never disputed".
+    uint8 public resolvedBuyerPercentage;
+
+    /// @notice Default nomination window when `initialize` is passed 0 — the same
+    ///         "0 means use the default" idiom the marketplace's createOffer uses for
+    ///         offer duration.
+    uint64 public constant DEFAULT_NOMINATION_WINDOW = 72 hours;
+
+    /// @notice How long a seated arbiter may be silent before either disputant may evict
+    ///         them. Eviction only ever swaps the third voter — it moves no funds and
+    ///         closes nothing, so it cannot become a forced-resolution backdoor.
+    uint256 public constant ARBITER_SILENCE_TIMEOUT = 30 days;
+
     // 📢 PUBLIC EVENTS: These events prove what happened (recorded permanently on blockchain)
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
     event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
@@ -331,6 +422,11 @@ contract EscrowContract is ReentrancyGuard {
     event TokensSwept(address indexed token, address indexed recipient, uint256 amount);
     event RecipientChanged(address indexed previousSeller, address indexed newSeller, uint256 timestamp);
     event RecipientTransferApproved(address indexed operator, address indexed newRecipient, uint256 expiry);
+    // §3.3 — arbiter seat lifecycle
+    event ArbiterUnseated(address indexed previousArbiter);
+    event ArbiterNominated(address indexed nominator, address indexed candidate);
+    event ArbiterSeated(address indexed arbiter, bool byAgreement);
+    event ArbiterEvicted(address indexed previousArbiter);
 
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
 
@@ -351,7 +447,15 @@ contract EscrowContract is ReentrancyGuard {
         _;
     }
 
-    constructor() {
+    /**
+     * @param _defaultArbiter The fallback arbitrator for SOLD escrows (§3.3A1a). Baked
+     *        into this implementation's bytecode and shared by every clone, so it cannot
+     *        be forged by a directly-created clone. MUST be a multisig: rotating it
+     *        requires deploying a whole new implementation, factory and marketplace.
+     */
+    constructor(address _defaultArbiter) {
+        if (_defaultArbiter == address(0)) revert InvalidDefaultArbiterAddress();
+        DEFAULT_ARBITER = _defaultArbiter;
         // Implementation contract - disable initialization
         // FACTORY will remain address(0) for the implementation
         _state = 255; // Mark as disabled
@@ -365,7 +469,8 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _amount,
         uint256 _expiryTimestamp,
         uint256 _creatorFee,
-        address _feeRecipient
+        address _feeRecipient,
+        uint64 _arbiterNominationWindow
     ) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
@@ -383,6 +488,13 @@ contract EscrowContract is ReentrancyGuard {
         // or seller, that address would control 2-of-3 votes and could unilaterally
         // force any dispute outcome, defeating the voting model.
         if (_arbiter == _buyer || _arbiter == _seller) revert ArbiterMustBeDistinct();
+        // Neither party may BE the fallback arbitrator. Otherwise seatDefaultArbiter -
+        // which is permissionless - would collapse two of the three voting roles into a
+        // single address, handing it the 2-of-3 outright. (§3.3A1a requires the same
+        // rejection on every recipient change; this is the creation-time half of it.
+        // The creation ARBITER may of course be the DEFAULT_ARBITER - that is the normal
+        // platform-created case per §3.3A2a.)
+        if (_buyer == DEFAULT_ARBITER || _seller == DEFAULT_ARBITER) revert PartyCannotBeDefaultArbiter();
 
         tokenAddress = IERC20(_tokenAddress);
         BUYER = _buyer;
@@ -396,10 +508,31 @@ contract EscrowContract is ReentrancyGuard {
         if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
         _state = 0; // Set to unfunded state
 
+        // §3.3A1: written ONCE here, with no setter anywhere in this contract. 0 means
+        // "use the default", the same idiom the marketplace uses for offer duration.
+        // There is deliberately no maximum: a hostile window is self-limiting because it
+        // is public before anyone buys, and no minimum either - a zero window just means
+        // "go straight to the fallback", which is not exploitable given no resolution
+        // deadline exists.
+        arbiterNominationWindow =
+            _arbiterNominationWindow == 0 ? DEFAULT_NOMINATION_WINDOW : _arbiterNominationWindow;
+
+        // §3.3C: 255 = "no dispute resolution has occurred". This MUST be written here
+        // rather than as a declaration initializer - clone storage starts at zero, and a
+        // declaration initializer only ever runs in the implementation's constructor.
+        resolvedBuyerPercentage = 255;
+
         // Initialize votes as "not voted" (255)
         resolutionVotes[_buyer].buyerPercentage = 255;
         resolutionVotes[_seller].buyerPercentage = 255;
         resolutionVotes[_arbiter].buyerPercentage = 255;
+
+        // ⚠️ §3.3D belt-and-braces. address(0) is a LIVE mid-life value for ARBITER once
+        // an escrow is sold, and a default mapping read returns 0 - which is a VALID vote
+        // meaning "0% to buyer", i.e. 100% to the seller. Without this (and the guard in
+        // _checkAndExecuteConsensus) the seller could unilaterally take the entire escrow
+        // the moment they voted 0, before the nomination window had even opened.
+        resolutionVotes[address(0)].buyerPercentage = 255;
     }
 
     /**
@@ -686,6 +819,22 @@ contract EscrowContract is ReentrancyGuard {
         if (newRecipient != approvedRecipientTarget) revert ApprovedTargetMismatch();
         if (block.timestamp > recipientApprovalExpiry) revert RecipientApprovalExpired();
         _transferRecipient(newRecipient);
+
+        // §3.3A: the SALE unseats the incumbent arbiter, automatically, in this same
+        // transaction. changeRecipient deliberately does NOT do this - a seller rotating
+        // their own payout wallet should not evict a legitimate arbiter, and an OTC buyer
+        // taking the role outside the marketplace gets none of the marketplace's other
+        // protections either. Unseating is a property of the sale.
+        //
+        // Why automatic rather than objection-based: an opt-in objection ("the new
+        // recipient may object to the incumbent after buying") loses a race the attacker
+        // controls. In the self-dealt escrow the attacker IS the seller, so they choose
+        // the block the sale lands in and can bundle acceptOffer -> raiseDispute -> buyer
+        // votes 100 -> pre-loaded arbiter votes 100, and consensus executes before any
+        // objection can land. Unseating HERE makes that bundle fail, because the old
+        // arbiter is no longer an authorised voter. It costs an honest incumbent nothing:
+        // both parties re-confirm them at leisure with two matching nominations.
+        _unseatArbiter();
     }
 
     /**
@@ -699,7 +848,14 @@ contract EscrowContract is ReentrancyGuard {
         if (newSeller == BUYER) revert BuyerSellerMustBeDifferent();
         // Prevent collapsing the seller and arbiter into one address, which would
         // give that address 2-of-3 votes and unilateral control of dispute outcomes.
+        // Live whenever an arbiter is seated - i.e. always, except between a sale and a
+        // re-seating, where ARBITER is address(0) and the zero check above already caught
+        // the same case.
         if (newSeller == ARBITER) revert ArbiterMustBeDistinct();
+        // §3.3A1a: and never the fallback arbitrator either. An escrow whose recipient is
+        // the DEFAULT_ARBITER would have no valid fallback, and seating one would collapse
+        // two of the three voting roles into a single address.
+        if (newSeller == DEFAULT_ARBITER) revert PartyCannotBeDefaultArbiter();
 
         address previousSeller = SELLER;
         SELLER = newSeller;
@@ -721,7 +877,174 @@ contract EscrowContract is ReentrancyGuard {
         // 255 cannot create consensus, so no re-check is needed here.
         resolutionVotes[newSeller].buyerPercentage = 255;
 
+        // §3.3A1a: a nomination made by a PREVIOUS recipient must never bind the new one.
+        // This lives here in the shared path rather than in _unseatArbiter because it must
+        // also cover a plain changeRecipient made while the seat is already empty.
+        if (nominatedByRecipient != address(0)) {
+            nominatedByRecipient = address(0);
+        }
+
         emit RecipientChanged(previousSeller, newSeller, block.timestamp);
+    }
+
+    /**
+     * ⚖️  §3.3A — UNSEAT THE INCUMBENT ARBITER (called by transferRecipientFrom ONLY)
+     *
+     * Deliberately NOT called by changeRecipient, and deliberately NOT placed inside the
+     * shared _transferRecipient that both paths use. See transferRecipientFrom for why.
+     */
+    function _unseatArbiter() internal {
+        address previous = ARBITER;
+        ARBITER = address(0);
+        nominatedByBuyer = address(0);
+        nominatedByRecipient = address(0);
+
+        // Covers a sale executed MID-DISPUTE: the transfer is permitted in funded or
+        // disputed state, and the new recipient must get a full window from the moment
+        // they hold the role. For the ordinary funded-state sale the deadline is instead
+        // set later, by raiseDispute, if and when a dispute is actually raised.
+        if (_state == 2) {
+            nominationDeadline = _nominationDeadlineFromNow();
+        }
+
+        emit ArbiterUnseated(previous);
+    }
+
+    /**
+     * Nomination deadline one full window from now, saturating rather than wrapping.
+     * arbiterNominationWindow is caller-chosen and unbounded by design (§3.3A1), so a
+     * near-max value must not truncate the sum back into the past.
+     */
+    function _nominationDeadlineFromNow() internal view returns (uint64) {
+        uint256 deadline = block.timestamp + arbiterNominationWindow;
+        // casting to 'uint64' is safe because the ternary above returns early for any
+        // value that would not fit - that is the entire purpose of this helper
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return deadline > type(uint64).max ? type(uint64).max : uint64(deadline);
+    }
+
+    /**
+     * ⚖️  NOMINATE AN ARBITER FOR A SOLD ESCROW (§3.3A1a)
+     *
+     * Only a sold, currently-unseated escrow accepts nominations. Either disputant may
+     * nominate; when both sides name the SAME address the candidate is seated immediately,
+     * in that same transaction.
+     *
+     * 🔒 WHY THE MATCH REQUIREMENT IS THE WHOLE PROTECTION:
+     *    Seating requires agreement, so either party can veto any candidate by simply not
+     *    matching - and a non-match does not deadlock anything, it falls through to the
+     *    DEFAULT_ARBITER after the window. An LP is therefore never bound by an arbiter
+     *    chosen before they arrived, and can never be outvoted onto one they did not
+     *    personally agree to. That veto, not a curated list, is what prevents collusion,
+     *    which is why this contract has no arbiter registry.
+     *
+     * ⚠️ A candidate is NOT validated for competence. If both parties agree on a contract
+     *    with no submitResolutionVote path, the third voter is seated and permanently
+     *    dead. Buyer and recipient can still settle 2-of-3 between themselves, but the
+     *    tiebreaker is gone until evictArbiter clears it after 30 days of silence.
+     *    Warning users about unknown candidates is a UI responsibility.
+     *
+     * @param candidate The address to nominate. Nominating the unseated incumbent to
+     *        re-confirm them is the expected common case.
+     */
+    function nominateArbiter(address candidate) external initialized {
+        if (ARBITER != address(0)) revert ArbiterAlreadySeated(ARBITER);
+        // Agreement is allowed BEFORE any dispute (settle governance while relations are
+        // good) as well as during one.
+        if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
+        if (msg.sender != BUYER && msg.sender != SELLER) revert NotDisputeParty(msg.sender);
+        // An arbiter who is also a party would hold 2-of-3 alone - the precise failure
+        // initialize guards against. This is the ONLY constraint on a candidate.
+        if (candidate == address(0) || candidate == BUYER || candidate == SELLER) {
+            revert InvalidArbiterCandidate(candidate);
+        }
+
+        // Nominations are mutable until seated: re-nominating overwrites.
+        if (msg.sender == BUYER) {
+            nominatedByBuyer = candidate;
+        } else {
+            nominatedByRecipient = candidate;
+        }
+
+        emit ArbiterNominated(msg.sender, candidate);
+
+        // There is deliberately NO deadline check here: a match is always better than the
+        // fallback, so a late agreement still seats right up until seatDefaultArbiter
+        // actually executes. The deadline's only role is to ENABLE the fallback, never to
+        // block agreement.
+        if (nominatedByBuyer != address(0) && nominatedByBuyer == nominatedByRecipient) {
+            _seatArbiter(candidate);
+        }
+    }
+
+    /**
+     * ⚖️  SEAT THE FALLBACK ARBITRATOR ONCE THE NOMINATION WINDOW LAPSES (§3.3A1a)
+     *
+     * Permissionless by design, mirroring checkAndActivate: it takes no discretion and can
+     * only do the one thing the elapsed window already determined. A zero
+     * arbiterNominationWindow therefore just means the fallback is seatable as soon as a
+     * dispute exists.
+     */
+    function seatDefaultArbiter() external initialized {
+        if (_state != 2) revert ContractMustBeDisputed();
+        if (ARBITER != address(0)) revert ArbiterAlreadySeated(ARBITER);
+        if (block.timestamp <= nominationDeadline) revert NominationWindowStillOpen(nominationDeadline);
+
+        _seatArbiter(DEFAULT_ARBITER);
+    }
+
+    /**
+     * ⚠️  §3.3D — SEATING MUST RESET THE NEW ARBITER'S VOTE.
+     *
+     * A newly seated arbiter's mapping slot defaults to 0, which is a VALID vote meaning
+     * "0% to buyer", i.e. 100% to the seller. Without the reset below, seating would
+     * silently cast a full-to-seller vote on their behalf, and if the seller had already
+     * voted 0 then consensus would fire in the very transaction that seats them. The reset
+     * also covers a re-confirmed incumbent who had already voted before the sale unseated
+     * them mid-dispute - they return to office with a clean slate.
+     */
+    function _seatArbiter(address a) internal {
+        ARBITER = a;
+        resolutionVotes[a].buyerPercentage = 255; // ⚠️ MANDATORY - see above
+        lastArbiterActionAt = uint64(block.timestamp);
+        emit ArbiterSeated(a, a != DEFAULT_ARBITER);
+    }
+
+    /**
+     * ⚖️  EVICT A SEATED-BUT-SILENT ARBITER (§3.3A1a)
+     *
+     * Remedy for the dead or absent seat. Eviction ONLY swaps the third voter - it moves
+     * no funds and closes nothing, so it cannot become a forced-resolution backdoor. After
+     * eviction the ordinary path resumes: match-nominate a replacement (or the same
+     * arbiter again), or let the window lapse and seat the fallback.
+     *
+     * Two deliberate properties:
+     * ✅ It also covers the arbiter who voted once and vanished. A standing figure that
+     *    matches neither party is the same deadlock as silence, and the rolling clock
+     *    (silence since the LAST vote) makes it evictable.
+     * ✅ On an UNSOLD escrow it is the parties' exit from a slow platform Safe: evict, then
+     *    match-nominate a private arbiter of their choosing. If they cannot match, the same
+     *    Safe simply re-seats after the window.
+     *
+     * Accepted cost: a party who dislikes an honest arbiter's standing figure can wait out
+     * the timeout and evict, effectively appealing to the fallback. Bounded (they cannot
+     * choose the replacement unilaterally) and slow by construction.
+     */
+    function evictArbiter() external initialized {
+        if (_state != 2) revert ContractMustBeDisputed();
+        if (ARBITER == address(0)) revert NoArbiterSeated();
+        if (msg.sender != BUYER && msg.sender != SELLER) revert NotDisputeParty(msg.sender);
+        if (block.timestamp <= lastArbiterActionAt + ARBITER_SILENCE_TIMEOUT) {
+            revert ArbiterNotSilent(lastArbiterActionAt);
+        }
+
+        address previous = ARBITER;
+        ARBITER = address(0);
+        nominatedByBuyer = address(0);
+        nominatedByRecipient = address(0);
+        nominationDeadline = _nominationDeadlineFromNow();
+
+        emit ArbiterEvicted(previous);
     }
 
     /**
@@ -756,6 +1079,17 @@ contract EscrowContract is ReentrancyGuard {
         if (block.timestamp >= EXPIRY_TIMESTAMP) revert CannotDisputeAfterExpiry();
 
         _state = 2; // disputed - money is now frozen until resolution
+
+        // §3.3A1a: a dispute on a SOLD escrow (arbiter unseated by the sale) opens the
+        // nomination window here. On an unsold escrow the arbiter is already seated, so
+        // instead start the eviction clock - it must run from the dispute, not from
+        // creation, because an unsold escrow's arbiter may sit quietly for months before
+        // any dispute exists.
+        if (ARBITER == address(0)) {
+            nominationDeadline = _nominationDeadlineFromNow();
+        } else {
+            lastArbiterActionAt = uint64(block.timestamp);
+        }
 
         // 📝 Record this dispute permanently on blockchain
         emit DisputeRaised(block.timestamp);
@@ -823,12 +1157,19 @@ contract EscrowContract is ReentrancyGuard {
         if (_state != 2) revert ContractMustBeDisputed();
         if (consensusReached) revert ConsensusAlreadyReached();
         if (_buyerPercentage > 100) revert InvalidPercentage();
+        // No change needed here for the unseated case: this gates on msg.sender == ARBITER,
+        // and msg.sender can never be the zero address.
         if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != ARBITER) revert NotAuthorizedToVote();
 
         // All parties can vote anytime - votes can be changed until consensus
         // casting to uint8 is safe: _buyerPercentage is bounded to <= 100 above
         // forge-lint: disable-next-line(unsafe-typecast)
         resolutionVotes[msg.sender].buyerPercentage = uint8(_buyerPercentage);
+
+        // §3.3A1a: casting OR changing a vote resets the eviction clock.
+        if (msg.sender == ARBITER) {
+            lastArbiterActionAt = uint64(block.timestamp);
+        }
 
         emit VoteSubmitted(msg.sender, _buyerPercentage);
 
@@ -844,7 +1185,14 @@ contract EscrowContract is ReentrancyGuard {
         // 255 means "not voted" (since valid votes are 0-100)
         bool buyerVoted = (buyerVote != 255);
         bool sellerVoted = (sellerVote != 255);
-        bool adminVoted = (adminVote != 255);
+        // ⚠️ §3.3D: NEVER treat an unseated arbiter as a voter. ARBITER == address(0) is a
+        // live mid-life state after a sale, and resolutionVotes[address(0)] would
+        // otherwise read as a cast vote. Getting this wrong hands any seller the entire
+        // escrow: the seller votes 0, the phantom zero-address "vote" of 0 matches it, and
+        // the seller-plus-admin branch fires for 100% to the seller with no collusion
+        // required at all. The initialize-time write of 255 to the zero address is the
+        // belt to this guard's braces.
+        bool adminVoted = (ARBITER != address(0) && adminVote != 255);
 
         uint256 agreedPercentage = 0; // only read when hasConsensus is set below
         bool hasConsensus = false;
@@ -869,6 +1217,12 @@ contract EscrowContract is ReentrancyGuard {
 
     function _executeResolution(uint256 _buyerPercentage) internal nonReentrant {
         _state = 4; // claimed (resolved) - dispute is now final
+
+        // §3.3C: persist the outcome BEFORE the transfers, so an external contract (the
+        // marketplace, computing an LP's shortfall against a holdback) can read how the
+        // dispute actually resolved. Safe cast: bounded to <= 100 by submitResolutionVote.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        resolvedBuyerPercentage = uint8(_buyerPercentage);
 
         // 💰 Calculate the total money available for BUYER and SELLER
         uint256 escrowAmount;

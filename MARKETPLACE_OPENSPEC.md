@@ -7,6 +7,83 @@
 
 ---
 
+## 0. Build Progress
+
+> **Purpose:** resumable build log. Each row is updated as work lands so an interrupted
+> session can pick up exactly where it stopped. Status values: ⬜ not started · 🟨 in
+> progress · ✅ done · ⏸️ blocked.
+>
+> **Build started:** 2026-08-06 · **Branch:** `marketplace`
+
+### 0.1 Phase status
+
+| # | Item | Spec | Status | Artifact |
+|---|---|---|---|---|
+| 1.1 | `EscrowContract` §3.3 arbiter changes | §3.3A–E | ✅ | `src/EscrowContract.sol` |
+| 1.2 | `EscrowContractFactory` new `initialize` signature | §3.3A1, §3.3E | ✅ | `src/EscrowContractFactory.sol` |
+| 1.3 | Escrow tests | §14.1 | ⬜ | `test/EscrowArbiter.t.sol` |
+| 2.1 | `MarketplaceEscrow` contract | §5, §6 | ⬜ | `src/MarketplaceEscrow.sol` |
+| 2.2 | Marketplace tests | §14.2 | ⬜ | `test/MarketplaceEscrow.t.sol` |
+| 2.3 | Invariant suites | §14.3 | ⬜ | `test/InvariantMarketplace.t.sol` |
+
+### 0.2 Detailed checklist — Phase 1.1 (`EscrowContract` §3.3)
+
+- [x] `DEFAULT_ARBITER` as a true `immutable`, set in the **implementation constructor** (§3.3A1a)
+- [x] `arbiterNominationWindow` storage, written once in `initialize`, **no setter** (§3.3A1)
+- [x] `DEFAULT_NOMINATION_WINDOW = 72 hours`; `0` at initialize → default
+- [x] `resolvedBuyerPercentage` written to `255` in `initialize` (clone storage starts at 0)
+- [x] `_unseatArbiter()` — called by `transferRecipientFrom` **only**, after the role moves (§3.3A1a)
+- [x] `nominateArbiter(address)` — party-only, unseated-only, states 1|2, match seats immediately
+- [x] `seatDefaultArbiter()` — permissionless, disputed + unseated + deadline passed
+- [x] `_seatArbiter(address)` — sets `ARBITER`, **resets their vote to 255**, stamps clock (§3.3D)
+- [x] `evictArbiter()` — party-only, disputed, after `ARBITER_SILENCE_TIMEOUT` (30 days)
+- [x] `lastArbiterActionAt` stamped at: `raiseDispute` (arbiter seated), `_seatArbiter`, arbiter vote
+- [x] `raiseDispute` sets `nominationDeadline` when `ARBITER == address(0)` (§3.3A1a)
+- [x] **§3.3D guard:** `adminVoted = ARBITER != address(0) && adminVote != 255`
+- [x] **§3.3D belt-and-braces:** `resolutionVotes[address(0)] = 255` at `initialize`
+- [x] `_transferRecipient` rejects `DEFAULT_ARBITER`, resets `nominatedByRecipient` (§3.3A1a)
+- [x] `_executeResolution` persists `resolvedBuyerPercentage` **before** transfers (§3.3C)
+- [x] `changeRecipient` does **NOT** unseat (§3.3A)
+- [x] §9 events + errors: `ArbiterUnseated/Nominated/Seated/Evicted`, `NotDisputeParty`, `ArbiterAlreadySeated`, `NoArbiterSeated`, `ArbiterNotSilent`, `NominationWindowStillOpen`, `InvalidArbiterCandidate`
+
+### 0.3 Detailed checklist — Phase 2.1 (`MarketplaceEscrow`)
+
+- [ ] State + constructor (§5.1, §5.1a) incl. ERC-1167 `EXPECTED_ESCROW_CODEHASH` derivation
+- [ ] `createOffer` (§6.1) — 11 steps incl. codehash gate, balance-delta guard, `HoldbackOnResale`
+- [ ] `acceptOffer` (§6.2) — CEI, slot delete before interactions, atomic pull + pay
+- [ ] `rejectOffer` (§6.3) — slot **not** freed
+- [ ] `withdrawFunds` (§6.4) — lazy withdrawability matrix, full-gross refund
+- [ ] Owner surface (§6.5) — `setFeeRate`, `setMinOfferBps`, `setDefaultOfferDuration`, `withdrawFees`, `pause`/`unpause`
+- [ ] `sweepToken` (§6.6) — excess only
+- [ ] `releaseHoldback` (§6.7) — permissionless, single-shot, live beneficiary
+- [ ] Pause asymmetry (§5.2.10): `whenNotPaused` on **exactly** `createOffer` + `acceptOffer`
+- [ ] All §9 events, all §10 errors
+
+### 0.4 Deviations from spec (deliberate, with rationale)
+
+1. **`initialize` also rejects `_buyer == DEFAULT_ARBITER` and `_seller == DEFAULT_ARBITER`**
+   (error `PartyCannotBeDefaultArbiter`). §3.3A1a specifies this rejection only on
+   `_transferRecipient`, but the identical hazard exists at creation: `seatDefaultArbiter`
+   is permissionless, so an escrow initialized with a party equal to the fallback would let
+   anyone collapse two of the three voting roles into one address. The creation `ARBITER`
+   may still be `DEFAULT_ARBITER` — that is the normal platform-created case (§3.3A2a).
+2. **`_nominationDeadlineFromNow()` saturates at `type(uint64).max`** instead of casting
+   `block.timestamp + arbiterNominationWindow` directly. The window is caller-chosen and
+   deliberately unbounded (§3.3A1), so a near-max value would otherwise truncate the sum
+   back into the past and make the fallback instantly seatable. Not exploitable in the
+   attacker's favour (it seats the honest fallback sooner), but wrong, so it is fixed.
+3. **`arbiterNominationWindow` is a `uint64` parameter** on `initialize` and
+   `createEscrowContract`, matching the storage width §3.3A1a specifies rather than taking
+   a `uint256` and narrowing.
+
+### 0.5 Not in this build
+
+- Deploy scripts and `DEPLOYMENT_ADDRESSES.md` entries (§3.4, §16 phase 6) — deploy-day work.
+- The §13.1/13.2 launch parameters — passed at deploy, not baked in.
+- Audit (§16 phase 3), counsel (§13.14), Safe test transaction (§13.8) — external gates.
+
+---
+
 ## 1. Overview
 
 The Stabledrop Liquidity Marketplace enables escrow recipients (sellers) to sell their locked cashflows to liquidity providers (LPs) at a discount via an **atomic, trustless swap**. There is no UI dependency — the contract is fully operable via direct on-chain interaction by any wallet.

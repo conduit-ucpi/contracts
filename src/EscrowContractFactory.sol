@@ -90,6 +90,13 @@ contract EscrowContractFactory {
      * - All contracts have identical security guarantees
      * - Platform can only facilitate - never access escrowed funds
      */
+    /**
+     * @param arbiterNominationWindow Grace period for buyer + recipient to agree a
+     *        replacement arbiter after a marketplace sale unseats the incumbent
+     *        (EscrowContract §3.3A1). Pass 0 to use the escrow's DEFAULT_NOMINATION_WINDOW
+     *        of 72 hours. Per-escrow and IMMUTABLE once set - the escrow exposes no setter,
+     *        which is what lets an LP price the value they see before purchasing.
+     */
     function createEscrowContract(
         address tokenAddress,
         address buyer,
@@ -97,7 +104,8 @@ contract EscrowContractFactory {
         uint256 amount,
         uint256 expiryTimestamp,
         string memory description,
-        address arbiter
+        address arbiter,
+        uint64 arbiterNominationWindow
     ) external returns (address) {
         if (tokenAddress == address(0)) revert InvalidTokenAddress();
         if (buyer == address(0)) revert InvalidBuyerAddress();
@@ -134,7 +142,8 @@ contract EscrowContractFactory {
                 amount,
                 expiryTimestamp,
                 creatorFee, // Platform fee (transparent and upfront)
-                FEE_RECIPIENT // Address that receives the platform fee
+                FEE_RECIPIENT, // Address that receives the platform fee
+                arbiterNominationWindow // §3.3A1 - set once, no setter, 0 = 72h default
             );
 
         EscrowContract newContract = EscrowContract(clone);
