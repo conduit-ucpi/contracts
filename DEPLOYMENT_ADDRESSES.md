@@ -4,7 +4,7 @@ This file tracks all deployed contract addresses across different networks.
 
 ## Base Mainnet (Production)
 
-### Legacy pair (single-recipient escrow) — CURRENT (marketplace-capable)
+### Legacy pair (single-recipient escrow) — ⚠️ SUPERSEDED BY SOURCE, REDEPLOY REQUIRED
 
 Used by **chainservice**. Retains `EXPIRY_TIMESTAMP`, where expiry is load-bearing:
 it gates `claimFunds()`, and `EXPIRY_TIMESTAMP == 0` means instant transfer.
@@ -15,28 +15,39 @@ sale-triggered arbiter reset (`resolvedBuyerPercentage`, nominate/seat/evict, th
 keep their previous signatures** — integrators repoint at the new addresses and
 change no call sites.
 
+> ⚠️ **These addresses are stale as of 2026-08-07.** `EscrowContract` gained a `hasBeenSold`
+> flag (spec §5.3 — the one-reserve rule moved out of the marketplace and onto the escrow),
+> which changes the bytecode and therefore the **clone codehash**. The pair below must be
+> redeployed before the marketplace ships, and chainservice repointed at the new addresses.
+> Backwards compatibility was explicitly waived: escrows on `0x77acD2d…` become a third
+> superseded lineage.
+
 | Contract | Address | BaseScan Link | Deployment Date |
 |----------|---------|---------------|-----------------|
-| EscrowContract (Implementation) | `0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B` | [View on BaseScan](https://basescan.org/address/0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B) | 2026-08-06 |
-| EscrowContractFactory | `0x575AB01251cfc4DB9Ce90A13152a7a616Bd304b9` | [View on BaseScan](https://basescan.org/address/0x575AB01251cfc4DB9Ce90A13152a7a616Bd304b9) | 2026-08-06 |
+| EscrowContract (Implementation) | `0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B` — **redeploy pending** | [View on BaseScan](https://basescan.org/address/0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B) | 2026-08-06 |
+| EscrowContractFactory | `0x575AB01251cfc4DB9Ce90A13152a7a616Bd304b9` — **redeploy pending** | [View on BaseScan](https://basescan.org/address/0x575AB01251cfc4DB9Ce90A13152a7a616Bd304b9) | 2026-08-06 |
 
 **Immutable parameters baked into this implementation** (changing either requires a
 new implementation, hence a new codehash, factory and marketplace):
 
 | Parameter | Value |
 |---|---|
-| `DEFAULT_ARBITER` (fallback arbitrator Safe) | `0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C` |
+| `DEFAULT_ARBITER` (fallback arbitrator Safe) | `0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C` — unchanged by the redeploy |
 | `NOMINATION_WINDOW` | 72 hours (259200s) |
 | `ARBITER_SILENCE_TIMEOUT` | 30 days |
 | `RECIPIENT_APPROVAL_TTL` | 5 minutes |
 
-**ERC-1167 clone codehash for this implementation** — the value `MarketplaceEscrow`
-derives and enforces. Verified two ways (`cast keccak` over the minimal-proxy runtime,
+**ERC-1167 clone codehash for this implementation** — the value `OfferVaultFactory`
+derives and enforces as its provenance gate. Verified two ways (`cast keccak` over the minimal-proxy runtime,
 and the constructor's own derivation):
 
 ```
-0x5c1d3f7f01cbe7c3aa294f7f7d426ad766c7c99513eb563742964c4f22477644
+0x5c1d3f7f01cbe7c3aa294f7f7d426ad766c7c99513eb563742964c4f22477644   ⚠️ STALE
 ```
+
+⚠️ **Recompute this after the redeploy.** It embeds the implementation address, so the
+`hasBeenSold` change invalidates it. `DeployMarketplace.s.sol` logs the value the factory
+actually derives — record that one.
 
 #### Superseded legacy pair (pre-marketplace)
 
@@ -139,9 +150,21 @@ CONTRACT_FACTORY_ADDRESS=0x00b1D1A005022D1f140062Ba5aB0A44788089F88  # Productio
 
 **chainservice/.env**:
 ```bash
-CONTRACT_FACTORY_ADDRESS=0x00b1D1A005022D1f140062Ba5aB0A44788089F88  # Production factory
+CONTRACT_FACTORY_ADDRESS=0x575AB01251cfc4DB9Ce90A13152a7a616Bd304b9  # Marketplace-capable factory
+ESCROW_IMPLEMENTATION_ADDRESS=0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B
+DEFAULT_ARBITER_ADDRESS=0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C  # stabledropAdmin Safe
 USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913  # Base mainnet USDC
 ```
+
+> ⚠️ **`ESCROW_IMPLEMENTATION_ADDRESS` must ship in the same release as the factory repoint**
+> (§15.4 sequencing). chainservice reads `DEFAULT_ARBITER()` from that implementation at
+> startup and passes it explicitly as the creation arbiter on every escrow; a zero arbiter
+> is silently rewritten by the factory to the relayer hot wallet, permanently, per escrow.
+>
+> `DEFAULT_ARBITER_ADDRESS` is optional and acts as an assertion: when set, chainservice
+> refuses to start if it disagrees with the implementation's bytecode. When neither the
+> on-chain read nor the variable yields an address, the service refuses to start rather than
+> defaulting.
 
 **webapp/.env.local**:
 ```bash
@@ -164,19 +187,31 @@ Don't forget to update GitHub repository variables after deployment:
 Spec: `MARKETPLACE_OPENSPEC.md`. Deploy order is load-bearing (§3.4): implementation →
 factory → marketplace.
 
+**Two contracts, deployed in order by `script/DeployMarketplace.s.sol`.** The venue no
+longer pools LP capital (§5.0): the factory holds no tokens at any point, and each offer's
+funds sit in its own `OfferVault` clone.
+
 | Contract | Address | Status |
 |----------|---------|--------|
-| MarketplaceEscrow | _not yet deployed_ | pending — run `script/DeployMarketplace.s.sol` |
+| OfferVault (implementation) | _not yet deployed_ | pending — cloned once per offer |
+| OfferVaultFactory | _not yet deployed_ | pending — the venue and registry |
 
-Constructor inputs when it is deployed:
+Factory constructor inputs when it is deployed:
 
 | Input | Value |
 |---|---|
+| `vaultImplementation` | the OfferVault deployed in the same script |
 | `trustedImplementation` | `0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B` |
 | `initialFeeRateBps` | **TBD** — §13.1 proposes 25–50; hard cap 1000 |
 | `initialMinOfferBps` | 1000 (10%) — §13.12, settled |
 | `initialDefaultOfferDuration` | **TBD** — §13.2 proposes 86400 (24h) |
+| `initialFeeRecipient` | **TBD** — fees are paid here at acceptance, never accrued |
 | `initialOwner` | **TBD** — MUST differ from the `DEFAULT_ARBITER` Safe (§3.3E) |
+
+> Record BOTH addresses. Redeploying the factory later would orphan its `hasBeenSold` /
+> `holdbackVault` registry — existing vaults keep working and their funds stay reachable by
+> their own LP and seller, but a fresh factory would not know which escrows had already been
+> sold, so a second reserve could be stacked on one that already has a live reserve.
 
 > **Inventory reality (§3.4):** the marketplace opens **empty** and fills only from
 > escrows created by factory `0x575AB0…` onward. Escrows from the superseded factory

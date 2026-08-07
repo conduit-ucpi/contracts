@@ -1,8 +1,8 @@
 # Stabledrop Liquidity Marketplace — Contract OpenSpec
 
-**Version:** 0.7.0
-**Date:** 2026-08-06
-**Status:** §3.2 (atomic swap) implemented ✅. **§3.3 (sale-triggered arbiter reset) implemented ✅.** **`MarketplaceEscrow` implemented ✅** (§5/§6). Full suite green: **311 tests, 0 failing**. Build log and deviations: **§0**. The new `EscrowContract` implementation + factory must still ship before the marketplace has any inventory (§3.4). Remaining gates are external, not code: audit (§16 phase 3), counsel (§13.14), the Safe's outstanding test transaction (§13.8), and deploy-day parameters (§13.1/13.2). Test & audit plan: §14. UI & off-chain obligations: §15. Path to production: §16.
+**Version:** 0.9.0
+**Date:** 2026-08-07
+**Status:** §3.2 (atomic swap) implemented ✅. **§3.3 (sale-triggered arbiter reset) implemented ✅.** **Marketplace implemented ✅ as per-offer vaults** (§5.0 — the pooled design was replaced to avoid commingling LP capital; §13.15). Full suite green: **282 tests, 0 failing**. **chainservice migrated onto the new contracts ✅ (§15.4, 263 tests green)** — the platform now holds no dispute power on any escrow it creates. Build log and deviations: **§0**. Remaining gates are external, not code: audit (§16 phase 3), counsel (§13.14), the Safe's outstanding test transaction (§13.8), and deploy-day parameters (§13.1/13.2). Test & audit plan: §14. UI & off-chain obligations: §15. Path to production: §16.
 **Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic. Serves `EscrowContract` clones only — see §3.0.
 
 ---
@@ -26,13 +26,20 @@
 | 1.2 | `EscrowContractFactory` — signature **unchanged** (window is a constant) | §3.3A1, §3.3E | ✅ | `src/EscrowContractFactory.sol` |
 | 1.4 | Escrow + factory deploy hardening & CI wiring | §3.4 | ✅ | `script/DeploymentScript.s.sol`, `.github/workflows/build.yml` |
 | 1.3 | Escrow tests | §14.1 | ✅ | `test/EscrowArbiter.t.sol` + `test/ArbiterNominationWindow.t.sol` |
-| 2.1 | `MarketplaceEscrow` contract | §5, §6 | ✅ | `src/MarketplaceEscrow.sol` |
-| 2.2 | Marketplace tests | §14.2 | ✅ | `test/MarketplaceEscrow.t.sol` |
+| 2.1 | Marketplace contracts (per-offer vaults) | §5.0, §5, §6 | ✅ | `src/OfferVault.sol` + `src/OfferVaultFactory.sol` |
+| 2.2 | Marketplace tests | §14.2 | ✅ | `test/OfferVault.t.sol` (31) |
 | 2.3 | Invariant suites | §14.3 | ✅ | `test/InvariantMarketplace.t.sol` |
-| 2.4 | `MarketplaceEscrow` deploy script | §3.4 step 3 | ✅ | `script/DeployMarketplace.s.sol` |
-| 3.1 | Escrow + factory deployed to Base mainnet | §3.4 steps 1–2 | ✅ | `DEPLOYMENT_ADDRESSES.md` |
-| 3.2 | `MarketplaceEscrow` deployed | §3.4 step 3 | ⬜ | blocked on §13.1/13.2/owner |
-| 4.1 | chainservice migration | **§15.4** | ⬜ | repoint + arbiter change must ship together |
+| 2.4 | Marketplace deploy script | §3.4 step 3 | ✅ | `script/DeployMarketplace.s.sol` — deploys vault impl + factory |
+| 3.1 | Escrow + factory deployed to Base mainnet | §3.4 steps 1–2 | 🟨 | ⚠️ REDEPLOY REQUIRED — `hasBeenSold` changed the bytecode and the clone codehash (§5.0) |
+| 3.2 | Marketplace deployed | §3.4 step 3 | ⬜ | blocked on §13.1/13.2/owner/fee-recipient |
+| 4.1 | chainservice migration | **§15.4** | ✅ | `chainservice/` — see §15.4a for what shipped |
+| 4.2 | contractservice — stop calling the retired admin vote | **§15.5** | ✅ | auto-resolve path + `submitVote` client deleted; 321 tests green |
+| 4.3 | webapp — dispute + arbiter screens | **§15.6b–c** | ⬜ | ⚠️ BLOCKING: no UI settlement path until this ships |
+| 4.4 | ~~subgraph~~ → folded into 4.6 | **§15.3** | ⬜ | settled: chainservice indexes, not a subgraph. ⚠️ LOAD-BEARING — no on-chain offer book exists |
+| 4.5 | webapp — marketplace screens | **§15.6d** | ⬜ | services ready (4.6, 4.7) — now blocked only on the marketplace deploy |
+| 4.6 | chainservice — marketplace API + reconciler | **§15.6a, §15.3a** | ✅ | create-offer + on-demand refresh (no poll), ABIs, push; 275 tests green. Needs `OFFER_VAULT_FACTORY_ADDRESS` at deploy |
+| 4.7 | contractservice — receive & serve the marketplace index | **§15.7** | ✅ | ingest + offer book + user-scoped refresh; 330 tests green |
+| 4.8 | webapp — "refresh from chain" action | **§15.6f** | ⬜ | surface on an LP's offer list; a missed acceptance strands their capital |
 
 **Open decisions blocking nothing but worth settling before audit:** §0.4c M-1 (coupled
 holdback payouts) and L-2 (`renounceOwnership`).
@@ -229,8 +236,9 @@ clone; `NOMINATION_WINDOW` liveness; holdback rounding against `_executeResoluti
 
 - Nothing in the contract or deploy-tooling scope remains. Both deploy scripts exist and
   `DEPLOYMENT_ADDRESSES.md` records the live addresses (§3.4).
-- Still outside this build: the §16 phase 4 off-chain work (chainservice, webapp,
-  subgraph), and the external gates below.
+- **chainservice is now done (§15.4a).** Still outside this build: the rest of §16 phase 4
+  — contractservice's retired-vote caller, webapp dispute screens, subgraph — and the
+  external gates below.
 - The §13.1/13.2 launch parameters — passed at deploy, not baked in.
 - Audit (§16 phase 3), counsel (§13.14), Safe test transaction (§13.8) — external gates.
 
@@ -594,7 +602,7 @@ guaranteed extraction from the LP and would collapse the discount range); resolv
 **median** (strategy-proof, but with polarised parties the median *is* the arbiter's vote,
 i.e. unilateral control with extra steps).
 
-**A2a. Agreed settlements — two party votes, negotiation stays off-chain. (ALL escrows.)**
+**A2a. Agreed settlements — every vote is an on-chain binding offer. (ALL escrows.)**
 Today chainservice settles an agreed dispute by completing the vote pair itself: one party
 casts `submitResolutionVote(X)` on-chain and the platform, holding the arbiter seat with its
 hot wallet, casts the matching vote. **That mechanism is retired everywhere, not only for
@@ -608,23 +616,47 @@ sold escrows** — because of the companion decision:
 > it; unseat-on-sale remains load-bearing for hostile direct clones, whose creator picks
 > their own creation arbiter.)
 
-The flow for **every** dispute, sold or unsold: negotiate off-chain exactly as now; when a
-figure is agreed, the UI prompts **both disputants** to push it on-chain —
-`submitResolutionVote(X)` from each party's own wallet — and consensus fires on the second
-vote, executing the payout in the same transaction. **The arbiter takes no action of any
-kind in an agreed settlement**, seated or not. No new contract code, and the total on-chain
-cost is unchanged from today: two vote transactions — only the second signature moves from
-the platform to the second party. chainservice watches `VoteSubmitted` and prompts the
-outstanding side.
+**There is no off-chain agreement stage.** (Decision, 2026-08-06 — this supersedes the
+earlier "negotiate off-chain, then prompt both parties to ratify" flow.) Every settlement
+figure a disputant names goes **straight on-chain** as `submitResolutionVote(X)` from their
+own wallet, the moment they name it. The contract is the only place agreement is detected:
+`_checkAndExecuteConsensus` runs at the end of *every* vote, so the instant any two of the
+three current votes match, the payout executes in that same transaction.
 
-Gas: both votes route through the existing **gas-sponsorship path** used for all user-wallet
-actions — a party with zero ETH settles fine. The only integration requirement is that the
-vote transaction goes through that path like every other user action (§13.9).
+Rationale: the retired design had the platform mirror the contract's own consensus rule
+off-chain — recording each side's figure, comparing them, then triggering the votes. That is
+duplicated logic whose only possible behaviours are *agree with the chain* or *be wrong*, and
+it created a state ("agreed off-chain, unsettled on-chain") that could persist indefinitely
+and had to be chased. Removing the mirror removes the state.
 
-If a party agrees off-chain but never pushes their vote, there is simply no on-chain
-agreement — the dispute stays open and resolves the way any contested dispute does:
-arbiter adjudication (the Safe on an unsold escrow; the seated or fallback arbiter on a
-sold one, §3.3A1a).
+Consequences, all load-bearing:
+
+- **A submitted number is an offer, not a position.** The contract holds exactly one value per
+  role — the latest — and any two matching values settle immediately and irreversibly. On-chain
+  there is no difference between "I propose 40%" and "I accept 40%". **The UI must therefore
+  present every submission as binding** (§15.1): naming a figure the other side already holds
+  ends the dispute at that figure. A counter-offer thread implying numbers can be floated and
+  refined is a misrepresentation of what the transaction does.
+- **Discussion stays off-chain; only the number goes on-chain.** Messages, evidence and
+  reasoning remain in contractservice. This is the whole of what "negotiation is off-chain"
+  now means.
+- **Votes stay mutable until consensus** (`:1174`), so a party may revise their offer freely.
+  Each revision is another sponsored transaction — cheap, because the slot is already non-zero
+  (a revision costs far less than a first vote).
+- **Any two of three settle, not just buyer-and-seller.** Once an arbiter is seated, a party
+  moving to the arbiter's standing figure ends the dispute without the third party's assent.
+  The arbiter still takes **no action of any kind** in a settlement the two parties reach
+  between themselves.
+- **A party who never votes simply never agrees.** The dispute stays open and resolves as any
+  contested one does — arbiter adjudication (the Safe on an unsold escrow; the seated or
+  fallback arbiter on a sold one, §3.3A1a). There is no deadline (§3.3A2).
+
+Gas: every vote routes through the existing **gas-sponsorship path** used for all user-wallet
+actions — a party with zero ETH settles fine, and no wallet funding step is needed anywhere.
+Measured cost (§15.4a): a first vote is ~28k gas all-in and the settling vote ~99k (worst case
+observed ~160k), the asymmetry being that the settling voter's transaction executes the whole
+payout. At the platform's sponsored rates a fully settled dispute is on the order of a tenth
+of a cent, so the extra transactions from on-chain revisions are not a cost consideration.
 
 > Considered and rejected: a gasless `settleBySignatures(pct, buyerSig, recipientSig)`
 > (EIP-712, permissionless relay — the platform carries the parties' signature bytes but
@@ -868,7 +900,73 @@ There is **no `expireOffer` and no `reclaimRecipient`**: expiry and staleness ar
 
 ---
 
-## 5. Contract: MarketplaceEscrow
+## 5. Contract: the marketplace
+
+> ## ⚠️ ARCHITECTURE CHANGED (v0.9.0, 2026-08-07) — read §5.0 first
+>
+> **The single pooled `MarketplaceEscrow` contract is gone.** It has been replaced by a
+> **factory that deploys one `OfferVault` per offer**. The economics, validation, pricing,
+> holdback semantics and lifecycle below are all UNCHANGED — but every statement about
+> *where funds sit* and *which contract you call* is superseded by **§5.0**.
+>
+> Read §5.1–§5.3 and §6 for the rules, which still hold; read §5.0 for where they now live.
+
+### 5.0 Per-offer vaults — the custody model
+
+**Decision (2026-08-07): the marketplace must not pool user capital.** The pooled design
+held every LP's deposit at one address, kept apart by per-(escrow, LP) accounting. That was
+sound on its own terms — `sweepToken` could only ever reach genuine surplus, and
+`withdrawFunds` was unpausable — but commingling unrelated users' funds at a
+platform-deployed address is a custody question before it is a technical one, and the
+answer is not ours to assume.
+
+**Shape now, mirroring the escrow exactly:**
+
+| | Contract | Holds |
+|---|---|---|
+| Venue | `OfferVaultFactory` | **nothing, ever** — validates, prices, deploys, and keeps the per-escrow registry |
+| One per offer | `OfferVault` (ERC-1167 clone) | exactly one LP's capital, and later that offer's reserve |
+
+- **Creation is permissionless and moves no money**, exactly like `createEscrowContract`:
+  the LP is a **parameter**, not the caller, so chainservice deploys the vault on a user's
+  behalf without gaining any power over the funds. A vault starts `PENDING` and empty.
+- **Only the named LP can fund it** (`fund()`), with their own signature. Before that, the
+  vault is an empty shell and no offer exists in any meaningful sense.
+- **Every function answers to exactly one role**: `fund`/`withdraw` → the LP;
+  `accept`/`reject` → the escrow's current recipient; `releaseHoldback` → the funder or the
+  live beneficiary; `sweep` → the factory owner, and only above what the vault owes.
+- **Fees are paid to `FEE_RECIPIENT` at acceptance**, not accrued. There is no pooled fee
+  balance and therefore no owner-withdrawable balance anywhere in the system.
+- **The seller's §3.2 approval names the individual vault** as operator, not a global venue
+  — the narrowest authority the swap can be granted.
+
+**The factory keeps NO per-escrow or per-offer state.** The one cross-offer fact — whether
+an escrow has already been sold, which decides if a reserve may be set (§5.3) — lives on the
+**escrow itself** as `hasBeenSold`, set by `transferRecipientFrom` and never by
+`changeRecipient` (an OTC rotation is not a sale, the same line §3.3A draws for arbiter
+unseating). Vaults read it straight from the escrow.
+
+That makes the venue **fully redeployable**: a new factory reads the same truth off the same
+escrows, with nothing to migrate and no way to lose the one-reserve guarantee. An earlier
+revision of this design kept `hasBeenSold`/`holdbackVault` in the factory and carried exactly
+that hazard — redeploying the venue would have allowed a second reserve to be stacked on an
+escrow that already had one. The offer book is not kept on-chain either; `OfferCreated`
+events are the index (§15.3 already put discovery off-chain).
+
+⚠️ **This required a new escrow implementation**, since the flag is new storage. Backwards
+compatibility was explicitly waived: escrows on `0x77acD2d…` become a third superseded
+lineage, and chainservice repoints again. See `DEPLOYMENT_ADDRESSES.md`.
+
+**What this costs.** A clone deploy per offer (~45k gas, well under a cent at current Base
+prices), plus one redeploy of the escrow implementation and factory to carry the flag.
+
+**What it buys.** No commingling; blast radius of one offer rather than all of them;
+conservation checkable per contract instead of as a global invariant; and a narrower
+approval at the swap.
+
+> **Still open regardless (§13.15):** whether the *previous* design would have been
+> permissible was never answered by counsel. This change makes the question moot for the
+> marketplace, but the escrow model's own custody position remains counsel's to confirm.
 
 ### 5.1 State
 
@@ -1021,6 +1119,20 @@ the scenario they are engineering, and forfeit it to whoever holds the position 
 ---
 
 ## 6. Functions
+
+> **⚠️ Where these now live (v0.9.0, §5.0).** The rules, validation order, pricing and
+> economics below are unchanged and authoritative. What changed is the contract you call:
+>
+> | Spec function | Now on | Caller |
+> |---|---|---|
+> | §6.1 `createOffer` | `OfferVaultFactory` — takes `lp` as a **parameter**, deploys a vault, **moves no money** | anyone (chainservice in practice) |
+> | — `fund` *(new)* | `OfferVault` — pulls the capital | the named LP only |
+> | §6.2 `acceptOffer` → `accept` | `OfferVault` | the escrow's current recipient |
+> | §6.3 `rejectOffer` → `reject` | `OfferVault` | the escrow's current recipient |
+> | §6.4 `withdrawFunds` → `withdraw` | `OfferVault` | that offer's LP |
+> | §6.7 `releaseHoldback` | `OfferVault` | the funder or the live beneficiary |
+> | §6.5 owner surface | `OfferVaultFactory` | owner — **`withdrawFees` is gone**; fees pay out at acceptance |
+> | §6.6 `sweepToken` | both — factory sweeps its whole balance (it should have none); a vault sweeps only above what it owes | owner |
 
 ### 6.1 `createOffer`
 
@@ -1331,12 +1443,14 @@ error NothingToSweep(address token);                           // §6.6
 6. ~~**Curated arbiter registry**~~ — **settled: there is no registry** (§3.3B). The nomination veto already provides the protection a list would have, since an LP can never buy into a disputed escrow and so is never bound by a selection made before they arrived. Residual: social-engineering resistance is now a **UI responsibility** at the nomination step, not a contract guarantee.
 7. ~~**"Resold" detection**~~ — **moot.** It existed only to scope the registry; with no registry there is no `wasResold` flag and nothing to detect.
 8. ~~**`DEFAULT_ARBITER` multisig**~~ — **created: "stabledropAdmin" Safe `0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C`** (Base, Safe v1.4.1, threshold 2-of-3, signers `0x2956…7F62` / `0x1936…0b05` / `0x431F…b607`, no modules — all verified on-chain 2026-08-05). **Outstanding before the implementation deploys: one test transaction executed at threshold** (nonce is 0 — the 2-of-3 has never actually fired). Note `0x1936…0b05` is also the legacy factory OWNER EOA; acceptable, but its compromise then touches two roles — worth a conscious sign-off. Note the role is **arbitration only**: it never signs escrow creations (chainservice's own hot wallet does those), offers, acceptances, or agreed settlements (§3.3A2a). But since it is now the creation arbiter on every escrow, it adjudicates **every contested dispute platform-wide** — size the signer set and threshold for that volume and responsiveness, not for a rare edge case. No resolution deadline exists (§3.3A2), so latency is an SLA concern, never a fund-safety one. Constraint from §3.3A1a: `DEFAULT_ARBITER` is baked into the implementation bytecode, so rotating it means a whole new implementation + factory + marketplace. **It must be a multisig** (a Safe whose signers can rotate while the address stays fixed) — decide its composition before deploying the implementation, because it is the one address that cannot be changed afterwards.
-9. **Migration** — ~~§3.3 changes `initialize`'s signature and the factory ABI~~ **— no longer true (v0.7.0): the nomination window became a constant, so `initialize` and `createEscrowContract` keep their original signatures and chainservice needs only new ADDRESSES, not new call sites.** What remains is what happens to escrows already live on the current implementation (answer: they stay on their own terms and are permanently invisible to the marketplace, §3.4). **The concrete, post-deploy integration checklist now lives in §15.4** — read that rather than this paragraph. In summary (§3.3A2a): chainservice passes the `DEFAULT_ARBITER` Safe as the creation arbiter (never its hot wallet, and note the factory silently defaults a zero arbiter to `msg.sender`), and retires the complete-the-pair arbiter vote entirely. For **every** dispute it instead watches `VoteSubmitted` and prompts each disputant to push the agreed % on-chain, routing those vote transactions through the existing **gas-sponsorship path** like all other user-wallet actions. Detect "sold" via the `ArbiterUnseated` event where the UI needs to distinguish.
+9. **Migration** — ~~§3.3 changes `initialize`'s signature and the factory ABI~~ **— no longer true (v0.7.0): the nomination window became a constant, so `initialize` and `createEscrowContract` keep their original signatures and chainservice needs only new ADDRESSES, not new call sites.** What remains is what happens to escrows already live on the current implementation (answer: they stay on their own terms and are permanently invisible to the marketplace, §3.4). **✅ Settled (v0.8.0): chainservice shipped this on 2026-08-06 — see §15.4a for what landed.** **The concrete, post-deploy integration checklist lives in §15.4** — read that rather than this paragraph. In summary (§3.3A2a): chainservice passes the `DEFAULT_ARBITER` Safe as the creation arbiter (never its hot wallet, and note the factory silently defaults a zero arbiter to `msg.sender` — which is why the shipped implementation *derives* the address from the implementation's `DEFAULT_ARBITER()` rather than trusting configuration, §15.4a), and retires the complete-the-pair arbiter vote entirely. For **every** dispute it instead watches `VoteSubmitted` and prompts each disputant to push the agreed % on-chain, routing those vote transactions through the existing **gas-sponsorship path** like all other user-wallet actions. Detect "sold" via the `ArbiterUnseated` event where the UI needs to distinguish.
 10. ~~**Fee incidence**~~ — **settled: seller pays, as specified** (§8.5a). LP deposits `X`; seller receives `X − fee − holdback` at acceptance. Simplest to implement, and LPs price the convention into their bids. The UI must show the seller their net figure at bid display and at acceptance.
 11. ~~**`reviseOffer`**~~ — **settled: deferred, confirmed.** A rejected LP re-bids via reject → withdraw → new offer (three transactions; gas-sponsored, so the cost is clicks, not money). Revisit only if real usage shows haggling dominating — that means a marketplace redeploy (offers are short-lived, so migration is a natural wind-down), and any future design must preserve §5.2.4a: revision only by the LP, only on a **rejected** offer, never on a live `OPEN` one.
 12. ~~**Minimum-offer floor**~~ — **settled: owner-configurable `minOfferBps`, launching at 1000 (10%)**, hard cap 10000, new offers only (§5.2.4, §6.5). The fixed 50% floor was rejected: it banned the deep-discount bids §8.1a identifies as the safest LP trades, while the spam it guarded against is harmless on-chain (no enumeration; dust locks the spammer's own capital) and filterable off-chain.
 13. ~~**Emergency pause**~~ — **settled: yes, inflows only** (§5.2.10, §6.5). OZ `Pausable`; `whenNotPaused` on `createOffer` + `acceptOffer`; `withdrawFunds`, `releaseHoldback`, and `rejectOffer` are never pausable. Incident response becomes "stop, let everyone out, fix" instead of "watch". The lever is bounded: it can halt the venue, never touch or trap funds.
 14. **Regulatory perimeter — confirm with counsel.** §3.3A2 is designed so the platform can never move funds alone: the default arbiter is one voter of three, and every settlement requires a *disputing party* to vote the executing figure. That is the property to put in front of an adviser. Dropping the arbiter registry (§3.3B) deliberately narrows the surface: the platform now curates nothing and vets no one, and appears in a dispute only as a fallback third voter that neither party can outvote alone. What still warrants a view is whether being that fallback voter — in the subset of disputes where the parties fail to agree — is itself enough to constitute influence over client funds. Get this confirmed **before** launch: if the answer is no, the fallback has to become something other than the default arbiter, and that is a contract change rather than a policy one.
+
+15. ~~**Pooled custody of LP capital**~~ — **settled by redesign (v0.9.0, §5.0): the marketplace no longer pools funds.** The question §13.14 never asked: the pooled `MarketplaceEscrow` held every LP's deposit at one platform-deployed address, commingled across unrelated users and escrows, apart only by internal accounting. The technical position was defensible — the owner could reach nothing but genuine surplus (`sweepToken` required `balance > owed`), and `withdrawFunds` was structurally unpausable — but *commingling* is a regulatory trigger in its own right in several regimes, independent of who controls the funds. Rather than rest on a legal reading nobody had obtained, the venue was rebuilt as **one `OfferVault` clone per offer**: each LP's capital sits in its own contract, reachable only by that offer's LP or seller, and the factory holds nothing at any point — no funds, and no state either, since the one-reserve fact moved onto the escrow. Fees now pay out to `FEE_RECIPIENT` at acceptance rather than accruing, so no owner-withdrawable balance exists anywhere. **Timing made this cheap** — the marketplace was never deployed, so there was no migration, no live funds and no wasted audit (§16 phase 3 had not run). **Still outstanding for counsel:** this removes the marketplace's commingling question but says nothing about the escrow model itself, where a single escrow holds one deal's funds for two named parties. That, and §13.14's arbitration question, remain the pre-launch legal gates.
 
 ## 14. Test & Audit Plan
 
@@ -1415,13 +1529,30 @@ the UI** during design, and the flows below are load-bearing for user safety. Th
 collects every such obligation so the frontend and chainservice teams have one place to
 build from. Each item cites the section that created it.
 
-> **chainservice engineers: start at §15.4**, which is the concrete post-deploy migration
-> checklist against the now-live contracts.
+> ### Which section is yours
+>
+> | Team | Read | Status |
+> |---|---|---|
+> | **chainservice** | §15.4 (why) + **§15.4a** (what shipped) | ✅ complete — escrow migration and marketplace API both done |
+> | **contractservice** | §15.5 (retired vote) + **§15.7** (marketplace index) | ✅ both complete |
+> | **webapp / front-end** | **§15.6** in full — a–f | ⬜ outstanding · §15.6b–c are **blocking** |
+>
+> **webapp: everything you need is §15.6 of this file.** §15.6a says what is ready to build
+> against, §15.6b–c the dispute and arbiter screens (**start here — nothing settles without
+> them**), §15.6d the marketplace screens, §15.6e every endpoint across both services, §15.6f
+> the refresh action. Request/response detail lives in `chainservice/API_REFERENCE.md` and on
+> contractservice's Swagger UI; §15.1 and §15.2 are the safety obligations those screens carry.
+>
+> §15.1 (disclosures) and §15.2 (choreography) are obligations the *contracts deliberately
+> delegate to the UI*. They are not optional polish: each one replaces a protection that was
+> considered and left out of the contract on purpose, so omitting it removes the protection
+> entirely rather than degrading it.
 
 ### 15.1 Safety-critical disclosures
 
 | Screen | Obligation | Source |
 |---|---|---|
+| Dispute settlement entry (ALL escrows) | The figure being submitted is a **binding offer that pays out on match**, immediately and irreversibly — the contract cannot distinguish a proposal from an acceptance, and any two of the three current votes settle. The other party's (and any seated arbiter's) standing figure must be shown and labelled as the number that settles on match. Presenting this as a revisable negotiating position is the failure mode. | §3.3A2a |
 | Arbiter nomination (sold-escrow dispute) | Warn that **matching an unknown candidate is irreversible** and seats them; declining to match is **always safe** — the default arbiter takes the seat after the window. This replaced the dropped registry: social-engineering resistance is a UI guarantee now, not a contract one. | §3.3B |
 | Seller's offer list + accept confirmation | The headline figure the seller sees MUST be their **net at acceptance** (`offerAmount − fee − holdback`), with the holdback's return-at-settlement explained. A seller shown "10,000" who receives 8,900 reads it as theft. Fee and holdback are separate `OfferCreated` fields precisely so offers can be compared on both. | §8.5a, §13.10, §5.3 |
 | LP bid entry / purchase confirmation | Disclose the **evidence asymmetry** before purchase: an LP inherits a dispute they cannot evidence; their levers are care in agreeing an arbiter, the holdback they set, and short-dated purchases. Surface **time-to-maturity (= remaining dispute window)** as the primary risk metric, and note deeper discounts mechanically reduce attack exposure (`r − d`). | §11, §8.1a |
@@ -1430,17 +1561,93 @@ build from. Each item cites the section that created it.
 ### 15.2 Flow choreography (multi-transaction sequences the UI orchestrates)
 
 - **Accept flow:** tx 1 `approveRecipientTransfer(marketplace, lp)` on the escrow → tx 2 `acceptOffer` on the marketplace, within the **5-minute TTL** (§3.2). On expiry, simply re-prompt — an expired approval is inert and nothing is at risk.
-- **Agreed dispute settlement (ALL escrows):** after off-chain agreement, prompt **both disputants** to `submitResolutionVote(X)`; watch `VoteSubmitted` and chase the outstanding side; route votes through the **gas-sponsorship path** like every other user-wallet action (§3.3A2a, §13.9).
+- **Dispute settlement (ALL escrows):** there is **no off-chain agreement stage** — each disputant's settlement figure goes on-chain as `submitResolutionVote(X)` from their own wallet the moment they name it, and the contract settles the instant any two of the three current votes match (§3.3A2a). Present every submission as **binding**: it is an offer that pays out on match, not a negotiating position. Votes remain revisable until consensus. The UI encodes the call, requests gas via `fund-wallet`, and the user's own provider sends it — chainservice relays nothing, because the wallet stack cannot produce a signed transaction to relay (§15.6b).
 - **Contested sold-escrow dispute:** nomination entry (free-form address + the §15.1 warning); a permissionless "seat default arbiter" action once the window lapses; a "request new arbiter" (`evictArbiter`) action once a seated arbiter has been silent 30 days (§3.3A1a).
 - **LP housekeeping:** expiry, staleness, rejection, and dispute-triggered withdrawability are all **lazy** — nothing on-chain notifies the LP. The indexer must detect each condition and prompt `withdrawFunds`; likewise prompt (or keeper-fire) `releaseHoldback` once the escrow settles — it is permissionless by design (§6.4, §6.7).
 
 ### 15.3 Discovery & indexing (off-chain by design, §12)
 
+> ## ⚠️ NOW LOAD-BEARING, NOT OPTIONAL (v0.9.0)
+>
+> §5.0 removed the on-chain offer book: the marketplace factory keeps **no per-escrow and no
+> per-offer storage**, so there is no way to enumerate offers on-chain. `OfferCreated` carries
+> the vault address and the events are complete and replayable — but **without an indexer
+> there is no offer book at all**. This was a deliberate trade (it removed an unbounded array,
+> an SSTORE per offer, and the venue-redeploy hazard), and the index is the other half of it.
+
 - Subgraph over the §9 marketplace events plus escrow events; the sellable list = new-implementation clones passing the §5.2.2 composite, computed client-side.
-- Offer books from `OfferCreated` / `OfferAccepted` / `OfferRejected` / `FundsWithdrawn`; `ArbiterUnseated` marks an escrow "sold" where dispute flows branch (§13.9).
+- Offer books from `OfferCreated` / `OfferFunded` / `OfferAccepted` / `OfferRejected` / `FundsWithdrawn` / `HoldbackReleased`. `ArbiterUnseated` marks an escrow "sold" where dispute flows branch (§13.9); the escrow's own `hasBeenSold` is the authoritative read (§5.0).
+- **An unfunded vault is not an offer.** `createOffer` deploys an empty shell and only the LP's `fund()` makes it live (§5.0), so index on `OfferFunded`, not `OfferCreated`, when building the book a seller sees. Showing PENDING vaults would advertise offers nobody has committed to.
 - **Listing-level curation is the chokepoint for the §8.1a residual** — the contract stays permissionless, but the UI need not list everything. Tells worth screening: buyer/seller wallets funded from a common source, freshly created parties, listing immediately after funding.
 
+#### 15.3a Two rules for whatever does the indexing
+
+**1. Index for reading. Never for deciding.** An off-chain record may drive display,
+discovery, prompts and notifications. It must never gate anything the contracts also gate —
+whether an offer may be accepted, whether a reserve may be set, whether funds may move. Those
+are enforced atomically on-chain, and `hasBeenSold` was moved onto the escrow (§5.0)
+specifically so that no off-chain party is ever consulted about them. This is §3.3A2a's lesson
+generalised: the moment a mirror gates a decision the chain also gates, there are two answers
+and one of them is wrong.
+
+**2. Derive it from EVENTS, not from UI reports.** Do not build the marketplace index by
+having the webapp tell contractservice what it just did. Every vault function —
+`fund`, `accept`, `reject`, `withdraw`, `releaseHoldback` — is callable directly by its party
+without touching our UI at all; the contracts are fully operable raw (§1). A UI-reported index
+misses all of that silently and diverges without anyone noticing, whereas events miss nothing
+and can be replayed from zero after an outage.
+
+> Note this differs deliberately from §15.6b, where the *UI* reports a settlement vote to
+> contractservice after a successful relay. That is a record of a **conversation** — which
+> figure a party committed to, alongside the discussion that produced it — and it is not used
+> to decide anything. The marketplace index is a mirror of **chain state**, and mirrors must
+> be built from the chain.
+
+**✅ Settled (2026-08-07): chainservice indexes, and pushes to contractservice.** Not a
+subgraph. chainservice is the chain-facing service, already owns `EventParsingService`, the
+ABIs and the RPC configuration, and already pushes to contractservice on other paths — so the
+marketplace index arrives the same way dispute-state discrepancies do. contractservice remains
+the system of record the UI reads; it just never talks to the chain itself.
+
+Consequences worth stating plainly:
+
+- **contractservice never becomes chain-aware.** It receives, stores and serves. No RPC, no
+  ABI, no log parsing — which is also why §15.3a rule 1 is easy to keep: it holds a mirror it
+  cannot mistake for authority.
+- **chainservice owns replay.** Because the index is event-derived (rule 2), chainservice must
+  be able to rebuild it from any block — an outage, a redeploy of contractservice, or a bug in
+  the push path must all be recoverable by re-reading the chain. chainservice has **no durable
+  storage** (its only cache is per-process Caffeine), so it keeps no cursor and no record:
+  every read states its own range, and a repeat is harmless because the push is idempotent.
+
+**✅ Reconciliation is ON DEMAND, not polled (decision, 2026-08-07).** The index is fed by the
+UI reporting each action once it lands on-chain; a chain read is the *reconciler*, not the
+primary feed. A background poll would therefore spend almost all of its time rediscovering
+what contractservice already knows — the only thing a read uniquely catches is activity that
+bypassed the UI, which the contracts permit (§1) but which is uncommon.
+
+So the UI carries a **"refresh from chain"** action, and contractservice supplies the escrows
+it believes are live (funded, unexpired) with roughly when each became relevant.
+
+- **The escrow list is what makes this cheap.** `escrowContract` is an indexed parameter on all
+  six marketplace events, so the list becomes a **topic-1 filter**: the node returns logs for
+  those escrows only, rather than every marketplace log in the range. A narrow question
+  instead of a broad one.
+- **⚠️ The staleness that costs money is a missed ACCEPTANCE**, not a missed offer. An
+  acceptance makes every *other* offer on that escrow stale and withdrawable at once, and those
+  LPs have capital they could recover but do not know it. Surface the refresh where that
+  matters — an LP's own offer list — not only on an admin screen.
+- Date bounds may be approximate: the block estimate deliberately **errs backwards**, since
+  starting early costs a few log reads whereas starting late silently misses events.
+- **The push must be idempotent.** Re-indexing the same block range must not duplicate offers
+  or double-apply state; key on `(vault address, event)` rather than on arrival order.
+
 ### 15.4 chainservice migration checklist (concrete, post-deploy)
+
+> **✅ Shipped 2026-08-06.** Every item below is implemented; **§15.4a records what landed**,
+> including the one place the implementation deliberately improved on item 1. This section is
+> kept as written because it is the rationale — the *why* behind each change, and the
+> reference for anyone auditing whether the migration was done correctly.
 
 The new implementation and factory are live (§3.4). This is the exact integration work
 required to move chainservice onto them. Items 1–3 apply to **every escrow chainservice
@@ -1475,12 +1682,17 @@ Today an agreed dispute is settled by one party voting on-chain and chainservice
 matching vote from the arbiter seat. **That mechanism is gone** — a 2-of-3 Safe cannot act as
 an automated vote-completer.
 
-Replacement flow, for **every** dispute, sold or unsold: negotiate off-chain exactly as now;
-once a figure is agreed, prompt **both** disputants to call `submitResolutionVote(X)` from
-their own wallets. Consensus fires on the second vote and executes the payout in the same
-transaction. Watch `VoteSubmitted` and chase the outstanding side. The arbiter takes **no
-action of any kind** in an agreed settlement. On-chain cost is unchanged — two vote
-transactions; only the second signature moves from the platform to the second party.
+Replacement flow, for **every** dispute, sold or unsold: each disputant calls
+`submitResolutionVote(X)` from their own wallet **when they name a figure** — there is no
+off-chain agreement stage and nothing off-chain detects agreement (§3.3A2a, revised
+2026-08-06). The contract settles the instant any two of the three current votes match,
+executing the payout in that same transaction. The arbiter takes **no action of any kind** in
+a settlement the parties reach between themselves.
+
+> ⚠️ Superseded wording: an earlier revision of this item said "negotiate off-chain, then
+> prompt both disputants to ratify, and chase the outstanding side." That describes the
+> mirror-the-contract design that §3.3A2a removed — there is no agreed-but-unsettled state to
+> chase any more, because a matching figure settles on submission.
 
 **3. Route those votes through the existing gas-sponsorship path**, like every other
 user-wallet action, so a disputant holding zero ETH can still settle.
@@ -1535,6 +1747,507 @@ More broadly: the deployed contracts are **inert until chainservice repoints** �
 exists on them until then. That makes the repoint, not the deploy, the real point of no
 return, and the reason §16 phase 3 (audit) should clear first.
 
+### 15.4a What shipped (chainservice, 2026-08-06)
+
+Build green: **263 tests, 0 failing**. Mapping from the §15.4 checklist to the code:
+
+| §15.4 | Landed as |
+|---|---|
+| 1. Safe as creation arbiter | `DefaultArbiterResolver` + `EscrowTransactionService.createContract` — see the amendment below |
+| 2. Retire complete-the-pair | `VoteService` deleted; `POST /api/vote/submit` now returns **410 Gone** naming the replacement |
+| 3. Sponsored disputant votes | ⚠️ **corrected 2026-08-07** — relay endpoints were built, then removed as unusable: embedded wallets expose no raw signing. The existing `fund-wallet` path already sponsors these; the UI funds and sends (§15.6b) |
+| 4. `ARBITER()` may be `address(0)` | `ArbiterQueryService` reports an empty seat as unseated, never as an error or a mismatch |
+| 5. Two cohorts | `detectCohort` probes `NOMINATION_WINDOW()`; a legacy escrow is offered no §3.3 action |
+| New reads | `GET /api/chain/contract/{addr}/arbiter` — seat, nominations, eviction clock, `resolvedBuyerPercentage`, cohort, and per-action availability flags |
+| New events | `ArbiterUnseated` / `Nominated` / `Seated` / `Evicted` indexed; `ArbiterUnseated` also answers "has this escrow been sold" via log query |
+| New user actions | `POST /api/chain/nominate-arbiter`, `/evict-arbiter` (user-signed, sponsored) and `/seat-default-arbiter` (relayer-fired — permissionless on-chain, so no signature is needed and none is privileged) |
+
+> **On item 5 — no backward compatibility is being built** (decision, 2026-08-06). Cohort
+> detection ships because it costs one `eth_call` and makes the `can*` flags correct for free,
+> but **no consumer should branch on it**: a legacy escrow can never be sold (§5.2.2 restricts
+> the marketplace to the new codehash), so it never reaches an unseated seat or an open
+> nomination window, and the §3.3 actions are unreachable on it by construction rather than by
+> our checking. Legacy escrows keep working on the unchanged flows and are otherwise out of
+> scope — see §15.6.
+
+#### Amendment to item 1 — derive the Safe, do not configure it
+
+§15.4 item 1 says "Pass `0x9bB8e809…` explicitly." That is correct but understates the
+failure mode it is guarding, because it substitutes one silent error for another: a
+configured address that is well-formed but **wrong** passes every validation and produces
+permanently mis-arbitered escrows, undetectable until a dispute arrives.
+
+Two distinct addresses are involved, and conflating them is the trap:
+
+- **`DEFAULT_ARBITER`** is an `immutable` in the implementation's bytecode, shared by every
+  clone, and acts *only* as the fallback seated by `seatDefaultArbiter()`.
+- **`ARBITER`** is ordinary per-clone storage, set from the 7th argument of
+  `createEscrowContract`. Nothing in the bytecode ties it to `DEFAULT_ARBITER`.
+
+They coincide on our escrows purely because we choose to pass the same value. Omitting the
+argument does not fall back to the immutable: `initialize` reverts on a zero arbiter, so the
+factory substitutes `msg.sender` — our relayer — *before* `initialize` sees it.
+
+chainservice therefore **reads `DEFAULT_ARBITER()` from the configured implementation at
+startup** and passes that as the creation arbiter, deriving the per-escrow value from the
+immutable one rather than restating it. `DEFAULT_ARBITER_ADDRESS` remains supported but is
+now an **assertion, not a setting**: when present it must agree with the bytecode or the
+service refuses to start. If neither the on-chain read nor the variable yields an address,
+the service refuses to start rather than defaulting to anything.
+
+Consequence for §16 phase 7: the load-bearing deploy variable is
+`ESCROW_IMPLEMENTATION_ADDRESS`, not `DEFAULT_ARBITER_ADDRESS`.
+
+#### Also caught during the migration
+
+- **`ArbiterMustBeDistinct` is a new factory error** (arbiter equal to buyer or seller).
+  chainservice pre-checks it so callers get a readable message rather than an opaque revert.
+- **A caller-supplied arbiter override was retained** at the platform's decision, but an
+  explicit zero address now resolves to the Safe rather than being forwarded — zero is never
+  a legitimate override value, only the factory's substitution trigger. No current caller
+  exercises the override (the webapp omits the field when falsy).
+- **Two dead call sites surfaced** once the ABI was refreshed against the live
+  implementation: `resolveDispute(uint256,uint256)` and `USDC_TOKEN()` exist in no deployed
+  ABI and threw before reaching the chain. The latter was repointed to `tokenAddress()`; the
+  former belonged to the arbiter-resolution path that item 2 retires.
+
+#### Knock-on, not yet done
+
+Retiring the admin vote breaks `contractservice`'s auto-resolve path. **See §15.5** — that
+change is required before agreed settlements complete on-chain again. Tracked as §0.1 row 4.2.
+
+### 15.5 ⚠️ contractservice — required change
+
+> **✅ Done 2026-08-06.** `checkAndAutoResolveIfAgreed` and its call site are removed, as are
+> `ChainServiceClient.submitVote` and the `VoteSubmitRequest`/`VoteResponse` models — so the
+> retired endpoint is now unreachable by construction rather than by discipline. A regression
+> test (`matching refund percentages record the dispute without triggering settlement`) pins
+> the intent: cache invalidation is the only chainservice call a dispute may make. 321 tests
+> green. The section below is retained as the rationale.
+
+**What changed.** chainservice's `POST /api/vote/submit` is **retired** and now returns
+**410 Gone**. It used to complete a 2-of-3 vote pair: when both parties agreed a figure
+off-chain, one of them voted from their own wallet and the platform cast the matching vote
+from the arbiter seat. The platform no longer holds that seat on any escrow (§3.3A2a), and
+the Safe that does cannot act as an automated vote-completer.
+
+**What breaks.** contractservice calls that endpoint from its auto-resolution path — the one
+that fires when both parties' recorded refund percentages match. That call now always fails.
+It fails safely: the error is logged, nothing is left half-written, and no funds are at risk.
+But **the settlement never reaches the chain**, so a dispute both parties have agreed will
+sit unresolved with the money still locked.
+
+**The change is a deletion, not a rewrite** (decision, 2026-08-06 — §3.3A2a). Do not rebuild
+the auto-resolve path to prompt both parties. **Remove contractservice from the settlement
+path entirely.** Each disputant's figure now goes straight on-chain when they name it, and the
+contract detects consensus itself — `_checkAndExecuteConsensus` runs on every vote, so any two
+matching current votes settle in that same transaction.
+
+**What has to be true afterwards:**
+
+- contractservice **records and compares nothing** for the purpose of settling. Matching
+  percentages held off-chain trigger no action, because by the time two figures match on-chain
+  the escrow has already paid out.
+- No agreement detection, no vote triggering, no chasing an outstanding side. All three were
+  mirroring a rule the contract already enforces; keeping any of them reintroduces a state that
+  can disagree with the chain.
+- The platform submits **nothing** and needs no wallet in this flow.
+- **The chain is the sole source of truth for settlement status.** Read it (or the
+  `DisputeResolved` / `VoteSubmitted` events) rather than inferring from your own records.
+
+**What contractservice keeps.** Everything that is genuinely off-chain: the dispute record,
+the discussion and evidence between the parties, and notifications. §3.3A2a's "negotiation
+stays off-chain" now means exactly this — the conversation is yours, the number is the chain's.
+
+**Every party can settle — there is no wallet-funding problem to solve here.** Once both sides
+have agreed, both can push their own vote to the chain, because these votes go through the
+**same gas-sponsorship path the webapp already uses for every other user-wallet action**
+(deposit, claim, raise-dispute): the user signs, the platform relays and pays the gas. This is
+not a new mechanism and needs no new plumbing — a disputant holding zero ETH settles exactly
+like one holding plenty. Do not design around funding user wallets.
+
+**What chainservice already provides.** The relay endpoint
+(`POST /api/chain/submit-resolution-vote`), the sponsorship, and the on-chain reads needed to
+tell whether a given party has voted (`GET /api/chain/contract/{addr}/arbiter`, plus the
+`VoteSubmitted` event). No further chainservice work is expected — if something is missing,
+raise it rather than working around it.
+
+**Sequencing.** chainservice can deploy first; this is not a coordinated cutover. But between
+that deploy and this change, agreed disputes will stall, so keep the gap short or hold both.
+Nothing is corrupted by the gap — the same disputes settle normally once both parties vote.
+
+The user-facing half of this flow — actually getting each disputant to sign — is **§15.6**.
+
+### 15.6 ⚠️ webapp / front-end — build brief
+
+> **For the front-end team.** Same footing as §15.5: what has to exist and what must be true,
+> not how to build it. §15.1 (disclosures) and §15.2 (choreography) are the obligations; this
+> section collects them into one buildable brief and adds what the services actually expose.
+>
+> **Read §15.6a first if you are planning the work** — it says what is ready to build against
+> and what is not, and the two halves have very different readiness.
+
+#### 15.6a What is ready, and what is not
+
+**Ready now — the dispute and arbiter surface (§15.6b, §15.6c).** The contracts are deployed,
+chainservice is migrated (§15.4a) and every endpoint named below exists and is tested. This is
+also the **blocking** work: until it ships, disputes on the new implementation cannot be
+settled through the UI at all, because the platform no longer settles them for anyone.
+
+**Also required before §15.6d is usable — the indexer (§15.3).** The marketplace factory keeps
+no on-chain offer book, so offers are discoverable only from events. Two rules govern whatever
+does that indexing (§15.3a): index for reading and never for deciding, and derive it from
+events rather than from UI reports — every vault function is callable directly by its party
+without touching our UI.
+
+**Not ready — the marketplace surface (§15.6d).** The marketplace is **not deployed** (§0.1
+row 3.2), and **chainservice has no marketplace endpoints yet** — everything it gained in
+§15.4 concerns the escrow and its arbiter seat. §15.6d is design-ready but not build-ready.
+
+**✅ The architecture is settled, though (2026-08-07): chainservice mediates everything.** The
+marketplace uses the same model as the escrow, end to end:
+
+| Step | Who | How |
+|---|---|---|
+| Deploy an offer vault | **chainservice**, from user activity in the UI | `createOffer(escrow, lp, …)` from the relayer — permissionless, LP is a parameter, moves no money |
+| Fund / accept / reject / withdraw / release | **the party**, from their own wallet | the UI encodes the call, `fund-wallet` supplies the gas, the user's provider sends it — **chainservice relays nothing** |
+| Offer book and state | **chainservice indexes events**, pushes to contractservice (§15.3a) | the UI reads contractservice, never the chain |
+
+So the webapp calls marketplace contracts **directly** for the five party actions — it already
+holds an RPC and encodes calldata for escrows today, and the wallet stack leaves no
+alternative (§15.6b). chainservice's role is the three things the UI cannot do for itself:
+deploy the vault, supply gas, and index.
+
+**What chainservice still needs building** (none of it blocked by the deploy — addresses are
+config, as they are for the escrow factory): a `create-offer` endpoint, marketplace ABIs, event
+indexing for
+`OfferCreated`/`OfferFunded`/`OfferAccepted`/`OfferRejected`/`FundsWithdrawn`/`HoldbackReleased`,
+and the push to contractservice. **No relays** — `fund-wallet` already covers the party actions.
+Tracked as §0.1 row 4.6.
+
+Sequence accordingly: §15.6b → §15.6c → row 4.6 (chainservice marketplace API + indexer) → §15.6d.
+
+#### 15.6b Dispute settlement — the votes
+
+**Every settlement figure is now an on-chain transaction, signed by the user.** There is no
+off-chain agreement stage any more (§3.3A2a): a disputant does not "propose" a number to the
+platform and get prompted to ratify it later. The moment they name a figure, it goes on-chain
+as `submitResolutionVote(X)` from their own wallet, and if it matches what the other side
+already holds, the escrow pays out in that same transaction. There is no separate "finalise"
+step to build — and nothing to build for detecting agreement, because the contract does it.
+
+> ### ⚠️ The single most important thing on this screen
+>
+> **A submitted figure is a binding offer, not a negotiating position.** The contract stores
+> one value per party — the latest — and settles the instant any two of the three match. It
+> cannot tell "I propose 40%" from "I accept 40%", because on-chain they are the same
+> transaction.
+>
+> - ✅ Frame it as: *"Submit your settlement figure. If it matches the other party's, the
+>   escrow pays out immediately and this cannot be undone."*
+> - ❌ Do **not** build a slider, counter-offer thread, or anything implying a number can be
+>   floated and refined without consequence. A user who types the other side's current figure
+>   as an opening anchor has just ended the dispute at that figure.
+>
+> Show the other party's current standing figure prominently, and label it as the number that
+> settles on match. Once an arbiter is seated their figure counts too — a party matching the
+> **arbiter's** figure settles the dispute without the third party's assent (any two of three).
+
+Figures stay revisable until consensus, so a user may replace their own offer; each revision
+is another signature and another sponsored transaction. Keep the *discussion* — messages,
+evidence, reasoning — off-chain in contractservice. Only the number goes on-chain.
+
+**What you implement, per submitted figure — this is the existing `fundAndSendTransaction`
+pattern, not a new one:**
+
+1. Encode `submitResolutionVote(buyerPercentage)` against the escrow address.
+2. Call `web3Service.fundAndSendTransaction({ to: escrow, data })`, which already:
+   estimates gas against the RPC, applies the funding buffer, calls
+   `POST /api/chain/fund-wallet` so chainservice moves enough **ETH into the user's wallet**,
+   and then sends the transaction through the user's own provider.
+
+> ⚠️ **chainservice does NOT relay transactions, and cannot.** Embedded wallet providers
+> (Farcaster, Dynamic, WalletConnect) do not expose raw transaction signing, and calling
+> `getSigner()` after connection is forbidden on them — so there is no signed transaction to
+> hand over. Gas sponsorship works by **funding the wallet first**; the user's provider then
+> broadcasts. Any endpoint asking you for a `signedTransaction` is the wrong shape and should
+> not exist.
+
+`fund-wallet` takes a wei amount rather than an operation name, so it already covers this with
+**no new chainservice endpoint**. `Web3Service.detectTransactionType` also already special-cases
+`submitResolutionVote` with a 1.5× funding buffer and a 300k fallback estimate — worth checking
+those still hold once the settling vote's real cost is measured on the new implementation.
+
+**Record the figure with contractservice only after the vote lands on-chain.** The order is
+fixed: user names a figure → user **signs** → the relay returns `success: true` → *then*
+contractservice is told. Never at the point of typing, never when the wallet prompt opens,
+never optimistically alongside the relay call. A declined signature or a failed transaction
+means **nothing happened on-chain**, and contractservice must hold no record suggesting
+otherwise — its dispute record is a record of what happened, not of what was intended. Getting
+this backwards puts "both parties agreed at 40%" in front of users while the chain holds one
+vote and the funds stay locked, which is precisely the drift §3.3A2a was restructured to
+eliminate. A cancelled signature warrants no record at all.
+
+**Estimate gas per transaction, not per flow.** `fundAndSendTransaction` estimates each call
+against the RPC, which is correct — but the two votes are **not** symmetric and the fallbacks
+must reflect that: a first vote is ~28k gas all-in, while the vote that triggers consensus is
+~99k (worst case observed ~160k), because that transaction executes the entire payout. A
+funding figure derived from a first vote and reused will strand the settling vote out of gas,
+which is precisely the transaction that moves the money.
+
+**What must be true for the user:**
+
+- Settlement is not done when one side has submitted. Show clearly that an offer is standing
+  and unmatched. There is no on-chain deadline, so a dispute can sit indefinitely with two
+  non-matching figures — surface that state rather than implying something is in progress.
+- Matching is **exact**: two different percentages are two standing offers, not a settlement.
+- Treat the chain as the source of truth for "has this settled" — read state or the
+  `DisputeResolved` / `VoteSubmitted` events. Do not infer it from your own records.
+
+#### 15.6c Arbiter seat screens — sold escrows only
+
+**The same fund-then-send shape covers the rest of the dispute surface** (§15.2), so build it
+once: `nominateArbiter(candidate)` and `evictArbiter()` are encoded and sent exactly like the
+vote, with no chainservice endpoint involved beyond `fund-wallet`.
+
+`POST /api/chain/seat-default-arbiter` is the one exception, and the one place chainservice
+does send a transaction: the call is permissionless on-chain, so the platform fires it from its
+own relayer. **No signature and no user wallet** — just the escrow address.
+
+These screens exist because a marketplace sale empties the arbiter seat (§3.3A). Three actions,
+each gated by a flag from the state read below:
+
+| Action | When it appears | What it does |
+|---|---|---|
+| **Nominate** an arbiter | seat empty, escrow funded or disputed | buyer and current recipient each name a candidate; **matching names seat that candidate instantly** |
+| **Seat the default arbiter** | seat empty, disputed, 72h nomination window lapsed | anyone may fire it; seats the `DEFAULT_ARBITER` Safe |
+| **Request a new arbiter** (`evictArbiter`) | seat filled, disputed, arbiter silent 30 days | clears the seat and reopens nominations; **moves no funds** |
+
+A late matching nomination still wins right up until the default-arbiter transaction actually
+executes, so a nomination racing a seat-default is an ordinary race, not an error — if it
+reverts, re-read the state and re-render.
+
+**Drive the arbiter screens off `GET /api/chain/contract/{contractAddress}/arbiter`**, which
+returns the seat state, pending nominations, the eviction clock, and a `can*` flag per action.
+Show a control when its flag is true. That is the whole rule — you do not need to reason about
+which implementation an escrow is a clone of.
+
+> **No backward compatibility is required here** (decision, 2026-08-06). Escrows predating the
+> marketplace implementation lack the §3.3 arbiter surface entirely, but they also **cannot
+> ever reach the state where it is used**: the marketplace only accepts clones matching the new
+> codehash (§5.2.2), so a legacy escrow can never be sold, never has its arbiter unseated, and
+> never opens a nomination window. The arbiter screens are reachable only on sold escrows,
+> which are necessarily new-implementation ones. The response still carries a `cohort` field
+> and the `can*` flags are false for legacy escrows, so the correct behaviour falls out without
+> a special case — but do not build legacy-specific UI, and do not treat legacy escrows as a
+> migration problem. Their ordinary flows (fund, claim, dispute, vote) are unaffected and use
+> the same endpoints as everything else.
+
+**Don't forget §15.1.** The nomination screen carries a safety-critical warning that matching
+an unknown candidate is irreversible and that declining to match is always safe. That warning
+is a UI guarantee, not a contract one — there is nothing on-chain to fall back on if it is
+omitted. Nomination is a **free-form address entry**: there is no arbiter registry and no
+validation beyond "not a party to the escrow", so the warning is the entire protection.
+
+#### 15.6d Marketplace screens — design-ready, chainservice ready, contract not deployed
+
+Read §15.6a before starting. **chainservice is done** (row 4.6): `create-offer` and `refresh`
+exist and are tested. What is still missing is the **contract deploy** (row 3.2) and
+**contractservice's receiver** (row 4.7, §15.7) — until the latter lands there is nowhere for
+the offer book to be stored or read from.
+
+**Making an offer is now two transactions** (§5.0), mirroring create-then-deposit on an
+escrow: the platform deploys the LP's `OfferVault` (no money moves, no signature from the
+LP), then the **LP signs `fund()`** on that vault to put the capital in. An unfunded vault
+is not an offer — do not show it in a book until it is funded.
+
+**The accept flow is two transactions with a five-minute fuse** (§3.2, §15.2):
+
+1. `approveRecipientTransfer(vaultAddress, lp)` on the **escrow** — note the operator is
+   **that offer's own vault**, not a global venue
+2. `accept()` on the **vault**, within **5 minutes** of step 1
+
+Both are ordinary fund-then-send calls from the seller's own wallet (§15.6b); neither goes
+through a chainservice relay.
+
+If the window lapses, just re-prompt. An expired approval is inert and nothing is at risk —
+so treat expiry as a retry, never as an error state needing recovery. Both steps are
+user-signed and belong on the same sponsorship path as everything else.
+
+**Three disclosures are load-bearing** (§15.1), each delegated from contract to UI by design:
+
+- **Seller, on the offer list and the accept confirmation.** The headline number must be their
+  **net at acceptance** — `offerAmount − fee − holdback` — with the holdback's return at
+  settlement explained. A seller shown "10,000" who receives 8,900 reads it as theft. Fee and
+  holdback are separate `OfferCreated` fields precisely so offers can be compared on both.
+- **LP, at bid entry and purchase confirmation.** Disclose the **evidence asymmetry**: an LP
+  inherits a dispute they cannot evidence. Their only levers are care in agreeing an arbiter,
+  the holdback they set, and short-dated purchases. Surface **time to maturity (= remaining
+  dispute window)** as the primary risk metric, and note that deeper discounts mechanically
+  reduce attack exposure.
+- **LP buying a previously-sold escrow.** Show the **existing holdback** (amount and funder) —
+  the reserve travels with the position and the new buyer becomes its beneficiary.
+
+**Housekeeping is lazy — nothing on-chain notifies anyone** (§6.4, §6.7, §15.2). Expiry,
+staleness, rejection and dispute-triggered withdrawability all require the UI (or indexer) to
+detect the condition and prompt `withdraw()` on the LP's vault. An LP whose funds are
+withdrawable and who is never told simply never withdraws.
+
+⚠️ **`releaseHoldback` is no longer keeper-firable.** In the per-offer model it answers only
+to the reserve's funder or the live beneficiary (§5.0), so nobody can sweep up on the
+parties' behalf. §15.2's "prompt or keeper-fire" is therefore **prompt-only**: the UI must
+detect a settled escrow with a live reserve and tell them, or the reserve sits there. Find live reserves from `OfferAccepted` events.
+
+**Listing curation is a UI responsibility, not a contract one** (§15.3). The contract stays
+permissionless, but you need not list everything. Tells worth screening: buyer and seller
+wallets funded from a common source, freshly created parties, listing immediately after
+funding. This is the chokepoint for the §8.1a self-dealt-escrow residual — the contract's
+protections bound the damage, curation is what avoids the encounter.
+
+#### 15.6e Endpoints you have today
+
+**Two services, and the split matters.** You send transactions via **chainservice** (or your own
+wallet, funded by it) and you read state from **contractservice**. You never read the chain
+directly for marketplace data, and you never call chainservice for an offer book.
+
+**chainservice — doing things**
+
+| Purpose | How |
+|---|---|
+| Submit a settlement figure | encode + `fundAndSendTransaction` — **no endpoint** |
+| Nominate an arbiter | encode + `fundAndSendTransaction` — **no endpoint** |
+| Evict a silent arbiter | encode + `fundAndSendTransaction` — **no endpoint** |
+| Fund / accept / reject / withdraw / release an offer | encode + `fundAndSendTransaction` — **no endpoint** |
+| Gas for any of the above | `POST /api/chain/fund-wallet` `{walletAddress, totalAmountNeededWei}` |
+| Create an offer vault for an LP | `POST /api/chain/marketplace/create-offer` — returns the `vaultAddress` the LP then funds |
+| Seat the default arbiter | `POST /api/chain/seat-default-arbiter` — relayer-fired, no signature |
+| Read arbiter seat state + action flags | `GET /api/chain/contract/{address}/arbiter` |
+| Raise a dispute, deposit, claim | unchanged — same fund-then-send path you already use |
+
+**contractservice — reading things**
+
+| Purpose | How |
+|---|---|
+| A seller's offer book for one escrow | `GET /api/marketplace/escrows/{escrowContract}/offers` |
+| An LP's own offers, across escrows | `GET /api/marketplace/lps/{lpAddress}/offers` |
+| Refresh from chain (§15.6f) | `POST /api/marketplace/refresh` — user-authenticated, scoped to the caller |
+| Contracts, disputes, notes | unchanged |
+
+**Reading the offer view.** Each offer carries `status` — `PENDING`, `OPEN`, `ACCEPTED`,
+`REJECTED`, `WITHDRAWN`, `RELEASED` — plus a separate `expired` boolean.
+
+- ⚠️ **`PENDING` is not an offer.** The vault has been deployed but the LP has not funded it
+  (§5.0). Do not show these in a seller's book: it would advertise offers nobody has committed
+  to. They become `OPEN` on funding.
+- ⚠️ **`expired` is computed, not observed.** An offer lapsing emits no on-chain event, so
+  nothing will ever arrive to announce it. An `OPEN` offer with `expired: true` is the LP's cue
+  to withdraw.
+- `lastReconciledAt` on the book is when that escrow was last checked against the chain — use it
+  to distinguish "no offers" from "no offers as of an hour ago".
+
+Full request and response shapes: `chainservice/API_REFERENCE.md`. contractservice's are on its
+Swagger UI, and the rationale behind them is §15.7.
+
+**Only three chainservice endpoints are new**, because party actions do not need one — the UI
+funds and sends. An earlier draft specified relay endpoints taking a `signedTransaction`; they
+were built, found to be unusable by the wallet stack, and removed.
+
+#### 15.6f "Refresh from chain" — a user-facing action, not an admin tool
+
+There is **no background poll**. contractservice's marketplace index is fed by the UI reporting
+each action once it lands on-chain, and a chain read is the reconciler that catches whatever
+bypassed the UI (§15.3a). That read happens when a user asks for it.
+
+**What you call:** `POST /api/marketplace/refresh` on **contractservice** — user-authenticated,
+no body needed. It reconciles **the caller's own** escrows and offers, then returns once the
+index is updated, so re-reading the offer list afterwards shows the result.
+
+You do **not** call chainservice's refresh directly. The UI does not know which escrows are
+live, and that endpoint is service-to-service: it takes an explicit escrow list precisely so the
+caller must have decided the scope. contractservice is the only service that can.
+
+**⚠️ Where to put it, and why it is not merely a convenience.** The staleness that costs money
+is a missed **acceptance**, not a missed offer. When a seller accepts an offer directly
+on-chain, every *other* LP's offer on that escrow becomes stale and withdrawable **at once** —
+those LPs have capital they could recover and no way to learn it. So the control belongs where
+that bites:
+
+- ✅ On an **LP's own offer list** — "check for updates", next to offers that might already be
+  withdrawable.
+- ✅ On a **seller's offer book**, where an offer may have been withdrawn or expired since load.
+- ❌ Not only on an admin screen. The people who lose by staleness are LPs, and they will never
+  see an admin screen.
+
+Show when the data was last reconciled, so a user can tell "no offers" from "no offers as of an
+hour ago". After a refresh returns, re-read the offer list — the response reports how many
+events were found, but the data itself arrives via contractservice.
+
+### 15.7 contractservice — marketplace index (row 4.7)
+
+> **✅ Done 2026-08-07.** Built as described below: `POST /api/marketplace/events` (ingest,
+> idempotent on `(transactionHash, logIndex)` with a unique Mongo index behind it),
+> `POST /api/marketplace/refresh` (user-scoped reconcile), and two read endpoints —
+> `GET /api/marketplace/escrows/{escrow}/offers` and `GET /api/marketplace/lps/{lp}/offers`.
+> Offer state is folded from event history on read rather than stored as a mutable projection.
+> 330 tests green. Retained below as the rationale.
+
+**Why you are the store.** The venue keeps **no on-chain offer book** — the factory holds no
+per-escrow or per-offer storage (§5.0) — so the only durable index is the one you hold.
+chainservice reads the chain and pushes; you store and serve. You never talk to the chain
+yourself: no RPC, no ABI, no log parsing.
+
+**1. Receive the push.** `POST /api/marketplace/events`, authenticated with the service API key,
+body as documented in `chainservice/API_REFERENCE.md`:
+
+```json
+{ "fromBlock": "…", "toBlock": "…", "events": [ { "eventType": "OfferFunded", "vaultAddress": "0x…",
+  "escrowContract": "0x…", "transactionHash": "0x…", "blockNumber": "…", "logIndex": "…",
+  "timestamp": 1754500000, "payload": { … } } ] }
+```
+
+> ⚠️ **IDEMPOTENT, on `(transactionHash, logIndex)`.** A reconcile deliberately re-reads ground
+> it has covered before — that is what makes it a reconcile rather than a tail — so the same
+> event **will** arrive repeatedly. A repeat must be a no-op, not a duplicate row and not an
+> error. `payload` carries whatever that event's ABI declares, so store it loosely: adding an
+> event to the contracts should not require a schema change here.
+
+**2. Serve the offer book.** *(Built: `GET /api/marketplace/escrows/{escrow}/offers` and
+`GET /api/marketplace/lps/{lp}/offers`.)* Group by `escrowContract` for a seller's view and by the LP address
+in the payload for an LP's view. `vaultAddress` is the natural key for one offer — it is unique
+per offer and appears on every event about it.
+
+**3. Expose the refresh the UI calls, and drive the reconcile.**
+
+`POST /api/marketplace/refresh` — **user-authenticated**, this is the button's endpoint
+(§15.6f). On receipt: work out which escrows this user has a stake in, then call chainservice's
+`POST /api/chain/marketplace/refresh` with those escrows and roughly when each became relevant,
+store what comes back, and return.
+
+> ⚠️ **Scope it to the caller, not the world.** A refresh is a chain read triggered by a button,
+> so an endpoint that reconciles *everything* hands any logged-in user an expensive operation on
+> demand — and repeated clicks multiply it. Reconciling only the escrows that user is party to
+> (as buyer, seller or LP) bounds the cost, matches what they actually want to see, and is
+> naturally cheap because `escrowContract` is an indexed event parameter: the list becomes an
+> on-chain topic filter and the node returns logs for those escrows only. **A tight list is a
+> cheap query; "everything" is an expensive one.**
+>
+> Consider a short per-user debounce — returning the previous result for a few seconds — so that
+> impatient clicking does not become repeated chain reads.
+
+Reconciling all live escrows is still legitimate as an **operator** action (after an outage, or
+a contractservice rebuild); keep it admin-only and separate from the user-facing path.
+
+**4. Compute expiry yourself — it is not an event.** An offer lapsing emits nothing on-chain; it
+is a time condition (`offerExpiry` vs now) evaluated lazily when someone acts. No amount of
+indexing will surface it. Derive it from the stored `offerExpiry` so the UI can prompt an LP to
+withdraw.
+
+**What you must NOT do.** Nothing you store may gate anything the contracts gate — whether an
+offer may be accepted, whether a reserve may be set, whether funds move (§15.3a rule 1). Your
+index describes; the chain decides. This is the same discipline as §15.5: the reason the
+`hasBeenSold` flag lives on the escrow rather than in a service is precisely so that no
+off-chain record is ever consulted for a decision.
+
 ## 16. Path to Production
 
 Phases 1–2 are sequential builds; phase 0 and phase 4 run in parallel with them. The three
@@ -1562,8 +2275,9 @@ before mainnet**.
 2. Remediation loop; re-run §14 suites after every fix. **Gate: no mainnet while criticals are open.**
 
 **Phase 4 — off-chain builds (parallel with 1–3)**
-1. chainservice — **follow the concrete checklist in §15.4.** The factory ABI is unchanged, so this is: repoint addresses, pass the Safe as creation arbiter (⚠️ silent failure if missed), retire complete-the-pair, watch-and-prompt vote choreography, sponsorship routing for votes, `ArbiterUnseated` handling, and cohort detection for the two live escrow generations.
-2. Webapp: §15.1 disclosures and §15.2 flows — the dispute screens (nominate / seat-default / evict / both-party vote prompts) are new surface, not a reskin.
+1. ~~chainservice — **follow the concrete checklist in §15.4.**~~ **✅ done 2026-08-06 — see §15.4a.** The factory ABI was indeed unchanged, so this was: repoint addresses, pass the Safe as creation arbiter (now *derived* from the implementation rather than configured — §15.4a), retire complete-the-pair, watch-and-prompt vote choreography, sponsorship routing for votes, `ArbiterUnseated` handling, and cohort detection for the two live escrow generations.
+1a. **contractservice** — its auto-resolve path still calls the now-retired admin vote. **See §15.5.** Until then, agreed settlements do not complete on-chain.
+2. Webapp: §15.1 disclosures and §15.2 flows — the dispute screens (nominate / seat-default / evict / both-party vote prompts) are new surface, not a reskin. **Concrete build note: §15.6** — every disputant now signs their own vote and posts it to the gas-sponsored relay.
 3. Subgraph/indexer: §15.3 — offer books, lazy-withdrawability detection, sold-escrow marking.
 
 **Phase 5 — testnet dry run (Base Sepolia)**
@@ -1578,12 +2292,28 @@ before mainnet**.
 5. Verify all three on BaseScan; recompute the codehash against the **final** implementation address; record everything (addresses, Safe signers/threshold) in `DEPLOYMENT_ADDRESSES.md` and the §3.4 table.
 
 **Phase 7 — cutover & launch**
-1. Repoint chainservice env at the new factory/implementation (same pattern as the completion-pair variables in `DEPLOYMENT_ADDRESSES.md`).
+1. Repoint chainservice env at the new factory/implementation (same pattern as the completion-pair variables in `DEPLOYMENT_ADDRESSES.md`). **`ESCROW_IMPLEMENTATION_ADDRESS` is load-bearing, not cosmetic** — chainservice reads `DEFAULT_ARBITER()` from it at startup to determine the creation arbiter (§15.4a), and refuses to start if it can resolve no address at all.
 2. Inventory reality (§3.4): the marketplace opens **empty** and fills at the rate new escrows are created. Launch messaging must not promise liquidity on existing deals. Old-implementation escrows stay live to their own terms, permanently invisible to the marketplace.
 3. Runbooks before announcement: pause criteria and who holds the owner key; Safe arbitration SLA (§13.8); mistaken-transfer recovery via `sweepToken`.
 
 ## 17. Changelog
 
+- **v0.9.0 (2026-08-07): the marketplace no longer pools LP capital — one `OfferVault` per offer replaces the single `MarketplaceEscrow`.** Prompted by a custody concern §13.14 never asked about: the pooled venue commingled every LP's deposit at one platform-deployed address. The technical position was defensible (the owner could reach only genuine surplus; `withdrawFunds` was unpausable) but commingling is a regulatory trigger in its own right, and resting on an unobtained legal reading was the wrong risk. **New shape (§5.0), mirroring the escrow exactly:** `OfferVaultFactory` validates, prices, deploys and keeps the per-escrow registry while **holding no tokens ever**; each offer's capital sits in its own ERC-1167 `OfferVault` clone. Creation is permissionless and **moves no money** — the LP is a parameter, not the caller, so chainservice deploys on a user's behalf without gaining power over funds — and **only the named LP can `fund()`** it. Every vault function answers to exactly one role: `fund`/`withdraw` → the LP, `accept`/`reject` → the escrow's current recipient, `releaseHoldback` → funder or live beneficiary, `sweep` → the factory owner and only above what the vault owes. **Fees pay out to `FEE_RECIPIENT` at acceptance rather than accruing**, so `withdrawFees` is gone and no owner-withdrawable balance exists anywhere in the system. The seller's §3.2 approval now names the individual vault, the narrowest authority the swap can be granted.
+  **Economics, validation and lifecycle are unchanged** — §5.1–5.3 and §6 remain authoritative for the rules; §5.0 and the §6 routing table say where they live. The factory retains **no** per-escrow or per-offer state at all — see the next paragraph for where the one cross-offer fact ended up.
+  **Cost:** a ~45k-gas clone per offer (well under a cent at current Base prices) and an on-chain offer book that is enumerable per escrow rather than a single mapping — discovery was already off-chain by design (§12, §15.3). **Benefit:** no commingling, blast radius of one offer instead of all of them, conservation checkable per contract, and a narrower approval at the swap.
+  **Tests rebuilt: 282 passing.** `test/OfferVault.t.sol` (31) covers the codehash gate, the create/fund split, per-role access control, the swap and fee payout, all five withdrawal conditions, the holdback rules and the sweep bounds — including the §0.4c High restated for this model (two reserve-bearing offers, position returns to the original seller, second acceptance must revert rather than strand the first reserve). `test/InvariantMarketplace.t.sol` restates §14.3 for per-offer custody: **every vault always covers its own obligation**, **the factory never holds a token balance**, status matches obligation, at most one live reserve per escrow, no manufactured consensus, and neither venue nor vault ever holds the cashflow role. **Removed:** `MarketplaceEscrow.sol` and its three suites.
+  **The one-reserve rule moved onto the escrow.** `hasBeenSold` is now a flag on `EscrowContract`, set by `transferRecipientFrom` (never `changeRecipient` — an OTC rotation is not a sale, the same line §3.3A draws for arbiter unseating). An interim revision of this design kept it in a factory registry alongside `holdbackVault`, `isVault` and an on-chain offer book; that carried a real hazard — **redeploying the venue would have lost the fact, allowing a second reserve to be stacked on an escrow that already had one**, which `releaseHoldback` would then compensate twice from the second funder's pocket. Putting it where the fact belongs makes the marketplace **stateless per escrow and per offer** and therefore freely redeployable, and lets the offer book fall back to `OfferCreated` events, which §15.3 had already designated the index. **Cost: a new escrow implementation** (new storage ⇒ new bytecode ⇒ new clone codehash ⇒ new escrow factory ⇒ chainservice repoints again). Backwards compatibility was explicitly waived; escrows on `0x77acD2d…` become a third superseded lineage. `DEPLOYMENT_ADDRESSES.md` marks the pair redeploy-pending and the recorded codehash stale.
+  **⚠️ Correction to §15.4's item 3, and to this section's first draft: chainservice does not relay transactions.** Three endpoints taking a `signedTransaction` (`submit-resolution-vote`, `nominate-arbiter`, `evict-arbiter`) were built and then **removed** — embedded wallet providers do not expose raw transaction signing, and `getSigner()` is forbidden after connection, so the webapp has no signed transaction to hand over. Gas sponsorship has always worked the other way round: the UI encodes the call, `POST /api/chain/fund-wallet` moves ETH into the user's wallet, and the user's provider broadcasts. `fund-wallet` takes a wei amount rather than an operation name, so it already covers every new action with **no new endpoint**. What survives is what the UI genuinely cannot do: `seat-default-arbiter` (permissionless, relayer-fired) and the arbiter-state read. The same correction applies to the marketplace — chainservice deploys vaults, supplies gas and indexes; it relays none of the five party actions.
+  **§15.3 promoted to load-bearing, with two rules added (§15.3a).** Removing the on-chain offer book means the indexer is no longer a convenience — without it there is no book at all. The rules: **index for reading, never for deciding** (nothing off-chain may gate what the contracts gate — the generalisation of §3.3A2a, and why `hasBeenSold` sits on the escrow), and **derive the index from events, not UI reports** (every vault function is callable directly by its party without touching our UI, so a UI-reported index diverges silently). Note this deliberately differs from §15.6b, where the UI reports a settlement vote: that records a *conversation* and gates nothing, whereas the marketplace index mirrors *chain state* and must be built from the chain. **Settled the same day: chainservice does the reading and pushes to contractservice** — not a subgraph — so contractservice never becomes chain-aware, chainservice owns replay from any block, and the push must be idempotent on `(vault, event)`. Row 4.4 folded into new row 4.6, which also carries the marketplace API: chainservice mediates everything, so the webapp never holds an RPC or an ABI (§15.6a).
+  **⚠️ Regression against §15.2, recorded in §15.6d:** `releaseHoldback` was permissionless in the pooled design so a keeper could fire it. Restricting vault functions to the deal's parties makes it prompt-only — nobody sweeps up on the parties' behalf. Re-opening it to all callers is safe if unclaimed reserves prove a problem, since both destinations and amounts are fixed by the escrow's final state. **§13.15 added** recording the custody decision; **the escrow model's own custody position and §13.14's arbitration question remain counsel's to confirm.**
+- **v0.8.1 (2026-08-06): §3.3A2a revised — the off-chain agreement stage is removed; every vote goes straight on-chain.** Superseding v0.6.1's "negotiate off-chain, then prompt both parties to ratify", a disputant's settlement figure is now submitted as `submitResolutionVote(X)` **the moment they name it**, and the contract is the only place agreement is detected. The retired design had the platform mirror `_checkAndExecuteConsensus` off-chain — recording each side's figure, comparing them, then triggering the votes — which is duplicated logic whose only possible behaviours are *agree with the chain* or *be wrong*, and which created an "agreed off-chain, unsettled on-chain" state that could persist indefinitely and had to be chased. **Removing the mirror removes the state**, and with it contractservice's entire settlement role: §15.5 becomes a deletion rather than a rewrite (no agreement detection, no vote triggering, no chasing). contractservice keeps the genuinely off-chain parts — dispute record, discussion, evidence, notifications.
+  **The load-bearing consequence is a UI obligation, added to §15.1.** The contract holds one value per role (the latest) and settles the instant any two of the three match, so **on-chain there is no difference between "I propose 40%" and "I accept 40%"** — every submitted figure is a **binding offer that pays out on match, irreversibly**. §15.6 accordingly forbids sliders, counter-offer threads, or any presentation implying a number can be floated and refined: a user typing the other side's standing figure as an opening anchor has ended the dispute at that figure. Both the counterparty's and any seated arbiter's standing figures must be shown and labelled as settling on match — note **any two of three** settle, so a party matching the *arbiter* ends the dispute without the third party's assent. Figures stay revisable until consensus; each revision is another sponsored transaction, and cheap, since the slot is already non-zero.
+  **Measured gas, replacing estimates** (§15.4a): a first vote is ~28k gas all-in, the consensus-triggering vote ~99k (worst observed ~160k) — roughly 10× the first, because the settling transaction executes the whole payout. A fully settled dispute is on the order of a tenth of a cent at sponsored rates, so on-chain revisions cost nothing worth optimising. §15.6 now requires the front-end to size gas **per transaction rather than per flow**: gas-payer funds against whatever the signed transaction declares, so a limit derived from a first vote and reused would strand the settling vote out of gas.
+  **Correction to an earlier read of the sponsorship path:** chainservice's `escrow.limit-*` constants do **not** govern relay funding — `GasPayerServiceClient` discards the `gasLimit` argument and gas-payer derives funding from the signed transaction itself. No chainservice gas-limit change was needed or made; the requirement lands on whoever signs.
+- **v0.8.0 (2026-08-06): chainservice migrated onto the new contracts (§15.4 complete).** The full §15.4 checklist shipped — **263 tests, 0 failing** — and the outcome is recorded in the new **§15.4a**. The platform now holds no dispute power on any escrow it creates: the complete-the-pair arbiter vote is gone (`/api/vote/submit` returns **410 Gone**), agreed settlements are pushed by both disputants through a sponsored `submit-resolution-vote` relay, and the §3.3 arbiter surface (nominate / seat-default / evict, plus the seat-state read and the four arbiter events) is exposed with cohort detection so legacy-implementation escrows are never offered actions they do not have.
+  **One deliberate amendment to §15.4 item 1: the creation arbiter is now DERIVED, not configured.** Item 1's "pass `0x9bB8e809…` explicitly" is correct but guards only half the failure — a configured address that is well-formed yet **wrong** passes every validation and produces permanently mis-arbitered escrows, invisible until a dispute. The root confusion is that `DEFAULT_ARBITER` (an implementation `immutable`, fallback-only) and `ARBITER` (per-clone storage, set from `createEscrowContract`'s 7th argument) are *different addresses* that coincide only because we pass the same value; omitting the argument does not fall back to the immutable, because the factory substitutes `msg.sender` before `initialize` can reject the zero. chainservice therefore reads `DEFAULT_ARBITER()` off the configured implementation at startup and passes that, making the per-escrow value a derivation of the immutable one. `DEFAULT_ARBITER_ADDRESS` survives as an **assertion** — a mismatch with the bytecode refuses startup — and with neither source available the service refuses to start rather than defaulting. **Consequence for §16 phase 7: `ESCROW_IMPLEMENTATION_ADDRESS` is the load-bearing variable, not `DEFAULT_ARBITER_ADDRESS`.**
+  **Three latent defects surfaced by the migration**, all recorded in §15.4a: the factory's new `ArbiterMustBeDistinct` error is now pre-checked rather than hit as an opaque revert; an explicitly-zero caller-supplied arbiter now resolves to the Safe instead of being forwarded (zero is never an override, only the factory's substitution trigger); and refreshing the ABI against the live implementation exposed two call sites — `resolveDispute(uint256,uint256)` and `USDC_TOKEN()` — that exist in no deployed ABI and had been throwing before reaching the chain.
+  **Knock-on left open (§0.1 row 4.2), written up for its owning team as the new §15.5:** `contractservice`'s auto-resolve path still calls the retired admin vote. It fails safely and loudly, but agreed settlements will not complete on-chain until it is changed to have both parties vote themselves. Rows 4.3 (webapp dispute screens) and 4.4 (subgraph) remain untouched.
 - **v0.7.0 (2026-08-06): BUILD RELEASE — §3.3 and `MarketplaceEscrow` implemented.** Both contracts are written and tested (**311 passing**); build log, per-item checklists, deviations, test-coverage map and self-audit findings are in the new **§0**. **Three substantive design changes came out of the build, all recorded in §0.4:**
   **(1) The arbiter nomination window became a 72-hour CONSTANT (`NOMINATION_WINDOW`), superseding §3.3A1's per-escrow parameter.** The parameter put the choice in the hands of whoever *creates* the escrow while the cost falls on the LP who buys later — and in the §8.1a attack the creator is the adversary, so a creator-chosen window was a creator-chosen hostage duration. It also bought the honest parties nothing, since `nominateArbiter` has no deadline check and a match seats right up until the fallback executes. §3.3A1's "no maximum / self-limiting because it is public before purchase" argument additionally failed on its own terms: nothing in the sale path reads the value, so the protection rested on an LP's client surfacing it. **Consequence: `initialize` and `createEscrowContract` keep their ORIGINAL signatures, so §13.9's factory ABI break disappears** — integrators repoint at new addresses and change no call sites. An interim revision that kept the parameter under a 30-day cap is also superseded.
   **(2) A saturating `nominationDeadline` was identified as a vulnerability, not a mitigation.** Clamping at `type(uint64).max` makes `block.timestamp > nominationDeadline` unsatisfiable, i.e. a *permanently unseatable* fallback and a permanent hostage state; a truncating cast, by contrast, wraps into the past and is benign. With a constant window the branch is unreachable and has been removed — if the window ever becomes caller-influenced again, overflow must **revert**, never clamp.

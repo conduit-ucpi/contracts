@@ -325,6 +325,29 @@ contract EscrowContract is ReentrancyGuard {
     mapping(address => ResolutionVote) public resolutionVotes;
     bool public consensusReached;
 
+    /// @notice True once this cashflow has changed hands through an approve-and-pull swap.
+    ///
+    /// @dev 🔒 THE ONE-RESERVE RULE LIVES HERE, NOT IN THE MARKETPLACE.
+    ///
+    ///      A marketplace reserve (spec §5.3) may only be set on an escrow's FIRST sale:
+    ///      it is recourse against the party who PERFORMED, and a reselling LP performed
+    ///      nothing. Enforcing that needs a durable "has this been sold before" fact, and
+    ///      the escrow is the only place it can honestly live — the arbiter seat is not a
+    ///      proxy for it, since `_unseatArbiter` is reversible and the seat can be refilled.
+    ///
+    ///      Keeping it here rather than in a marketplace registry means:
+    ///        • a marketplace can be redeployed without losing it, so a second reserve can
+    ///          never be stacked on an escrow that already carries one;
+    ///        • any future venue reads the same truth, with no migration;
+    ///        • the venue itself needs no per-escrow storage at all.
+    ///
+    ///      ⚠️ Set ONLY by `transferRecipientFrom`, never by `changeRecipient`. Only the
+    ///      SELLER can authorise an operator (`approveRecipientTransfer`), so this path
+    ///      fires exclusively on a genuine seller-authorised swap. A seller rotating their
+    ///      own payout wallet, or an OTC handover, is not a sale and gets none of the
+    ///      marketplace's protections — the same line §3.3A draws for arbiter unseating.
+    bool public hasBeenSold;
+
     // 🔁 ONE-SHOT RECIPIENT-TRANSFER APPROVAL (for atomic marketplace swaps)
     // The current seller may authorize ONE operator to move the recipient role to
     // ONE exact destination, valid for RECIPIENT_APPROVAL_TTL. Consumed on use,
@@ -818,6 +841,11 @@ contract EscrowContract is ReentrancyGuard {
         if (newRecipient != approvedRecipientTarget) revert ApprovedTargetMismatch();
         if (block.timestamp > recipientApprovalExpiry) revert RecipientApprovalExpired();
         _transferRecipient(newRecipient);
+
+        // §5.3: durable record that this cashflow has been sold at least once, so a
+        // marketplace can refuse a second reserve without keeping its own registry. Set
+        // AFTER the transfer succeeds, and deliberately not in changeRecipient.
+        hasBeenSold = true;
 
         // §3.3A: the SALE unseats the incumbent arbiter, automatically, in this same
         // transaction. changeRecipient deliberately does NOT do this - a seller rotating
@@ -1350,9 +1378,9 @@ contract EscrowContract is ReentrancyGuard {
     }
 
     // ───────────────────────────────────────────────────────────────────────────
-    // MarketplaceEscrow integration adapters
+    // Marketplace integration adapters
     // Thin views exposing the naming the marketplace spec expects. They alias
-    // existing state so an external MarketplaceEscrow can read recipient status,
+    // existing state so an external marketplace can read recipient status,
     // maturity, and dispute status without knowing this contract's internals.
     // ───────────────────────────────────────────────────────────────────────────
 

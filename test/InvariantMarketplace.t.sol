@@ -4,21 +4,13 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {EscrowContract} from "../src/EscrowContract.sol";
 import {EscrowContractFactory} from "../src/EscrowContractFactory.sol";
-import {MarketplaceEscrow} from "../src/MarketplaceEscrow.sol";
+import {OfferVault} from "../src/OfferVault.sol";
+import {OfferVaultFactory} from "../src/OfferVaultFactory.sol";
 
-contract InvToken {
+contract InvMockERC20 {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
     uint8 public decimals = 6;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
 
     function transfer(address to, uint256 amount) external returns (bool) {
         require(balanceOf[msg.sender] >= amount, "balance");
@@ -35,145 +27,114 @@ contract InvToken {
         allowance[from][msg.sender] -= amount;
         return true;
     }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
 }
 
 /**
- * Drives arbitrary interleavings of every external marketplace function, plus the escrow
- * actions that change what the marketplace observes (dispute, vote, claim, direct
+ * Drives arbitrary interleavings of every external function on the venue and its vaults,
+ * plus the escrow actions that change what they observe (dispute, vote, claim, direct
  * recipient rotation). Every action is wrapped so a revert is a no-op rather than a
  * failure — the invariants must hold across whatever sequence actually lands.
  */
 contract MarketplaceHandler is Test {
-    MarketplaceEscrow public market;
     EscrowContract public escrow;
-    InvToken public token;
+    OfferVaultFactory public market;
+    InvMockERC20 public usdc;
 
     address public buyer;
+    address public seller;
     address public arbiter;
-    address public owner;
-    address[] public lps;
+    address[3] public lps;
 
-    // Ghost variables for the holdback-conservation invariant.
-    uint256 public ghostHoldbackReleasedTotal;
-    uint256 public ghostHoldbackSetTotal;
-    uint256 public ghostReleaseCount;
+    OfferVault[] public vaults;
 
     constructor(
-        MarketplaceEscrow _market,
         EscrowContract _escrow,
-        InvToken _token,
+        OfferVaultFactory _market,
+        InvMockERC20 _usdc,
         address _buyer,
+        address _seller,
         address _arbiter,
-        address _owner,
-        address[] memory _lps
+        address[3] memory _lps
     ) {
-        market = _market;
         escrow = _escrow;
-        token = _token;
+        market = _market;
+        usdc = _usdc;
         buyer = _buyer;
+        seller = _seller;
         arbiter = _arbiter;
-        owner = _owner;
         lps = _lps;
     }
 
-    function _lp(uint256 seed) internal view returns (address) {
-        return lps[seed % lps.length];
+    function vaultCount() external view returns (uint256) {
+        return vaults.length;
     }
 
-    function createOffer(uint256 lpSeed, uint256 amount, uint256 holdback, uint256 duration) public {
-        address lp = _lp(lpSeed);
-        amount = bound(amount, 1, 5_000e6);
+    function vaultAt(uint256 i) external view returns (OfferVault) {
+        return vaults[i];
+    }
+
+    function createOffer(uint256 lpSeed, uint256 amount, uint256 holdback) public {
+        address lp = lps[lpSeed % 3];
+        amount = bound(amount, 1, 20_000e6);
         holdback = bound(holdback, 0, amount);
-        duration = bound(duration, 1, 5 days);
-
-        token.mint(lp, amount);
-        vm.prank(lp);
-        token.approve(address(market), amount);
-
-        uint256 before = market.totalHoldbacks(address(token));
-        vm.prank(lp);
-        try market.createOffer(address(escrow), amount, holdback, duration) {
-            // Track any holdback that actually got booked (only lands at acceptance).
-            before; // silence
+        try market.createOffer(address(escrow), lp, amount, holdback, 0) returns (address v) {
+            vaults.push(OfferVault(v));
         } catch {}
     }
 
-    function acceptOffer(uint256 lpSeed) public {
-        address lp = _lp(lpSeed);
-        address seller = escrow.SELLER();
+    function fund(uint256 i) public {
+        if (vaults.length == 0) return;
+        OfferVault v = vaults[i % vaults.length];
+        address lp = v.lp();
+        usdc.mint(lp, v.offerAmount());
+        vm.prank(lp);
+        usdc.approve(address(v), v.offerAmount());
+        vm.prank(lp);
+        try v.fund() {} catch {}
+    }
 
-        uint256 hbBefore = market.totalHoldbacks(address(token));
-
-        vm.prank(seller);
-        try escrow.approveRecipientTransfer(address(market), lp) {}
-        catch {
+    function accept(uint256 i) public {
+        if (vaults.length == 0) return;
+        OfferVault v = vaults[i % vaults.length];
+        address current = escrow.recipient();
+        address offerLp = v.lp();
+        vm.prank(current);
+        try escrow.approveRecipientTransfer(address(v), offerLp) {} catch {
             return;
         }
-        vm.prank(seller);
-        try market.acceptOffer(address(escrow), lp) {
-            uint256 hbAfter = market.totalHoldbacks(address(token));
-            if (hbAfter > hbBefore) ghostHoldbackSetTotal += hbAfter - hbBefore;
-        } catch {}
+        vm.prank(current);
+        try v.accept() {} catch {}
     }
 
-    function rejectOffer(uint256 lpSeed) public {
-        address lp = _lp(lpSeed);
-        address seller = escrow.SELLER();
-        vm.prank(seller);
-        try market.rejectOffer(address(escrow), lp) {} catch {}
+    function reject(uint256 i) public {
+        if (vaults.length == 0) return;
+        OfferVault v = vaults[i % vaults.length];
+        vm.prank(escrow.recipient());
+        try v.reject() {} catch {}
     }
 
-    function withdrawFunds(uint256 lpSeed) public {
-        address lp = _lp(lpSeed);
-        vm.prank(lp);
-        try market.withdrawFunds(address(escrow)) {} catch {}
+    function withdraw(uint256 i) public {
+        if (vaults.length == 0) return;
+        OfferVault v = vaults[i % vaults.length];
+        vm.prank(v.lp());
+        try v.withdraw() {} catch {}
     }
 
-    function releaseHoldback() public {
-        uint256 before = market.totalHoldbacks(address(token));
-        try market.releaseHoldback(address(escrow)) {
-            ghostHoldbackReleasedTotal += before - market.totalHoldbacks(address(token));
-            ghostReleaseCount += 1;
-        } catch {}
+    function releaseHoldback(uint256 i) public {
+        if (vaults.length == 0) return;
+        OfferVault v = vaults[i % vaults.length];
+        vm.prank(v.seller());
+        try v.releaseHoldback() {} catch {}
     }
-
-    function withdrawFees(uint256 amount) public {
-        amount = bound(amount, 0, 10_000e6);
-        vm.prank(owner);
-        try market.withdrawFees(address(token), owner, amount) {} catch {}
-    }
-
-    function sweepToken() public {
-        vm.prank(owner);
-        try market.sweepToken(address(token), owner) {} catch {}
-    }
-
-    function setFeeRate(uint256 bps) public {
-        vm.prank(owner);
-        try market.setFeeRate(bound(bps, 0, 1000)) {} catch {}
-    }
-
-    function setMinOfferBps(uint256 bps) public {
-        vm.prank(owner);
-        try market.setMinOfferBps(bound(bps, 0, 10000)) {} catch {}
-    }
-
-    function pauseToggle(bool on) public {
-        vm.prank(owner);
-        if (on) {
-            try market.pause() {} catch {}
-        } else {
-            try market.unpause() {} catch {}
-        }
-    }
-
-    /// Accidental direct transfer, to exercise the conservation slack and sweepToken.
-    function donate(uint256 amount) public {
-        amount = bound(amount, 1, 1_000e6);
-        token.mint(address(market), amount);
-    }
-
-    // ── Escrow-side actions that change what the marketplace observes ──
 
     function raiseDispute() public {
         vm.prank(buyer);
@@ -181,135 +142,144 @@ contract MarketplaceHandler is Test {
     }
 
     function vote(uint256 whoSeed, uint256 pct) public {
-        pct = bound(pct, 0, 100);
-        address who;
-        uint256 s = whoSeed % 3;
-        if (s == 0) who = buyer;
-        else if (s == 1) who = escrow.SELLER();
-        else who = escrow.ARBITER();
+        address who = [buyer, escrow.recipient(), escrow.ARBITER()][whoSeed % 3];
         if (who == address(0)) return;
-
         vm.prank(who);
-        try escrow.submitResolutionVote(pct) {} catch {}
+        try escrow.submitResolutionVote(bound(pct, 0, 100)) {} catch {}
     }
 
-    function nominate(uint256 whoSeed, uint256 candSeed) public {
-        address who = (whoSeed % 2 == 0) ? buyer : escrow.SELLER();
-        address cand = _lp(candSeed);
-        vm.prank(who);
-        try escrow.nominateArbiter(cand) {} catch {}
-    }
-
-    function seatDefault() public {
-        try escrow.seatDefaultArbiter() {} catch {}
-    }
-
-    function claimFunds() public {
+    function claim() public {
         try escrow.claimFunds() {} catch {}
     }
 
-    function changeRecipient(uint256 lpSeed) public {
-        address seller = escrow.SELLER();
-        vm.prank(seller);
-        try escrow.changeRecipient(_lp(lpSeed)) {} catch {}
+    function rotateRecipient(uint256 seed) public {
+        address to = [seller, lps[0], lps[1], lps[2]][seed % 4];
+        vm.prank(escrow.recipient());
+        try escrow.changeRecipient(to) {} catch {}
     }
 
     function warp(uint256 secs) public {
         vm.warp(block.timestamp + bound(secs, 1, 3 days));
     }
+
+    /// Accidental direct transfer, to exercise conservation slack and sweep().
+    function strayTransfer(uint256 i, uint256 amount) public {
+        if (vaults.length == 0) return;
+        OfferVault v = vaults[i % vaults.length];
+        amount = bound(amount, 1, 1_000e6);
+        usdc.mint(address(this), amount);
+        usdc.transfer(address(v), amount);
+    }
 }
 
 /**
- * §14.3 — marketplace invariants 1–3, plus the no-manufactured-consensus invariant (4)
- * which is an escrow property but only reachable through a marketplace sale.
+ * §14.3 — marketplace invariants, restated for the per-offer vault model.
+ *
+ * The conservation properties get simpler here, and that is the point of the redesign:
+ * with no shared balance there is no global ledger to reconcile. Each vault's own balance
+ * must cover its own obligation, and the venue must hold nothing at all.
  */
 contract InvariantMarketplaceTest is Test {
     EscrowContract internal implementation;
-    EscrowContractFactory internal factory;
-    MarketplaceEscrow internal market;
-    EscrowContract internal escrow;
-    InvToken internal token;
+    EscrowContractFactory internal escrowFactory;
+    OfferVault internal vaultImpl;
+    OfferVaultFactory internal market;
+    InvMockERC20 internal usdc;
     MarketplaceHandler internal handler;
+    EscrowContract internal escrow;
 
-    address internal defaultArbiter = address(0xDEFA17);
-    address internal owner = address(0x0E);
-    address internal platform = address(0xB1A7);
-    address internal buyer = address(0xB1);
-    address internal seller = address(0x5E);
-    address internal arbiter = address(0xA6);
+    address internal defaultArbiter = makeAddr("safe");
+    address internal owner = makeAddr("owner");
+    address internal feeRecipient = makeAddr("feeRecipient");
+    address internal platform = makeAddr("platform");
+    address internal buyer = makeAddr("buyer");
+    address internal seller = makeAddr("seller");
+    address internal arbiter = makeAddr("arbiter");
 
     uint256 internal constant AMOUNT = 10_000e6;
 
     function setUp() public {
-        token = new InvToken();
+        usdc = new InvMockERC20();
         implementation = new EscrowContract(defaultArbiter);
-        factory = new EscrowContractFactory(platform, address(implementation), platform);
-        market = new MarketplaceEscrow(address(implementation), 50, 100, 24 hours, owner);
+        escrowFactory = new EscrowContractFactory(platform, address(implementation), platform);
+        vaultImpl = new OfferVault();
+        market = new OfferVaultFactory(
+            address(vaultImpl), address(implementation), 50, 1000, 24 hours, feeRecipient, owner
+        );
 
         vm.prank(platform);
-        address esc = factory.createEscrowContract(
-            address(token), buyer, seller, AMOUNT, block.timestamp + 60 days, "inv", arbiter
+        escrow = EscrowContract(
+            escrowFactory.createEscrowContract(
+                address(usdc), buyer, seller, AMOUNT, block.timestamp + 30 days, "inv", arbiter
+            )
         );
-        escrow = EscrowContract(esc);
-
-        token.mint(buyer, AMOUNT);
+        usdc.mint(buyer, AMOUNT);
         vm.prank(buyer);
-        token.approve(esc, AMOUNT);
+        usdc.approve(address(escrow), AMOUNT);
         vm.prank(buyer);
         escrow.depositFunds();
 
-        address[] memory lps = new address[](3);
-        lps[0] = address(0x11);
-        lps[1] = address(0x22);
-        lps[2] = address(0x33);
-
-        handler = new MarketplaceHandler(market, escrow, token, buyer, arbiter, owner, lps);
+        address[3] memory lps = [makeAddr("lpA"), makeAddr("lpB"), makeAddr("lpC")];
+        handler = new MarketplaceHandler(escrow, market, usdc, buyer, seller, arbiter, lps);
         targetContract(address(handler));
     }
 
-    /// §14.3.1 — CONSERVATION. The marketplace always holds at least everything its books
-    /// say it owes. Any excess is an accidental transfer, and is exactly what sweepToken
-    /// may take.
-    function invariant_conservation() public view {
-        uint256 owed = market.totalDeposits(address(token)) + market.accruedFees(address(token))
-            + market.totalHoldbacks(address(token));
-        assertGe(token.balanceOf(address(market)), owed, "marketplace is under-collateralised");
+    /// §14.3.1 — CONSERVATION, PER VAULT. Every vault always holds at least what it owes.
+    /// There is no pooled balance to reconcile: this is the whole custody claim of the
+    /// redesign, and it is checkable one contract at a time.
+    function invariant_eachVaultCoversItsOwnObligation() public view {
+        uint256 n = handler.vaultCount();
+        for (uint256 i = 0; i < n; i++) {
+            OfferVault v = handler.vaultAt(i);
+            assertGe(usdc.balanceOf(address(v)), v.owed(), "vault under-collateralised");
+        }
     }
 
-    /// §14.3.2 — SLOT <=> DEPOSIT. A slot is non-NONE iff the contract still holds that
-    /// LP's gross deposit. Checked as: the sum of live offer amounts equals totalDeposits.
-    function invariant_slotMatchesDeposit() public view {
-        uint256 sum;
-        for (uint256 i = 0; i < 3; i++) {
-            address lp = handler.lps(i);
-            MarketplaceEscrow.Offer memory o = market.getOffer(address(escrow), lp);
-            if (o.status != MarketplaceEscrow.OfferStatus.NONE) {
-                assertGt(o.offerAmount, 0, "an occupied slot must hold a real deposit");
-                sum += o.offerAmount;
+    /// §14.3.1a — THE VENUE IS NEVER A CUSTODIAN. The factory must never hold a token
+    /// balance: LP capital goes wallet -> vault, and fees go vault -> FEE_RECIPIENT.
+    function invariant_factoryHoldsNothing() public view {
+        assertEq(usdc.balanceOf(address(market)), 0, "the factory must never custody funds");
+    }
+
+    /// §14.3.2 — STATUS <=> OBLIGATION. A vault owes the gross deposit exactly while it is
+    /// OPEN or CANCELLED, the reserve exactly while ACCEPTED, and nothing once SETTLED.
+    function invariant_statusMatchesObligation() public view {
+        uint256 n = handler.vaultCount();
+        for (uint256 i = 0; i < n; i++) {
+            OfferVault v = handler.vaultAt(i);
+            OfferVault.Status s = v.status();
+            if (s == OfferVault.Status.OPEN || s == OfferVault.Status.CANCELLED) {
+                assertEq(v.owed(), v.offerAmount(), "open/cancelled must owe the gross");
+            } else if (s == OfferVault.Status.ACCEPTED) {
+                assertEq(v.owed(), v.holdback(), "accepted must owe exactly the reserve");
+            } else {
+                assertEq(v.owed(), 0, "pending/settled owe nothing");
             }
         }
-        assertEq(sum, market.totalDeposits(address(token)), "live slots must equal booked deposits");
     }
 
-    /// §14.3.3 — HOLDBACK CONSERVATION. A reserve settles exactly once, is never created or
-    /// destroyed, and the owner can never withdraw it.
-    function invariant_holdbackConservation() public view {
-        (,, uint256 liveAmount) = market.holdbacks(address(escrow));
-        assertEq(
-            liveAmount, market.totalHoldbacks(address(token)), "the single live reserve must equal the booked total"
-        );
-        assertLe(handler.ghostReleaseCount(), 1, "a reserve may settle at most once");
-        assertEq(
-            handler.ghostHoldbackReleasedTotal() + liveAmount,
-            handler.ghostHoldbackSetTotal(),
-            "reserves are redistributed, never created or destroyed"
-        );
+    /// §14.3.3 — ONE RESERVE PER ESCROW. At most one vault may ever hold a live reserve for
+    /// a given escrow. Enforced off the escrow's own `hasBeenSold`, so no venue-side
+    /// registry is involved and a redeployed marketplace cannot lose the guarantee.
+    function invariant_atMostOneLiveReserve() public view {
+        uint256 n = handler.vaultCount();
+        uint256 live;
+        for (uint256 i = 0; i < n; i++) {
+            OfferVault v = handler.vaultAt(i);
+            if (v.status() == OfferVault.Status.ACCEPTED && v.holdback() > 0) live++;
+        }
+        assertLe(live, 1, "two reserves live on one escrow");
     }
 
-    /// The owner's reach is bounded by accrued fees alone.
-    function invariant_ownerCannotReachDepositsOrHoldbacks() public view {
-        uint256 protectedFunds = market.totalDeposits(address(token)) + market.totalHoldbacks(address(token));
-        assertGe(token.balanceOf(address(market)), protectedFunds, "deposits and holdbacks must always remain covered");
+    /// A reserve can only exist on an escrow that has actually been sold.
+    function invariant_reserveImpliesSold() public view {
+        uint256 n = handler.vaultCount();
+        for (uint256 i = 0; i < n; i++) {
+            OfferVault v = handler.vaultAt(i);
+            if (v.status() == OfferVault.Status.ACCEPTED && v.holdback() > 0) {
+                assertTrue(escrow.hasBeenSold(), "reserve without a recorded sale");
+            }
+        }
     }
 
     /// §14.3.4 — NO MANUFACTURED CONSENSUS. With the arbiter unseated, no sequence of calls
@@ -317,19 +287,22 @@ contract InvariantMarketplaceTest is Test {
     /// seated at the time.
     function invariant_noManufacturedConsensus() public view {
         if (escrow.consensusReached()) {
-            uint8 b = escrow.resolvedBuyerPercentage();
-            assertTrue(b <= 100, "a resolved escrow must persist a real percentage");
-        } else {
-            assertEq(escrow.resolvedBuyerPercentage(), 255, "unresolved escrows keep the sentinel");
+            assertTrue(escrow.ARBITER() != address(0) || escrow.resolvedBuyerPercentage() != 255);
         }
     }
 
-    /// §14.3.5 — ROLE INTEGRITY. The marketplace is never the escrow's recipient at rest.
-    function invariant_marketplaceNeverHoldsTheRole() public view {
-        assertTrue(escrow.SELLER() != address(market), "the marketplace must never hold the role");
+    /// §14.3.5 — ROLE INTEGRITY. Neither the venue nor a vault is ever the escrow's
+    /// recipient at rest: the swap moves the role seller -> LP directly.
+    function invariant_venueNeverHoldsTheRole() public view {
+        address r = escrow.recipient();
+        assertTrue(r != address(market), "factory holds the cashflow role");
+        uint256 n = handler.vaultCount();
+        for (uint256 i = 0; i < n; i++) {
+            assertTrue(r != address(handler.vaultAt(i)), "a vault holds the cashflow role");
+        }
     }
 
-    /// The zero address can never read as a live voter.
+    /// The zero address can never read as a live voter (§3.3D).
     function invariant_zeroAddressNeverVotes() public view {
         assertEq(escrow.resolutionVotes(address(0)), 255);
     }

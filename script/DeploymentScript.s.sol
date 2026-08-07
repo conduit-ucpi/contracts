@@ -94,7 +94,7 @@ contract DeploymentScript is DeployCompletionEscrow {
         console.log("Nomination window (seconds):", implementation.NOMINATION_WINDOW());
         console.log("=================================================");
         console.log("MARKETPLACE PRECONDITION (spec 3.4):");
-        console.log("  Deploy MarketplaceEscrow with TRUSTED_IMPLEMENTATION =", address(implementation));
+        console.log("  Deploy the marketplace (OfferVault + OfferVaultFactory) with TRUSTED_IMPLEMENTATION =", address(implementation));
         console.log("  Marketplace inventory accrues only from escrows created AFTER this factory.");
         console.log("=================================================");
     }

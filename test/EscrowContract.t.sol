@@ -2068,7 +2068,7 @@ contract EscrowContractTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // MarketplaceEscrow integration adapter views
+    // Marketplace integration adapter views
     // ═══════════════════════════════════════════════════════════════════════════
 
     function testAdapterViews() public {
