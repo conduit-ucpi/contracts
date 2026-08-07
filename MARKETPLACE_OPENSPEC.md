@@ -34,12 +34,13 @@
 | 3.2 | Marketplace deployed | §3.4 step 3 | ⬜ | blocked on §13.1/13.2/owner/fee-recipient |
 | 4.1 | chainservice migration | **§15.4** | ✅ | `chainservice/` — see §15.4a for what shipped |
 | 4.2 | contractservice — stop calling the retired admin vote | **§15.5** | ✅ | auto-resolve path + `submitVote` client deleted; 321 tests green |
-| 4.3 | webapp — dispute + arbiter screens | **§15.6b–c** | ⬜ | ⚠️ BLOCKING: no UI settlement path until this ships |
+| 4.3 | webapp — dispute + arbiter screens | **§15.6b–c** | ✅ | `DisputeManagementModal` rewritten (every figure on-chain, record after), `StandingFiguresPanel`, `ArbiterPanel` |
 | 4.4 | ~~subgraph~~ → folded into 4.6 | **§15.3** | ⬜ | settled: chainservice indexes, not a subgraph. ⚠️ LOAD-BEARING — no on-chain offer book exists |
-| 4.5 | webapp — marketplace screens | **§15.6d** | ⬜ | services ready (4.6, 4.7) — now blocked only on the marketplace deploy |
+| 4.5 | webapp — marketplace screens | **§15.6d** | ✅ | `/liquidity` (explorer + LP offers) and `/offers` (seller book); still needs the venue deployed to do anything |
 | 4.6 | chainservice — marketplace API + reconciler | **§15.6a, §15.3a** | ✅ | create-offer + on-demand refresh (no poll), ABIs, push; 275 tests green. Needs `OFFER_VAULT_FACTORY_ADDRESS` at deploy |
 | 4.7 | contractservice — receive & serve the marketplace index | **§15.7** | ✅ | ingest + offer book + user-scoped refresh; 330 tests green |
-| 4.8 | webapp — "refresh from chain" action | **§15.6f** | ⬜ | surface on an LP's offer list; a missed acceptance strands their capital |
+| 4.8 | webapp — "refresh from chain" action | **§15.6f** | ✅ | on the LP's own offer list and the seller's book, with a last-reconciled line |
+| 4.9 | contractservice — sellable escrow list | **new, see note** | ✅ | `GET /api/marketplace/sellable`. ⚠️ Not in the original spec: §15.3 assumed a subgraph would supply the explorer's list, and folding indexing into chainservice (row 4.4) left nothing to enumerate sellable escrows. Composite verified against the chain per escrow; unreadable ones are omitted and counted |
 
 **Open decisions blocking nothing but worth settling before audit:** §0.4c M-1 (coupled
 holdback payouts) and L-2 (`renounceOwnership`).
@@ -930,11 +931,27 @@ answer is not ours to assume.
 - **Creation is permissionless and moves no money**, exactly like `createEscrowContract`:
   the LP is a **parameter**, not the caller, so chainservice deploys the vault on a user's
   behalf without gaining any power over the funds. A vault starts `PENDING` and empty.
-- **Only the named LP can fund it** (`fund()`), with their own signature. Before that, the
-  vault is an empty shell and no offer exists in any meaningful sense.
-- **Every function answers to exactly one role**: `fund`/`withdraw` → the LP;
-  `accept`/`reject` → the escrow's current recipient; `releaseHoldback` → the funder or the
-  live beneficiary; `sweep` → the factory owner, and only above what the vault owes.
+- **Funding is a DIRECT TRANSFER**, mirroring `EscrowContract.checkAndActivate` (§3.4): the
+  LP sends the offer token straight to the vault address from their own wallet — one plain
+  ERC20 `transfer`, the only signature the flow needs — and `fund()` then observes that the
+  balance arrived and flips the offer live. Before that the vault is an empty shell and no
+  offer exists in any meaningful sense.
+  - `fund()` is **permissionless**, and safe for the same reason `checkAndActivate` is: it
+    takes no arguments, so a caller chooses no destination, and `lp` was fixed at
+    deployment. The platform relays it so the LP pays for one transaction, not two.
+  - **The LP's consent is the transfer**, not the `fund()` call. Deployment merely named
+    them; nothing binds them until their own signature moves their own funds.
+  - This replaced approve + `transferFrom`, which cost the LP two signatures and presented
+    the second as an opaque call on a freshly-cloned proxy — which wallets render as a bare
+    native-value transaction, i.e. **an ETH prompt on a USDC offer**. A token transfer is
+    the one call a wallet decodes and displays honestly.
+  - A `PENDING` vault can therefore **hold money**: `owed()` reserves its live balance so
+    `sweep` cannot take an in-flight deposit, and `withdraw()` returns it (partial deposits
+    included) to the LP once the offer lapses.
+- **Every function answers to exactly one role**, with `fund` the deliberate exception
+  above: `withdraw` → the LP; `accept`/`reject` → the escrow's current recipient;
+  `releaseHoldback` → the funder or the live beneficiary; `sweep` → the factory owner, and
+  only above what the vault owes.
 - **Fees are paid to `FEE_RECIPIENT` at acceptance**, not accrued. There is no pooled fee
   balance and therefore no owner-withdrawable balance anywhere in the system.
 - **The seller's §3.2 approval names the individual vault** as operator, not a global venue
@@ -1535,7 +1552,7 @@ build from. Each item cites the section that created it.
 > |---|---|---|
 > | **chainservice** | §15.4 (why) + **§15.4a** (what shipped) | ✅ complete — escrow migration and marketplace API both done |
 > | **contractservice** | §15.5 (retired vote) + **§15.7** (marketplace index) | ✅ both complete |
-> | **webapp / front-end** | **§15.6** in full — a–f | ⬜ outstanding · §15.6b–c are **blocking** |
+> | **webapp / front-end** | **§15.6** in full — a–f | ✅ built (§0.1 rows 4.3, 4.5, 4.8) · marketplace screens inert until the venue deploys |
 >
 > **webapp: everything you need is §15.6 of this file.** §15.6a says what is ready to build
 > against, §15.6b–c the dispute and arbiter screens (**start here — nothing settles without
@@ -2056,10 +2073,16 @@ exist and are tested. What is still missing is the **contract deploy** (row 3.2)
 **contractservice's receiver** (row 4.7, §15.7) — until the latter lands there is nowhere for
 the offer book to be stored or read from.
 
-**Making an offer is now two transactions** (§5.0), mirroring create-then-deposit on an
-escrow: the platform deploys the LP's `OfferVault` (no money moves, no signature from the
-LP), then the **LP signs `fund()`** on that vault to put the capital in. An unfunded vault
-is not an offer — do not show it in a book until it is funded.
+**The LP signs exactly one transaction** (§5.0), mirroring the escrow's direct-payment path
+(`transferToContract` + `checkAndActivate`): the platform deploys the LP's `OfferVault` (no
+money moves, no signature from the LP), the **LP transfers the offer token to that vault**
+with a plain ERC20 `transfer`, and the platform then relays permissionless `fund()` to open
+it (moves no money either). An unfunded vault is not an offer — do not show it in a book
+until it is funded.
+
+⚠️ **The two halves of funding fail independently.** A transfer can land while the open does
+not. Any retry must call `fund-offer` on the existing deposit, **never re-send the
+transfer** — a second deposit lands in a vault that owes back only the offer amount.
 
 **The accept flow is two transactions with a five-minute fuse** (§3.2, §15.2):
 
@@ -2298,7 +2321,7 @@ before mainnet**.
 
 ## 17. Changelog
 
-- **v0.9.0 (2026-08-07): the marketplace no longer pools LP capital — one `OfferVault` per offer replaces the single `MarketplaceEscrow`.** Prompted by a custody concern §13.14 never asked about: the pooled venue commingled every LP's deposit at one platform-deployed address. The technical position was defensible (the owner could reach only genuine surplus; `withdrawFunds` was unpausable) but commingling is a regulatory trigger in its own right, and resting on an unobtained legal reading was the wrong risk. **New shape (§5.0), mirroring the escrow exactly:** `OfferVaultFactory` validates, prices, deploys and keeps the per-escrow registry while **holding no tokens ever**; each offer's capital sits in its own ERC-1167 `OfferVault` clone. Creation is permissionless and **moves no money** — the LP is a parameter, not the caller, so chainservice deploys on a user's behalf without gaining power over funds — and **only the named LP can `fund()`** it. Every vault function answers to exactly one role: `fund`/`withdraw` → the LP, `accept`/`reject` → the escrow's current recipient, `releaseHoldback` → funder or live beneficiary, `sweep` → the factory owner and only above what the vault owes. **Fees pay out to `FEE_RECIPIENT` at acceptance rather than accruing**, so `withdrawFees` is gone and no owner-withdrawable balance exists anywhere in the system. The seller's §3.2 approval now names the individual vault, the narrowest authority the swap can be granted.
+- **v0.9.0 (2026-08-07): the marketplace no longer pools LP capital — one `OfferVault` per offer replaces the single `MarketplaceEscrow`.** Prompted by a custody concern §13.14 never asked about: the pooled venue commingled every LP's deposit at one platform-deployed address. The technical position was defensible (the owner could reach only genuine surplus; `withdrawFunds` was unpausable) but commingling is a regulatory trigger in its own right, and resting on an unobtained legal reading was the wrong risk. **New shape (§5.0), mirroring the escrow exactly:** `OfferVaultFactory` validates, prices, deploys and keeps the per-escrow registry while **holding no tokens ever**; each offer's capital sits in its own ERC-1167 `OfferVault` clone. Creation is permissionless and **moves no money** — the LP is a parameter, not the caller, so chainservice deploys on a user's behalf without gaining power over funds — and funding is a **direct transfer** from the LP's own wallet, opened by permissionless `fund()`. Every vault function answers to exactly one role: `fund`/`withdraw` → the LP, `accept`/`reject` → the escrow's current recipient, `releaseHoldback` → funder or live beneficiary, `sweep` → the factory owner and only above what the vault owes. **Fees pay out to `FEE_RECIPIENT` at acceptance rather than accruing**, so `withdrawFees` is gone and no owner-withdrawable balance exists anywhere in the system. The seller's §3.2 approval now names the individual vault, the narrowest authority the swap can be granted.
   **Economics, validation and lifecycle are unchanged** — §5.1–5.3 and §6 remain authoritative for the rules; §5.0 and the §6 routing table say where they live. The factory retains **no** per-escrow or per-offer state at all — see the next paragraph for where the one cross-offer fact ended up.
   **Cost:** a ~45k-gas clone per offer (well under a cent at current Base prices) and an on-chain offer book that is enumerable per escrow rather than a single mapping — discovery was already off-chain by design (§12, §15.3). **Benefit:** no commingling, blast radius of one offer instead of all of them, conservation checkable per contract, and a narrower approval at the swap.
   **Tests rebuilt: 282 passing.** `test/OfferVault.t.sol` (31) covers the codehash gate, the create/fund split, per-role access control, the swap and fee payout, all five withdrawal conditions, the holdback rules and the sweep bounds — including the §0.4c High restated for this model (two reserve-bearing offers, position returns to the original seller, second acceptance must revert rather than strand the first reserve). `test/InvariantMarketplace.t.sol` restates §14.3 for per-offer custody: **every vault always covers its own obligation**, **the factory never holds a token balance**, status matches obligation, at most one live reserve per escrow, no manufactured consensus, and neither venue nor vault ever holds the cashflow role. **Removed:** `MarketplaceEscrow.sol` and its three suites.

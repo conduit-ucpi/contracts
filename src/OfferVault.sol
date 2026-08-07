@@ -81,6 +81,7 @@ contract OfferVault is ReentrancyGuard {
     error NoHoldback();
     error EscrowNotSettled();
     error TransferAmountMismatch();
+    error InsufficientDirectPayment();
     error ZeroAddress();
     error OffersPaused();
     error HoldbackOnResale();
@@ -194,29 +195,39 @@ contract OfferVault is ReentrancyGuard {
     }
 
     /**
-     * 💰 THE LP PUTS UP THE MONEY — AND ONLY THE LP CAN
+     * 💰 THE LP PUTS UP THE MONEY — DIRECT TRANSFER FUNDING
      *
-     * Deployment named the LP; this is where they consent to it with their own signature
-     * and their own funds. The offer becomes live, firm and visible to the seller only at
-     * this point. Before it, the vault is an empty shell.
+     * 🔒 SECURITY GUARANTEE: This function can be called by ANYONE — the same guarantee
+     *    EscrowContract.checkAndActivate() relies on. It takes no discretion and names no
+     *    destination: `lp` was fixed at initialize() and the capital can only ever leave
+     *    via this vault's own roles. A caller chooses nothing and gains nothing.
+     *
+     * ✅ NO APPROVAL NEEDED. The LP sends the offer token straight to this address from
+     *    their own wallet — one plain ERC20 transfer, which every wallet can decode and
+     *    display honestly — and this flips the offer live once the money is here. That
+     *    single transfer IS the LP's consent: deployment merely named them, and nothing
+     *    binds them until their own signature moves their own funds.
+     *
+     *    The previous approve+transferFrom shape asked for two signatures and presented
+     *    the second as an opaque call on a freshly-cloned proxy. Mirroring the escrow's
+     *    direct-transfer path costs one signature and reads as what it is.
+     *
+     * The offer becomes live, firm and visible to the seller only at this point. Before
+     * it, the vault is an empty shell.
      */
     function fund() external onlyInitialized nonReentrant {
         if (status != Status.PENDING) revert OfferNotOpen();
-        if (msg.sender != lp) revert NotOfferLp(msg.sender);
         if (block.timestamp > offerExpiry) revert OfferExpiredError();
 
-        status = Status.OPEN;
-
-        // Pull the LP's capital straight into THIS contract with a balance-delta check,
-        // rejecting fee-on-transfer and deflationary tokens — every payout below assumes
-        // exactly offerAmount arrived. The factory never touches the funds.
+        // The money must ALREADY be here. Anything short of the full offer is not an
+        // offer: the LP can top up and call again while the vault is still PENDING, and
+        // withdraw() returns a partial deposit once the offer lapses.
         address _token = token;
         uint256 amount = offerAmount;
-        uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
-        IERC20(_token).safeTransferFrom(msg.sender, address(this), amount);
-        if (IERC20(_token).balanceOf(address(this)) - balanceBefore != amount) {
-            revert TransferAmountMismatch();
-        }
+        uint256 balance = IERC20(_token).balanceOf(address(this));
+        if (balance < amount) revert InsufficientDirectPayment();
+
+        status = Status.OPEN;
 
         emit OfferFunded(escrowContract, lp, _token, amount);
     }
@@ -347,7 +358,14 @@ contract OfferVault is ReentrancyGuard {
         if (msg.sender != lp) revert NotOfferLp(msg.sender);
 
         bool withdrawable;
-        if (status == Status.CANCELLED) {
+        if (status == Status.PENDING) {
+            // Direct-transfer funding means a PENDING vault can hold money: the LP sent
+            // the token but fund() never landed, or they sent too little for it to
+            // succeed. Once the offer has lapsed that capital has no future here, and
+            // without this branch its only exit is sweep() — which pays FEE_RECIPIENT,
+            // not the LP whose money it is. Recovers a partial deposit too.
+            withdrawable = block.timestamp > offerExpiry;
+        } else if (status == Status.CANCELLED) {
             withdrawable = true;
         } else if (status == Status.OPEN) {
             IStabledropEscrow escrow = IStabledropEscrow(escrowContract);
@@ -365,9 +383,17 @@ contract OfferVault is ReentrancyGuard {
         if (!withdrawable) revert NothingToWithdraw();
 
         // ── EFFECTS FIRST ──
-        status = Status.SETTLED;
-        uint256 amount = offerAmount;
         address _token = token;
+
+        // A funded vault owes exactly the offer. A lapsed PENDING one owes whatever
+        // actually arrived, which may be a partial deposit — reading the balance is the
+        // only honest figure there, and paying out offerAmount would revert on a partial
+        // and strand it for good.
+        uint256 amount =
+            status == Status.PENDING ? IERC20(_token).balanceOf(address(this)) : offerAmount;
+        if (amount == 0) revert NothingToWithdraw();
+
+        status = Status.SETTLED;
 
         // ── INTERACTIONS ──
         IERC20(_token).safeTransfer(lp, amount);
@@ -459,7 +485,19 @@ contract OfferVault is ReentrancyGuard {
 
     /// @notice What this vault still owes someone. Anything above it was sent here by
     ///         mistake and is recoverable by sweep().
+    ///
+    /// @dev PENDING owes whatever is actually sitting here, which under DIRECT TRANSFER
+    ///      funding is the LP's in-flight deposit — theirs from the moment it lands, in the
+    ///      window between the transfer and fund(). Treating PENDING as owing nothing was
+    ///      right when a PENDING vault was necessarily empty (approve+transferFrom moved
+    ///      money and opened the offer in one call); now it would let sweep() take a
+    ///      deposit to FEE_RECIPIENT.
+    ///
+    ///      It is the live balance and NOT offerAmount because the deposit may be partial,
+    ///      or absent entirely — claiming a fixed obligation against an empty vault would
+    ///      report every unfunded offer as insolvent (§14.3.1).
     function owed() public view returns (uint256) {
+        if (status == Status.PENDING) return IERC20(token).balanceOf(address(this));
         if (status == Status.OPEN || status == Status.CANCELLED) return offerAmount;
         if (status == Status.ACCEPTED) return holdback;
         return 0;

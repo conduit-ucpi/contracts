@@ -115,9 +115,10 @@ contract OfferVaultTest is Test {
         vault = OfferVault(market.createOffer(address(escrow), who, amount, holdback, 0));
 
         usdc.mint(who, amount);
+        // Direct-transfer funding: one plain ERC20 transfer from the LP, then anyone may
+        // flip the offer live. No approval is involved.
         vm.prank(who);
-        usdc.approve(address(vault), amount);
-        vm.prank(who);
+        usdc.transfer(address(vault), amount);
         vault.fund();
     }
 
@@ -175,18 +176,90 @@ contract OfferVaultTest is Test {
         assertEq(vault.lp(), lp);
     }
 
-    function testFund_OnlyTheNamedLp() public {
+    /// fund() is permissionless — like EscrowContract.checkAndActivate() — and that is safe
+    /// because the caller names no destination. An outsider who funds someone else's vault
+    /// has made a gift to the NAMED LP and can never get it back: the exit pays `lp`.
+    function testFund_IsPermissionlessButTheCapitalIsAlwaysTheNamedLps() public {
         EscrowContract escrow = _createFunded();
         vm.prank(platform);
         OfferVault vault = OfferVault(market.createOffer(address(escrow), lp, 5_000e6, 0, 0));
 
         usdc.mint(outsider, 5_000e6);
         vm.prank(outsider);
-        usdc.approve(address(vault), 5_000e6);
+        usdc.transfer(address(vault), 5_000e6);
 
         vm.prank(outsider);
-        vm.expectRevert(abi.encodeWithSelector(OfferVault.NotOfferLp.selector, outsider));
         vault.fund();
+        assertEq(uint256(vault.status()), uint256(OfferVault.Status.OPEN));
+
+        // The outsider gained nothing: the offer is the LP's, and so is the only way out.
+        vm.warp(block.timestamp + DEFAULT_DURATION + 1);
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(OfferVault.NotOfferLp.selector, outsider));
+        vault.withdraw();
+
+        vm.prank(lp);
+        vault.withdraw();
+        assertEq(usdc.balanceOf(lp), 5_000e6);
+    }
+
+    /// The offer is not live until the money is actually here. A short transfer leaves the
+    /// vault PENDING rather than opening an offer the LP cannot honour.
+    function testFund_RejectsAPartialDeposit() public {
+        EscrowContract escrow = _createFunded();
+        vm.prank(platform);
+        OfferVault vault = OfferVault(market.createOffer(address(escrow), lp, 5_000e6, 0, 0));
+
+        usdc.mint(lp, 5_000e6);
+        vm.prank(lp);
+        usdc.transfer(address(vault), 4_999e6);
+
+        vm.expectRevert(OfferVault.InsufficientDirectPayment.selector);
+        vault.fund();
+
+        // Topping up completes it — the deposit is cumulative, not all-or-nothing.
+        vm.prank(lp);
+        usdc.transfer(address(vault), 1e6);
+        vault.fund();
+        assertEq(uint256(vault.status()), uint256(OfferVault.Status.OPEN));
+    }
+
+    /// The hole direct-transfer funding opens: money sitting in a vault that never opened.
+    /// Without a PENDING exit its only mover is sweep(), which pays FEE_RECIPIENT.
+    function testWithdraw_RecoversAPartialDepositFromALapsedPendingVault() public {
+        EscrowContract escrow = _createFunded();
+        vm.prank(platform);
+        OfferVault vault = OfferVault(market.createOffer(address(escrow), lp, 5_000e6, 0, 0));
+
+        usdc.mint(lp, 5_000e6);
+        vm.prank(lp);
+        usdc.transfer(address(vault), 4_000e6); // short — fund() never succeeds
+
+        // Still live: the LP may yet top up, so there is nothing to recover.
+        vm.prank(lp);
+        vm.expectRevert(OfferVault.NothingToWithdraw.selector);
+        vault.withdraw();
+
+        vm.warp(block.timestamp + DEFAULT_DURATION + 1);
+        vm.prank(lp);
+        vault.withdraw();
+        assertEq(usdc.balanceOf(lp), 5_000e6, "the partial deposit came back in full");
+    }
+
+    /// sweep() must not treat an in-flight deposit as mis-sent. A PENDING vault holding the
+    /// LP's transfer owes it to them, even though the offer has not opened yet.
+    function testSweep_CannotTouchADepositSittingInAPendingVault() public {
+        EscrowContract escrow = _createFunded();
+        vm.prank(platform);
+        OfferVault vault = OfferVault(market.createOffer(address(escrow), lp, 5_000e6, 0, 0));
+
+        usdc.mint(lp, 5_000e6);
+        vm.prank(lp);
+        usdc.transfer(address(vault), 5_000e6);
+
+        vm.prank(owner);
+        vm.expectRevert(OfferVault.NothingToSweep.selector);
+        vault.sweep(address(usdc));
     }
 
     function testFund_MakesTheOfferLiveAndHoldsItsOwnCapital() public {
@@ -207,8 +280,7 @@ contract OfferVaultTest is Test {
         vm.warp(block.timestamp + DEFAULT_DURATION + 1);
         usdc.mint(lp, 5_000e6);
         vm.prank(lp);
-        usdc.approve(address(vault), 5_000e6);
-        vm.prank(lp);
+        usdc.transfer(address(vault), 5_000e6);
         vm.expectRevert(OfferVault.OfferExpiredError.selector);
         vault.fund();
     }

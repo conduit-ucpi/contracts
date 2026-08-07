@@ -96,10 +96,25 @@ contract MarketplaceHandler is Test {
         OfferVault v = vaults[i % vaults.length];
         address lp = v.lp();
         usdc.mint(lp, v.offerAmount());
+        // Direct-transfer funding: the LP's transfer lands first and may sit in a PENDING
+        // vault before (or without) fund() ever opening the offer. Driving it as two
+        // separate steps is what exposes that window to the invariants.
         vm.prank(lp);
-        usdc.approve(address(v), v.offerAmount());
-        vm.prank(lp);
+        usdc.transfer(address(v), v.offerAmount());
         try v.fund() {} catch {}
+    }
+
+    /// Money lands but the offer is never opened — the window direct-transfer funding
+    /// creates, and the one sweep() must not mistake for a mis-send.
+    function transferWithoutFunding(uint256 i, uint256 amount) public {
+        if (vaults.length == 0) return;
+        OfferVault v = vaults[i % vaults.length];
+        uint256 sent = amount % (v.offerAmount() + 1);
+        if (sent == 0) return;
+        address lp = v.lp();
+        usdc.mint(lp, sent);
+        vm.prank(lp);
+        usdc.transfer(address(v), sent);
     }
 
     function accept(uint256 i) public {
@@ -252,8 +267,13 @@ contract InvariantMarketplaceTest is Test {
                 assertEq(v.owed(), v.offerAmount(), "open/cancelled must owe the gross");
             } else if (s == OfferVault.Status.ACCEPTED) {
                 assertEq(v.owed(), v.holdback(), "accepted must owe exactly the reserve");
+            } else if (s == OfferVault.Status.PENDING) {
+                // Direct-transfer funding: a PENDING vault owes exactly what has landed in
+                // it so far — the LP's money from the moment it arrives, whether or not
+                // fund() has opened the offer yet, and whether or not it is the full amount.
+                assertEq(v.owed(), usdc.balanceOf(address(v)), "pending owes what it holds");
             } else {
-                assertEq(v.owed(), 0, "pending/settled owe nothing");
+                assertEq(v.owed(), 0, "settled owes nothing");
             }
         }
     }
