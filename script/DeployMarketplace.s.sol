@@ -23,14 +23,14 @@ import {EscrowContract} from "../src/EscrowContract.sol";
  *    so a second reserve could be stacked on an escrow that already has one.
  *
  * Required environment:
- *   TRUSTED_IMPLEMENTATION_ADDRESS  the EscrowContract implementation to serve (§3.4 step 1)
- *   DEFAULT_ARBITER_ADDRESS         the fallback Safe — cross-checked against the implementation
- *   MARKETPLACE_OWNER_ADDRESS       Ownable2Step owner; MUST differ from the Safe
- *   MARKETPLACE_FEE_RECIPIENT       where protocol fees land at acceptance
- *   MARKETPLACE_FEE_BPS             §13.1 — proposed 25–50; hard cap 1000
- *   MARKETPLACE_OFFER_DURATION      §13.2 — proposed 86400 (24h); must be > 0
+ *   TRUSTED_IMPLEMENTATION_ADDRESS   the EscrowContract implementation to serve (§3.4 step 1)
+ *   DEFAULT_ARBITER_ADDRESS          the fallback Safe — cross-checked against the implementation
+ *   MARKETPLACE_OWNER_ADDRESS        Ownable2Step owner; MUST differ from the Safe
+ *   MARKETPLACE_FEE_RECIPIENT        where protocol fees land at acceptance
+ *   MARKETPLACE_FEE_BPS              §13.1 — proposed 25–50; hard cap 1000
+ *   MARKETPLACE_OFFER_DURATION_SECS  §13.2 — proposed 86400 (24h); must be > 0
  * Optional:
- *   MARKETPLACE_MIN_OFFER_BPS       §13.12 — settled at 1000 (10%); cap 10000
+ *   MARKETPLACE_MIN_OFFER_BPS        §13.12 — settled at 1000 (10%); cap 10000
  */
 contract DeployMarketplace is Script {
     uint256 internal constant DEFAULT_MIN_OFFER_BPS = 1000; // §13.12, settled
@@ -48,7 +48,7 @@ contract DeployMarketplace is Script {
         // No silent defaults for anything that affects money. §13.1 and §13.2 are still
         // "proposed" in the spec, so they must be stated explicitly at deploy time.
         uint256 feeBps = vm.envUint("MARKETPLACE_FEE_BPS");
-        uint256 offerDuration = vm.envUint("MARKETPLACE_OFFER_DURATION");
+        uint256 offerDuration = vm.envUint("MARKETPLACE_OFFER_DURATION_SECS");
         uint256 minOfferBps = vm.envOr("MARKETPLACE_MIN_OFFER_BPS", DEFAULT_MIN_OFFER_BPS);
 
         // ── Guards ────────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ contract DeployMarketplace is Script {
         // Fail early with a readable message rather than inside the constructor.
         require(feeBps <= 1000, "MARKETPLACE_FEE_BPS exceeds the 10% hard cap");
         require(minOfferBps <= 10000, "MARKETPLACE_MIN_OFFER_BPS exceeds 10000");
-        require(offerDuration > 0, "MARKETPLACE_OFFER_DURATION must be > 0");
+        require(offerDuration > 0, "MARKETPLACE_OFFER_DURATION_SECS must be > 0");
 
         console.log("=================================================");
         console.log("Deploying marketplace (per-offer vault model)");

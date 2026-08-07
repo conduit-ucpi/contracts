@@ -1,0 +1,226 @@
+name: Deploy Marketplace
+run-name: Deploy marketplace ${{ github.ref_name }}
+
+# The marketplace is deployed SEPARATELY from the escrow pair, on its own tag.
+# build.yml runs on every 'v*' release tag; redeploying OfferVaultFactory that
+# often would orphan the per-escrow registry (`hasBeenSold`, `holdbackVault`)
+# that live vaults depend on - a fresh factory would not know which escrows had
+# already been sold, so a second reserve could be stacked on one that has one.
+#
+#   offervault-vX.Y.Z     -> production
+#   offervault-testX.Y.Z  -> test
+#
+# Neither pattern matches build.yml's 'v*' / 'test*' globs, so tagging one never
+# triggers the other.
+on:
+  push:
+    tags:
+      - 'offervault-v*'
+      - 'offervault-test*'
+
+# Two marketplace deploys racing against the same environment is never what
+# anyone wants; queue rather than cancel, so a half-broadcast run is not killed.
+concurrency:
+  group: deploy-marketplace-${{ startsWith(github.ref, 'refs/tags/offervault-v') && 'production' || 'test' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(github.ref, 'refs/tags/offervault-v') && 'production' || 'test' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      # Everything the marketplace needs is checked BEFORE the chain is touched.
+      # OfferVaultFactory is immutable in every constructor argument that matters,
+      # so a bad value here is not a config fix later - it is a redeploy.
+      - name: Validate marketplace parameters
+        run: |
+          fail=0
+
+          require_addr() {
+            local name="$1" value="$2"
+            if [ -z "$value" ]; then
+              echo "::error::$name is not set for this environment."
+              fail=1
+              return
+            fi
+            if ! echo "$value" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then
+              echo "::error::$name is not a valid address: $value"
+              fail=1
+            fi
+          }
+
+          require_uint() {
+            local name="$1" value="$2"
+            if [ -z "$value" ]; then
+              echo "::error::$name is not set for this environment."
+              fail=1
+              return
+            fi
+            case "$value" in
+              ''|*[!0-9]*)
+                echo "::error::$name must be a plain integer, got: $value"
+                fail=1
+                ;;
+            esac
+          }
+
+          IMPL='${{ vars.TRUSTED_IMPLEMENTATION_ADDRESS }}'
+          ARBITER='${{ vars.DEFAULT_ARBITER_ADDRESS }}'
+          OWNER='${{ vars.MARKETPLACE_OWNER_ADDRESS }}'
+          FEE_RECIPIENT='${{ vars.MARKETPLACE_FEE_RECIPIENT }}'
+          FEE_BPS='${{ vars.MARKETPLACE_FEE_BPS }}'
+          OFFER_DURATION='${{ vars.MARKETPLACE_OFFER_DURATION_SECS }}'
+          MIN_OFFER_BPS='${{ vars.MARKETPLACE_MIN_OFFER_BPS }}'
+
+          # The escrow implementation this marketplace will serve. It comes from the
+          # build.yml run that deployed it - the marketplace is step 3 of the launch
+          # order and cannot be deployed before the implementation exists.
+          require_addr TRUSTED_IMPLEMENTATION_ADDRESS "$IMPL"
+          require_addr DEFAULT_ARBITER_ADDRESS "$ARBITER"
+          require_addr MARKETPLACE_OWNER_ADDRESS "$OWNER"
+          require_addr MARKETPLACE_FEE_RECIPIENT "$FEE_RECIPIENT"
+          require_uint MARKETPLACE_FEE_BPS "$FEE_BPS"
+          require_uint MARKETPLACE_OFFER_DURATION_SECS "$OFFER_DURATION"
+
+          # Optional - the script defaults it to 1000 (10%) when absent.
+          if [ -n "$MIN_OFFER_BPS" ]; then
+            require_uint MARKETPLACE_MIN_OFFER_BPS "$MIN_OFFER_BPS"
+            if [ "$fail" -eq 0 ] && [ "$MIN_OFFER_BPS" -gt 10000 ]; then
+              echo "::error::MARKETPLACE_MIN_OFFER_BPS exceeds 10000: $MIN_OFFER_BPS"
+              fail=1
+            fi
+          fi
+
+          if [ "$fail" -eq 0 ]; then
+            # Mirrors the on-chain guards so the failure is readable here rather than
+            # as a revert string three minutes into the run.
+            if [ "$FEE_BPS" -gt 1000 ]; then
+              echo "::error::MARKETPLACE_FEE_BPS exceeds the 10% hard cap: $FEE_BPS"
+              fail=1
+            fi
+            if [ "$OFFER_DURATION" -le 0 ]; then
+              echo "::error::MARKETPLACE_OFFER_DURATION_SECS must be > 0"
+              fail=1
+            fi
+            # spec 3.3E: the owner sets fees, the Safe arbitrates. One key holding
+            # both is a total-compromise target.
+            if [ "$(echo "$OWNER" | tr 'A-Z' 'a-z')" = "$(echo "$ARBITER" | tr 'A-Z' 'a-z')" ]; then
+              echo "::error::MARKETPLACE_OWNER_ADDRESS must differ from the DEFAULT_ARBITER Safe"
+              fail=1
+            fi
+          fi
+
+          [ "$fail" -eq 0 ] || exit 1
+
+          echo "Trusted implementation: $IMPL"
+          echo "Fallback arbiter Safe : $ARBITER"
+          echo "Marketplace owner     : $OWNER"
+          echo "Fee recipient         : $FEE_RECIPIENT"
+          echo "Fee (bps)             : $FEE_BPS"
+          echo "Min offer (bps)       : ${MIN_OFFER_BPS:-1000 (default)}"
+          echo "Offer duration (s)    : $OFFER_DURATION"
+
+      - name: Create .env file
+        run: |
+          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> .env
+          echo "NETWORK=${{ vars.NETWORK }}" >> .env
+          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> .env
+          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
+          echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> .env
+          echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> .env
+          # The escrow implementation the factory will serve. The deploy script
+          # cross-checks its DEFAULT_ARBITER and NOMINATION_WINDOW on-chain, which
+          # is what stops this pointing at the pre-3.3 implementation.
+          echo "TRUSTED_IMPLEMENTATION_ADDRESS=${{ vars.TRUSTED_IMPLEMENTATION_ADDRESS }}" >> .env
+          echo "DEFAULT_ARBITER_ADDRESS=${{ vars.DEFAULT_ARBITER_ADDRESS }}" >> .env
+          echo "MARKETPLACE_OWNER_ADDRESS=${{ vars.MARKETPLACE_OWNER_ADDRESS }}" >> .env
+          echo "MARKETPLACE_FEE_RECIPIENT=${{ vars.MARKETPLACE_FEE_RECIPIENT }}" >> .env
+          echo "MARKETPLACE_FEE_BPS=${{ vars.MARKETPLACE_FEE_BPS }}" >> .env
+          echo "MARKETPLACE_OFFER_DURATION_SECS=${{ vars.MARKETPLACE_OFFER_DURATION_SECS }}" >> .env
+          # Only written when set - the script falls back to 1000 bps (10%).
+          if [ -n "${{ vars.MARKETPLACE_MIN_OFFER_BPS }}" ]; then
+            echo "MARKETPLACE_MIN_OFFER_BPS=${{ vars.MARKETPLACE_MIN_OFFER_BPS }}" >> .env
+          fi
+
+      - name: Install dependencies
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts --shallow
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+
+      - name: Build contracts
+        run: forge build
+
+      - name: Run tests
+        run: forge test -vvv
+
+      - name: Deploy marketplace
+        id: deploy
+        run: |
+          source .env
+          # --retries/--delay give blockscout's verification queue time to settle.
+          forge script script/DeployMarketplace.s.sol:DeployMarketplace \
+            --rpc-url $NETWORK_RPC_URL \
+            --broadcast \
+            --verify --verifier blockscout --verifier-url $VERIFIER_URL \
+            --retries 10 --delay 15 \
+            -vvvv 2>&1 | tee marketplace_output.txt
+
+          VAULT_IMPLEMENTATION=$(grep "OfferVault implementation:" marketplace_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          VAULT_FACTORY=$(grep "OfferVaultFactory" marketplace_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          # 32-byte value, so match 64 hex chars - the 40-char pattern above would
+          # happily chop a prefix off it.
+          ESCROW_CODEHASH=$(grep -A1 "EXPECTED_ESCROW_CODEHASH" marketplace_output.txt | grep -o "0x[a-fA-F0-9]\{64\}" | head -1)
+
+          # A blank field in the summary silently breaks downstream config, so fail here.
+          for pair in "OfferVault implementation:$VAULT_IMPLEMENTATION" \
+                      "OfferVaultFactory:$VAULT_FACTORY" \
+                      "expected escrow codehash:$ESCROW_CODEHASH"; do
+            if [ -z "${pair#*:}" ]; then
+              echo "ERROR: could not parse the ${pair%%:*} from the deployment output" >&2
+              exit 1
+            fi
+          done
+
+          echo "==================================================="
+          echo "🏪 MARKETPLACE DEPLOYMENT COMPLETE"
+          echo "==================================================="
+          echo "OfferVault implementation: $VAULT_IMPLEMENTATION"
+          echo "OfferVaultFactory:         $VAULT_FACTORY"
+          echo "Trusted escrow impl:       ${{ vars.TRUSTED_IMPLEMENTATION_ADDRESS }}"
+          echo "Owner (Ownable2Step):      ${{ vars.MARKETPLACE_OWNER_ADDRESS }}"
+          echo "Fee recipient:             ${{ vars.MARKETPLACE_FEE_RECIPIENT }}"
+          echo "Fee (bps):                 ${{ vars.MARKETPLACE_FEE_BPS }}"
+          echo "Offer duration (s):        ${{ vars.MARKETPLACE_OFFER_DURATION_SECS }}"
+          echo "EXPECTED_ESCROW_CODEHASH:  $ESCROW_CODEHASH"
+          echo "==================================================="
+          echo "OFFER VAULT FACTORY ADDRESS FOR UI CONFIG: $VAULT_FACTORY"
+          echo "==================================================="
+          echo "The factory custodies NO tokens - each offer's capital sits in its own"
+          echo "OfferVault clone. The marketplace opens EMPTY and fills only from escrows"
+          echo "created by the factory built on the trusted implementation above."
+          echo "==================================================="
+
+          {
+            echo "### 🏪 Marketplace deployed (\`${{ github.ref_name }}\`)"
+            echo ""
+            echo "| Contract | Address |"
+            echo "| --- | --- |"
+            echo "| OfferVault implementation | \`$VAULT_IMPLEMENTATION\` |"
+            echo "| OfferVaultFactory | \`$VAULT_FACTORY\` |"
+            echo "| Trusted escrow implementation | \`${{ vars.TRUSTED_IMPLEMENTATION_ADDRESS }}\` |"
+            echo ""
+            echo "\`EXPECTED_ESCROW_CODEHASH\`: \`$ESCROW_CODEHASH\`"
+            echo ""
+            echo "Owner: \`${{ vars.MARKETPLACE_OWNER_ADDRESS }}\` - set at construction, no acceptance needed."
+            echo "Later transfers are **Ownable2Step**: the new owner must call \`acceptOwnership()\`."
+          } >> "$GITHUB_STEP_SUMMARY"
