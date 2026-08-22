@@ -92,6 +92,11 @@
         "name": "description",
         "type": "string",
         "internalType": "string"
+      },
+      {
+        "name": "arbiter",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [
@@ -198,6 +203,11 @@
   {
     "type": "error",
     "name": "AmountTooSmallForMinFee",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ArbiterMustBeDistinct",
     "inputs": []
   },
   {

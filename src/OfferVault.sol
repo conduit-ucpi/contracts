@@ -17,6 +17,7 @@ interface IStabledropEscrow {
     function ARBITER() external view returns (address);
     function resolvedBuyerPercentage() external view returns (uint8);
     function hasBeenSold() external view returns (bool);
+    function recipientNonce() external view returns (uint64);
     function transferRecipientFrom(address newRecipient) external;
 }
 
@@ -54,7 +55,8 @@ interface IOfferVaultFactory {
  *
  * 🔒 WHAT THE PLATFORM CAN DO HERE: nothing. The factory owner sets fee parameters and
  *    can pause NEW offers, but no role — owner, factory, or anyone else — can move the
- *    capital in this contract. `withdraw` answers only to the LP and is never pausable.
+ *    capital in this contract. `withdraw` pays ONLY the LP and is never pausable — it is
+ *    callable by anyone precisely because it has no discretion to abuse.
  *
  * ⚠️ AN OPEN OFFER IS A FIRM, IRREVOCABLE QUOTE. The LP cannot cancel it; they exit when
  *    the seller rejects, when it expires, or when the escrow becomes permanently
@@ -70,21 +72,16 @@ contract OfferVault is ReentrancyGuard {
     error AlreadyInitialized();
     error ImplementationCannotBeInitialized();
     error NotInitialized();
-    error OnlyFactory();
     error OfferNotOpen();
     error OfferExpiredError();
     error OfferStale();
     error NotEscrowRecipient(address caller);
-    error NotOfferLp(address caller);
     error EscrowNotSellable();
     error NothingToWithdraw();
     error NoHoldback();
     error EscrowNotSettled();
-    error TransferAmountMismatch();
     error InsufficientDirectPayment();
-    error ZeroAddress();
     error OffersPaused();
-    error HoldbackOnResale();
     error NotHoldbackParty(address caller);
     error OnlyFactoryOwner(address caller);
     error NothingToSweep();
@@ -139,6 +136,19 @@ contract OfferVault is ReentrancyGuard {
     uint256 public fee; // protocol fee, snapshotted at creation
     uint256 public offerExpiry;
 
+    /// @dev escrow.recipientNonce() at creation. The offer is valid ONLY while the escrow
+    ///      still reads this value; any recipient move bumps it and is never undone, so
+    ///      staleness here is PERMANENT rather than a comparison that can flip back.
+    ///
+    ///      Comparing `recipient()` against `seller` instead would make staleness
+    ///      REVERSIBLE: a seller rotating their payout wallet and rotating back would mute
+    ///      every offer on the escrow and then revive them all. With the exit path open to
+    ///      any caller, that window is one in which a stranger could permanently settle a
+    ///      still-good offer out from under its LP. A monotonic counter has no such window.
+    ///
+    ///      uint64 to pack into the same slot as `status`.
+    uint64 public sellerNonce;
+
     Status public status;
 
     /// @dev The reserve's funder is the seller of the FIRST sale, which is this vault's
@@ -176,7 +186,8 @@ contract OfferVault is ReentrancyGuard {
         uint256 _holdback,
         uint256 _netAmount,
         uint256 _fee,
-        uint256 _offerExpiry
+        uint256 _offerExpiry,
+        uint64 _sellerNonce
     ) external {
         if (status == Status.SETTLED) revert ImplementationCannotBeInitialized();
         if (FACTORY != address(0)) revert AlreadyInitialized();
@@ -191,6 +202,7 @@ contract OfferVault is ReentrancyGuard {
         netAmount = _netAmount;
         fee = _fee;
         offerExpiry = _offerExpiry;
+        sellerNonce = _sellerNonce;
         status = Status.PENDING;
     }
 
@@ -258,28 +270,37 @@ contract OfferVault is ReentrancyGuard {
 
         IStabledropEscrow escrow = IStabledropEscrow(escrowContract);
 
-        // Live read, never the snapshot. Payment always goes to
-        // msg.sender == seller == recipient(), so a stale snapshot can never be paid.
+        // Live read, never the snapshot: the caller must be the CURRENT recipient.
         address currentRecipient = escrow.recipient();
         if (msg.sender != currentRecipient) revert NotEscrowRecipient(msg.sender);
-        if (currentRecipient != seller) revert OfferStale();
+
+        // The role must never have MOVED — not "must match again". A round trip
+        // (seller → other → seller) leaves the address comparison reading fresh, which
+        // would make this offer both acceptable here and withdrawable below, the one thing
+        // that must never be true at once: a stranger could then settle the vault in front
+        // of the seller's own accept().
+        //
+        // 🔒 THIS IS ALSO WHAT MAKES THE PAYOUT SAFE. `escrow.SELLER` is written in exactly
+        //    two places — initialize (before any offer can exist) and _transferRecipient,
+        //    which always bumps recipientNonce. So an unchanged nonce proves the recipient
+        //    has not moved since this offer was priced, hence
+        //    msg.sender == currentRecipient == seller, and paying the `seller` snapshot
+        //    below pays the live recipient. A separate `currentRecipient != seller` branch
+        //    could never fire and was removed.
+        if (escrow.recipientNonce() != sellerNonce) revert OfferStale();
 
         if (!escrow.isFunded() || escrow.hasActiveDispute() || escrow.isClaimed()) {
             revert EscrowNotSellable();
         }
 
-        // ⚠️ THE ONE-RESERVE RULE, RE-CHECKED HERE (§0.4c High). The escrow's own
-        //    hasBeenSold can flip between this offer's creation and its acceptance. The
-        //    sequence that breaks without this: two LPs both bid with a reserve while the
-        //    escrow is unsold (both legal). The seller accepts the first, which sets the
-        //    flag. The position then returns to that same seller by ANY route — a direct
-        //    changeRecipient back, or the seller buying their own cashflow back as an LP —
-        //    which makes the second offer live again. Accepting it would put a SECOND live
-        //    reserve on one escrow, and releaseHoldback pays min(loss, reserve) from each,
-        //    so the same loss would be compensated twice at the second funder's expense.
-        //    Read from the escrow, so no marketplace registry is involved and a redeployed
-        //    venue cannot lose the fact.
-        if (holdback > 0 && escrow.hasBeenSold()) revert HoldbackOnResale();
+        // ⚠️ THE ONE-RESERVE RULE (§0.4c High) needs no re-check here. It is enforced at
+        //    creation (factory step 8) and, for anything that changes afterwards, by the
+        //    staleness check above: a reserve may only be quoted on an unsold escrow, and
+        //    the only thing that can set hasBeenSold is transferRecipientFrom, which moves
+        //    the recipient and therefore bumps recipientNonce. The dangerous sequence — the
+        //    position returning to this seller so a second reserve could stack on one
+        //    escrow — is exactly a recipient round trip, and the nonce makes that permanent
+        //    staleness. A `holdback > 0 && hasBeenSold()` branch here could never fire.
 
         // ── EFFECTS ──
         // Set before any external call. A reserve keeps this vault alive holding exactly
@@ -331,7 +352,10 @@ contract OfferVault is ReentrancyGuard {
     function reject() external onlyInitialized nonReentrant {
         if (status != Status.OPEN) revert OfferNotOpen();
         if (msg.sender != seller) revert NotEscrowRecipient(msg.sender);
-        if (IStabledropEscrow(escrowContract).recipient() != seller) revert OfferStale();
+        // An unchanged nonce proves the recipient has not moved since creation, which
+        // implies recipient() == seller; comparing the addresses too would add a branch
+        // that can never fire.
+        if (IStabledropEscrow(escrowContract).recipientNonce() != sellerNonce) revert OfferStale();
 
         status = Status.CANCELLED;
 
@@ -343,44 +367,73 @@ contract OfferVault is ReentrancyGuard {
     // ───────────────────────────────────────────────────────────────────────────
 
     /**
+     * 🔎 WOULD withdraw() SUCCEED RIGHT NOW?
+     *
+     * Public because §15.2 puts the detection burden off-chain: nothing on-chain notifies
+     * the LP that their offer has lapsed or gone stale, so the indexer must poll for it and
+     * prompt. Exposing the matrix means the UI reads the contract's own answer instead of
+     * reimplementing the conditions and drifting from them.
+     *
+     * It is also the single source of truth `withdraw()` itself branches on, which is what
+     * lets the invariant suite check withdrawability against acceptability without
+     * restating the matrix in the test — a restatement would assert only that the test
+     * agrees with itself, and would pass no matter how the contract changed.
+     */
+    function isWithdrawable() public view returns (bool) {
+        if (status == Status.PENDING) {
+            // Direct-transfer funding means a PENDING vault can hold money: the LP sent the
+            // token but fund() never landed, or they sent too little for it to succeed.
+            // Once the offer has lapsed that capital has no future here, and without this
+            // branch its only exit is sweep() — which pays FEE_RECIPIENT, not the LP whose
+            // money it is. Recovers a partial deposit too. The balance test keeps this
+            // honest for an empty vault, where withdraw() would revert NothingToWithdraw.
+            return block.timestamp > offerExpiry && IERC20(token).balanceOf(address(this)) > 0;
+        }
+        if (status == Status.CANCELLED) return true;
+        if (status != Status.OPEN) return false;
+
+        IStabledropEscrow escrow = IStabledropEscrow(escrowContract);
+        return block.timestamp > offerExpiry // expired
+            || escrow.recipientNonce() != sellerNonce // stale — the recipient MOVED
+            // Permanently unacceptable: a dispute can only resolve to settled, so the offer
+            // can never be accepted again. The LP exits immediately rather than waiting out
+            // offerExpiry.
+            || escrow.hasActiveDispute() || escrow.isClaimed();
+        // A reserve-bearing offer on an escrow that has since been sold needs no term of
+        // its own: the sale moved the recipient, so the nonce test above already reports it
+        // stale.
+    }
+
+    /**
      * 💸 LP RECOVERS THEIR DEPOSIT — IN FULL GROSS, INCLUDING THE NEVER-CHARGED FEE
      *
      * Expiry and staleness are evaluated lazily HERE rather than in a separate expire
      * step; nothing on-chain notifies the LP, so the indexer must detect these conditions
      * and prompt.
      *
+     * 🔓 CALLABLE BY ANYONE, PAYS ONLY THE LP. The caller chooses nothing: the destination
+     *    is `lp`, fixed at initialize(); the amount is fixed by state; and every condition
+     *    is read from the escrow or the clock. So a stranger calling this can only do the
+     *    LP a favour — returning their capital, at the stranger's own gas expense. The same
+     *    no-discretion argument that makes fund() permissionless.
+     *
+     *    ⚠️ THIS IS ONLY SAFE BECAUSE EVERY CONDITION BELOW IS ONE-WAY. An offer that is
+     *    withdrawable can never become acceptable again, so opening the function up cannot
+     *    destroy anything of value to the LP. Time only moves forward; a dispute resolves
+     *    to claimed and never back to funded; isClaimed and hasBeenSold are absorbing; and
+     *    staleness is measured with the escrow's monotonic recipientNonce rather than by
+     *    comparing recipient() to a snapshot — a comparison that WOULD flip back, and would
+     *    hand any passer-by a window to settle a still-good offer against the LP's wishes.
+     *    Add no reversible condition here without re-closing this to the LP.
+     *
      * No withdrawable offer is ever simultaneously acceptable — acceptance rejects
-     * expired, stale, disputed and claimed — so there is no accept/withdraw race.
+     * expired, stale, disputed and claimed — so there is no accept/withdraw race, and no
+     * caller can settle a vault in front of the seller's accept().
      *
      * NOT pausable — this is THE exit path (§5.2.10).
      */
     function withdraw() external onlyInitialized nonReentrant {
-        if (msg.sender != lp) revert NotOfferLp(msg.sender);
-
-        bool withdrawable;
-        if (status == Status.PENDING) {
-            // Direct-transfer funding means a PENDING vault can hold money: the LP sent
-            // the token but fund() never landed, or they sent too little for it to
-            // succeed. Once the offer has lapsed that capital has no future here, and
-            // without this branch its only exit is sweep() — which pays FEE_RECIPIENT,
-            // not the LP whose money it is. Recovers a partial deposit too.
-            withdrawable = block.timestamp > offerExpiry;
-        } else if (status == Status.CANCELLED) {
-            withdrawable = true;
-        } else if (status == Status.OPEN) {
-            IStabledropEscrow escrow = IStabledropEscrow(escrowContract);
-            withdrawable = block.timestamp > offerExpiry // expired
-                || escrow.recipient() != seller // stale — recipient changed
-                // Permanently unacceptable: a dispute can only resolve to settled, so the
-                // offer can never be accepted again. The LP exits immediately rather than
-                // waiting out offerExpiry.
-                || escrow.hasActiveDispute() || escrow.isClaimed()
-                // Likewise permanently unacceptable: this offer quotes a reserve, but the
-                // escrow has since had its first sale, so accept() will always revert.
-                || (holdback > 0 && escrow.hasBeenSold());
-        }
-
-        if (!withdrawable) revert NothingToWithdraw();
+        if (!isWithdrawable()) revert NothingToWithdraw();
 
         // ── EFFECTS FIRST ──
         address _token = token;
@@ -388,10 +441,10 @@ contract OfferVault is ReentrancyGuard {
         // A funded vault owes exactly the offer. A lapsed PENDING one owes whatever
         // actually arrived, which may be a partial deposit — reading the balance is the
         // only honest figure there, and paying out offerAmount would revert on a partial
-        // and strand it for good.
+        // and strand it for good. Never zero: isWithdrawable() requires a non-zero balance
+        // in the PENDING branch, and offerAmount is floored at 1 by the factory's minimum.
         uint256 amount =
             status == Status.PENDING ? IERC20(_token).balanceOf(address(this)) : offerAmount;
-        if (amount == 0) revert NothingToWithdraw();
 
         status = Status.SETTLED;
 

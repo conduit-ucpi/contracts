@@ -192,15 +192,13 @@ contract OfferVaultTest is Test {
         vault.fund();
         assertEq(uint256(vault.status()), uint256(OfferVault.Status.OPEN));
 
-        // The outsider gained nothing: the offer is the LP's, and so is the only way out.
+        // The outsider gained nothing. withdraw() is open to them too, but its destination
+        // is `lp` — so calling it merely completes the gift, at their own gas expense.
         vm.warp(block.timestamp + DEFAULT_DURATION + 1);
         vm.prank(outsider);
-        vm.expectRevert(abi.encodeWithSelector(OfferVault.NotOfferLp.selector, outsider));
         vault.withdraw();
-
-        vm.prank(lp);
-        vault.withdraw();
-        assertEq(usdc.balanceOf(lp), 5_000e6);
+        assertEq(usdc.balanceOf(lp), 5_000e6, "the capital went to the NAMED lp, not the caller");
+        assertEq(usdc.balanceOf(outsider), 0, "the funder got nothing back");
     }
 
     /// The offer is not live until the money is actually here. A short transfer leaves the
@@ -314,16 +312,102 @@ contract OfferVaultTest is Test {
         vault.reject();
     }
 
-    function testWithdraw_OnlyLp() public {
+    /// withdraw() takes no discretion, so anyone may fire it — a keeper, the platform, the
+    /// seller — but it can only ever pay `lp`. Nobody can redirect a deposit by calling it.
+    function testWithdraw_IsPermissionlessButAlwaysPaysTheLp() public {
         EscrowContract escrow = _createFunded();
         OfferVault vault = _offer(escrow, lp, 5_000e6, 0);
 
         vm.prank(seller);
         vault.reject();
 
-        vm.prank(seller); // even the seller who rejected cannot pull the LP's money out
-        vm.expectRevert(abi.encodeWithSelector(OfferVault.NotOfferLp.selector, seller));
+        uint256 sellerBefore = usdc.balanceOf(seller);
+
+        vm.prank(seller); // the seller who rejected may return the money, but not take it
         vault.withdraw();
+
+        assertEq(usdc.balanceOf(lp), 5_000e6, "the LP got their gross back");
+        assertEq(usdc.balanceOf(seller), sellerBefore, "the caller gained nothing");
+        assertEq(uint256(vault.status()), uint256(OfferVault.Status.SETTLED));
+    }
+
+    /// 🔑 THE PROPERTY THAT MAKES A PERMISSIONLESS withdraw() SAFE.
+    ///
+    /// A recipient round trip (seller → elsewhere → seller) used to mute every offer on an
+    /// escrow and then revive them, because staleness was `recipient() != seller` — a
+    /// comparison that flips back. During that window an offer was BOTH withdrawable and,
+    /// once the position returned, acceptable again. With withdraw() open to any caller,
+    /// a competitor could have settled a rival's good offer for the price of gas.
+    ///
+    /// recipientNonce makes the move one-way, so there is no window: the offer is stale
+    /// from the first move onward and never comes back.
+    function testWithdraw_StalenessSurvivesARecipientRoundTrip() public {
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _offer(escrow, lp, 5_000e6, 0);
+
+        uint64 nonceAtCreation = vault.sellerNonce();
+
+        // The merchant rotates their payout wallet and rotates straight back.
+        vm.prank(seller);
+        escrow.changeRecipient(outsider);
+        vm.prank(outsider);
+        escrow.changeRecipient(seller);
+
+        assertEq(escrow.recipient(), seller, "the address comparison reads fresh again");
+        assertTrue(escrow.recipientNonce() != nonceAtCreation, "but the nonce moved, one-way");
+        assertFalse(escrow.hasBeenSold(), "and no sale happened - this was a wallet rotation");
+
+        // Unacceptable, permanently.
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(address(vault), lp);
+        vm.prank(seller);
+        vm.expectRevert(OfferVault.OfferStale.selector);
+        vault.accept();
+
+        // So a stranger settling it destroys nothing that was still worth anything, and
+        // the money goes where it always was going to go.
+        vm.prank(outsider);
+        vault.withdraw();
+        assertEq(usdc.balanceOf(lp), 5_000e6);
+        assertEq(uint256(vault.status()), uint256(OfferVault.Status.SETTLED));
+    }
+
+    /// The flip side: while an offer is healthy, nobody can settle it — not the seller who
+    /// wants a rival's bid gone, not a competing LP. withdraw() is open, but every one of
+    /// its conditions is read off the escrow and the clock, so a caller cannot manufacture
+    /// one. A firm quote stays firm.
+    function testWithdraw_CannotBeUsedToKillAHealthyOffer() public {
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _offer(escrow, lp, 5_000e6, 0);
+
+        vm.prank(outsider);
+        vm.expectRevert(OfferVault.NothingToWithdraw.selector);
+        vault.withdraw();
+
+        vm.prank(lp2); // a competing LP has no more power than anyone else
+        vm.expectRevert(OfferVault.NothingToWithdraw.selector);
+        vault.withdraw();
+
+        vm.prank(seller); // and neither does the seller, who must use reject()
+        vm.expectRevert(OfferVault.NothingToWithdraw.selector);
+        vault.withdraw();
+
+        assertEq(uint256(vault.status()), uint256(OfferVault.Status.OPEN), "still live");
+    }
+
+    /// A keeper firing the exit for an expired offer is the point of opening it up: the LP
+    /// need not be watching, and the caller pays the gas to return someone else's money.
+    function testWithdraw_AKeeperCanCloseAnExpiredOfferForTheLp() public {
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _offer(escrow, lp, 5_000e6, 0);
+
+        vm.warp(block.timestamp + DEFAULT_DURATION + 1);
+
+        vm.prank(outsider);
+        vault.withdraw();
+
+        assertEq(usdc.balanceOf(lp), 5_000e6);
+        assertEq(usdc.balanceOf(outsider), 0);
     }
 
     function testSweep_OnlyFactoryOwner() public {
@@ -490,12 +574,14 @@ contract OfferVaultTest is Test {
         vm.prank(lp);
         escrow.changeRecipient(seller);
 
-        // Offer b's seller snapshot matches the current recipient again, so it is live —
-        // but it must not be acceptable, because its reserve would strand a's.
+        // Offer b's seller snapshot matches the current recipient again — but the escrow's
+        // recipientNonce has moved twice, so b is permanently stale and unacceptable. The
+        // one-reserve rule is what MADE this case dangerous; the nonce is what now closes
+        // it, and it closes it one step earlier than the HoldbackOnResale re-check would.
         vm.prank(seller);
         escrow.approveRecipientTransfer(address(b), lp2);
         vm.prank(seller);
-        vm.expectRevert(OfferVault.HoldbackOnResale.selector);
+        vm.expectRevert(OfferVault.OfferStale.selector);
         b.accept();
 
         // a's reserve is intact.
@@ -650,7 +736,7 @@ contract OfferVaultTest is Test {
 
     function testImplementationCannotBeInitialized() public {
         vm.expectRevert(OfferVault.ImplementationCannotBeInitialized.selector);
-        vaultImpl.initialize(address(1), address(2), address(3), address(usdc), 1, 0, 1, 0, block.timestamp + 1);
+        vaultImpl.initialize(address(1), address(2), address(3), address(usdc), 1, 0, 1, 0, block.timestamp + 1, uint64(0));
     }
 
     function testFactoryHasNoPerEscrowStorage() public {

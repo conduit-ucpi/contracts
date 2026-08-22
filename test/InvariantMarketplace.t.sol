@@ -95,12 +95,17 @@ contract MarketplaceHandler is Test {
         if (vaults.length == 0) return;
         OfferVault v = vaults[i % vaults.length];
         address lp = v.lp();
-        usdc.mint(lp, v.offerAmount());
+        // Cache BEFORE the prank. An argument-position `v.offerAmount()` would consume it,
+        // the transfer would run as this handler (which holds no USDC) and revert, and no
+        // vault would ever reach OPEN — silently reducing every invariant below to a check
+        // on PENDING vaults only.
+        uint256 amount = v.offerAmount();
+        usdc.mint(lp, amount);
         // Direct-transfer funding: the LP's transfer lands first and may sit in a PENDING
         // vault before (or without) fund() ever opening the offer. Driving it as two
         // separate steps is what exposes that window to the invariants.
         vm.prank(lp);
-        usdc.transfer(address(v), v.offerAmount());
+        usdc.transfer(address(v), amount);
         try v.fund() {} catch {}
     }
 
@@ -137,10 +142,14 @@ contract MarketplaceHandler is Test {
         try v.reject() {} catch {}
     }
 
-    function withdraw(uint256 i) public {
+    /// withdraw() is permissionless, so drive it from arbitrary callers — the LP, the
+    /// seller, a rival LP, the buyer, a total stranger. Whoever fires it, the money must
+    /// end up with `lp`, and it must never fire on an offer that is still acceptable.
+    function withdraw(uint256 i, uint256 callerSeed) public {
         if (vaults.length == 0) return;
         OfferVault v = vaults[i % vaults.length];
-        vm.prank(v.lp());
+        address[5] memory callers = [v.lp(), seller, lps[0], buyer, address(0xBEEF)];
+        vm.prank(callers[callerSeed % 5]);
         try v.withdraw() {} catch {}
     }
 
@@ -171,6 +180,26 @@ contract MarketplaceHandler is Test {
         address to = [seller, lps[0], lps[1], lps[2]][seed % 4];
         vm.prank(escrow.recipient());
         try escrow.changeRecipient(to) {} catch {}
+    }
+
+    /// A recipient round trip in ONE action: away, and straight back. This is the exact
+    /// sequence a reversible staleness check reads as "fresh again", so leaving it to the
+    /// fuzzer to assemble from two separate rotations makes the property it guards nearly
+    /// unreachable. Driving it directly is what gives
+    /// invariant_neverBothAcceptableAndWithdrawable something to bite on.
+    function roundTripRecipient(uint256 seed) public {
+        address current = escrow.recipient();
+        address[4] memory hops = [seller, lps[0], lps[1], lps[2]];
+        address hop = hops[seed % 4];
+        if (hop == current) return;
+
+        vm.prank(current);
+        try escrow.changeRecipient(hop) {}
+        catch {
+            return;
+        }
+        vm.prank(hop);
+        try escrow.changeRecipient(current) {} catch {}
     }
 
     function warp(uint256 secs) public {
@@ -289,6 +318,30 @@ contract InvariantMarketplaceTest is Test {
             if (v.status() == OfferVault.Status.ACCEPTED && v.holdback() > 0) live++;
         }
         assertLe(live, 1, "two reserves live on one escrow");
+    }
+
+    /// §14.2 — NEVER BOTH ACCEPTABLE AND WITHDRAWABLE. The property the permissionless
+    /// exit rests on: if these two ever overlapped, a stranger could settle a vault in
+    /// front of the seller's own accept(), destroying a live offer still worth something
+    /// to its LP.
+    ///
+    /// Withdrawability is read from the VAULT (`isWithdrawable()`, the same predicate
+    /// `withdraw()` branches on), not restated here — a restatement would assert only that
+    /// this test agrees with itself and would pass however the contract changed. The
+    /// fuzzer's roundTripRecipient drives the seller -> other -> seller trip that a
+    /// reversible staleness check reads as "fresh again".
+    function invariant_neverBothAcceptableAndWithdrawable() public view {
+        uint256 n = handler.vaultCount();
+        for (uint256 i = 0; i < n; i++) {
+            OfferVault v = handler.vaultAt(i);
+            if (v.status() != OfferVault.Status.OPEN) continue;
+
+            bool acceptable = block.timestamp <= v.offerExpiry() && escrow.recipient() == v.seller()
+                && escrow.recipientNonce() == v.sellerNonce() && escrow.isFunded() && !escrow.hasActiveDispute()
+                && !escrow.isClaimed() && !(v.holdback() > 0 && escrow.hasBeenSold()) && !market.paused();
+
+            assertFalse(acceptable && v.isWithdrawable(), "an offer was both acceptable and withdrawable");
+        }
     }
 
     /// A reserve can only exist on an escrow that has actually been sold.

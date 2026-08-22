@@ -178,7 +178,16 @@ contract OfferVaultFactory is Ownable2Step, Pausable, ReentrancyGuard {
         vault = Clones.clone(VAULT_IMPLEMENTATION);
 
         OfferVault(vault).initialize(
-            escrowContract, q.seller, lp, q.token, offerAmount, holdback, q.netAmount, q.fee, q.offerExpiry
+            escrowContract,
+            q.seller,
+            lp,
+            q.token,
+            offerAmount,
+            holdback,
+            q.netAmount,
+            q.fee,
+            q.offerExpiry,
+            q.sellerNonce
         );
 
         emit OfferCreated(
@@ -189,6 +198,7 @@ contract OfferVaultFactory is Ownable2Step, Pausable, ReentrancyGuard {
     struct Quote {
         address seller;
         address token;
+        uint64 sellerNonce;
         uint256 netAmount;
         uint256 fee;
         uint256 offerExpiry;
@@ -233,6 +243,11 @@ contract OfferVaultFactory is Ownable2Step, Pausable, ReentrancyGuard {
         //    buyer/arbiter at the pull; this is a clean early error rather than a failure
         //    two transactions later.
         q.seller = escrow.recipient();
+        // Snapshotted alongside the address it belongs to. The vault treats any later bump
+        // as PERMANENT staleness, which is what lets its exit path be open to any caller:
+        // see OfferVault.withdraw. Read here rather than in the vault so the recipient the
+        // offer was priced against and the nonce that pins it are one atomic observation.
+        q.sellerNonce = escrow.recipientNonce();
         if (lp == q.seller || lp == escrow.BUYER() || lp == escrow.ARBITER()) {
             revert LpCannotBeEscrowParty(lp);
         }

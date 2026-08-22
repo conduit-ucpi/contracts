@@ -1,12 +1,44 @@
 [
   {
     "type": "constructor",
-    "inputs": [],
+    "inputs": [
+      {
+        "name": "_defaultArbiter",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
     "stateMutability": "nonpayable"
   },
   {
     "type": "function",
     "name": "AMOUNT",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ARBITER",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "ARBITER_SILENCE_TIMEOUT",
     "inputs": [],
     "outputs": [
       {
@@ -39,6 +71,19 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DEFAULT_ARBITER",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -84,7 +129,33 @@
   },
   {
     "type": "function",
-    "name": "GAS_PAYER",
+    "name": "NOMINATION_WINDOW",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "RECIPIENT_APPROVAL_TTL",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "SELLER",
     "inputs": [],
     "outputs": [
       {
@@ -97,7 +168,25 @@
   },
   {
     "type": "function",
-    "name": "SELLER",
+    "name": "approveRecipientTransfer",
+    "inputs": [
+      {
+        "name": "operator",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "newRecipient",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "approvedRecipientTarget",
     "inputs": [],
     "outputs": [
       {
@@ -149,6 +238,26 @@
   },
   {
     "type": "function",
+    "name": "changeRecipient",
+    "inputs": [
+      {
+        "name": "newSeller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "checkAndActivate",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "claimFunds",
     "inputs": [],
     "outputs": [],
@@ -183,6 +292,13 @@
   {
     "type": "function",
     "name": "depositFunds",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "evictArbiter",
     "inputs": [],
     "outputs": [],
     "stateMutability": "nonpayable"
@@ -242,6 +358,32 @@
   },
   {
     "type": "function",
+    "name": "hasActiveDispute",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "hasBeenSold",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "initialize",
     "inputs": [
       {
@@ -260,7 +402,7 @@
         "internalType": "address"
       },
       {
-        "name": "_gasPayer",
+        "name": "_arbiter",
         "type": "address",
         "internalType": "address"
       },
@@ -342,10 +484,153 @@
   },
   {
     "type": "function",
+    "name": "lastArbiterActionAt",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maturity",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "nominateArbiter",
+    "inputs": [
+      {
+        "name": "candidate",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "nominatedByBuyer",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "nominatedByRecipient",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "nominationDeadline",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "payoutAmount",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "raiseDispute",
     "inputs": [],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "recipient",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "recipientApprovalExpiry",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "recipientNonce",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "recipientOperator",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -368,6 +653,26 @@
   },
   {
     "type": "function",
+    "name": "resolvedBuyerPercentage",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "seatDefaultArbiter",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "submitResolutionVote",
     "inputs": [
       {
@@ -381,6 +686,32 @@
   },
   {
     "type": "function",
+    "name": "sweepToken",
+    "inputs": [
+      {
+        "name": "_token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "token",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "tokenAddress",
     "inputs": [],
     "outputs": [
@@ -391,6 +722,83 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "transferRecipientFrom",
+    "inputs": [
+      {
+        "name": "newRecipient",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "ArbiterEvicted",
+    "inputs": [
+      {
+        "name": "previousArbiter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ArbiterNominated",
+    "inputs": [
+      {
+        "name": "nominator",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "candidate",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ArbiterSeated",
+    "inputs": [
+      {
+        "name": "arbiter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "byAgreement",
+        "type": "bool",
+        "indexed": false,
+        "internalType": "bool"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ArbiterUnseated",
+    "inputs": [
+      {
+        "name": "previousArbiter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
   },
   {
     "type": "event",
@@ -507,6 +915,81 @@
   },
   {
     "type": "event",
+    "name": "RecipientChanged",
+    "inputs": [
+      {
+        "name": "previousSeller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newSeller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "timestamp",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RecipientTransferApproved",
+    "inputs": [
+      {
+        "name": "operator",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newRecipient",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "expiry",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TokensSwept",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "VoteSubmitted",
     "inputs": [
       {
@@ -536,6 +1019,38 @@
   },
   {
     "type": "error",
+    "name": "ApprovedTargetMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ArbiterAlreadySeated",
+    "inputs": [
+      {
+        "name": "arbiter",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ArbiterMustBeDistinct",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ArbiterNotSilent",
+    "inputs": [
+      {
+        "name": "lastActionAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "BuyerSellerMustBeDifferent",
     "inputs": []
   },
@@ -547,6 +1062,11 @@
   {
     "type": "error",
     "name": "CannotDisputeInstantTransfer",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "CannotSweepEscrowToken",
     "inputs": []
   },
   {
@@ -576,12 +1096,38 @@
   },
   {
     "type": "error",
+    "name": "InsufficientDirectPayment",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidArbiterAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidArbiterCandidate",
+    "inputs": [
+      {
+        "name": "candidate",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "InvalidBuyerAddress",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "InvalidGasPayerAddress",
+    "name": "InvalidDefaultArbiterAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidFeeRecipientAddress",
     "inputs": []
   },
   {
@@ -601,8 +1147,45 @@
   },
   {
     "type": "error",
+    "name": "NoArbiterSeated",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoTokensToSweep",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NominationWindowStillOpen",
+    "inputs": [
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotApprovedOperator",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NotAuthorizedToVote",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotDisputeParty",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
@@ -621,22 +1204,27 @@
   },
   {
     "type": "error",
+    "name": "OnlyArbiter",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "OnlyBuyer",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "OnlyBuyerOrGasPayer",
+    "name": "OnlySeller",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "OnlyGasPayer",
+    "name": "PartyCannotBeDefaultArbiter",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "OnlySellerOrGasPayer",
+    "name": "RecipientApprovalExpired",
     "inputs": []
   },
   {
@@ -654,5 +1242,10 @@
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "TransferAmountMismatch",
+    "inputs": []
   }
 ]

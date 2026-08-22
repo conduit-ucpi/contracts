@@ -409,6 +409,30 @@ contract EscrowContract is ReentrancyGuard {
     ///         and distinguishing "resolved at 0% to buyer" from "never disputed".
     uint8 public resolvedBuyerPercentage;
 
+    /// @notice Monotonic count of recipient changes. Incremented by EVERY recipient move —
+    ///         `changeRecipient` and `transferRecipientFrom` alike — and never reset.
+    ///
+    /// @dev    Exists so an off-escrow observer can decide "has the recipient moved since I
+    ///         looked?" with a ONE-WAY answer, which comparing `recipient()` against a
+    ///         snapshot cannot give: a recipient can move away and back, making that
+    ///         comparison read stale, then fresh, then stale again.
+    ///
+    ///         A marketplace offer snapshots this at creation and treats any change as
+    ///         PERMANENT staleness. That is what lets its exit path be callable by anyone:
+    ///         every condition for exiting becomes irreversible, so no passer-by can settle
+    ///         a still-revivable offer in front of the LP whose money it is.
+    ///
+    ///         ⚠️ Deliberately NOT `hasBeenSold`, and deliberately not folded into it. That
+    ///         flag means "a sale has happened" and gates the one-reserve rule; a seller
+    ///         rotating their own payout wallet moves the recipient without selling
+    ///         anything, and must not thereby forfeit the ability to sell with a reserve.
+    ///
+    ///         uint64 and declared HERE, at the tail of storage, so it packs into the slot
+    ///         `resolvedBuyerPercentage` already occupies. Grouping it beside `hasBeenSold`
+    ///         reads better but splits that bool off from `recipientOperator`, costing two
+    ///         slots and an extra SSTORE on every recipient transfer.
+    uint64 public recipientNonce;
+
     /// @notice Grace period for buyer + current recipient to agree an arbiter on a SOLD
     ///         escrow before the DEFAULT_ARBITER fallback becomes seatable.
     ///
@@ -886,6 +910,12 @@ contract EscrowContract is ReentrancyGuard {
 
         address previousSeller = SELLER;
         SELLER = newSeller;
+
+        // Bump on EVERY recipient move, including a plain wallet rotation. Anything that
+        // snapshotted the old recipient is now permanently, unambiguously out of date.
+        unchecked {
+            ++recipientNonce;
+        }
 
         // ANY recipient change voids an outstanding approval: an approval granted by a
         // previous seller must never survive to act on the new seller's role. This is
