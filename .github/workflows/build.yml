@@ -20,26 +20,30 @@ jobs:
         with:
           version: nightly
 
-      - name: Create .env file
+      # Exported into the job environment rather than a project .env file: recent
+      # Foundry refuses to auto-load an unapproved .env from the project directory
+      # ("refusing to load unapproved project dotenv files"). Real env vars are read
+      # by forge on every version, so this needs no --allow-project-env flag.
+      - name: Export deploy configuration
         run: |
-          echo "USDC_CONTRACT_ADDRESS=${{ vars.USDC_CONTRACT_ADDRESS }}" >> .env
-          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> .env
-          echo "NETWORK=${{ vars.NETWORK }}" >> .env
-          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> .env
-          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
-          echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> .env
-          echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> .env
+          echo "USDC_CONTRACT_ADDRESS=${{ vars.USDC_CONTRACT_ADDRESS }}" >> "$GITHUB_ENV"
+          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> "$GITHUB_ENV"
+          echo "NETWORK=${{ vars.NETWORK }}" >> "$GITHUB_ENV"
+          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> "$GITHUB_ENV"
+          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> "$GITHUB_ENV"
+          echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> "$GITHUB_ENV"
+          echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> "$GITHUB_ENV"
           # DEFAULT_ARBITER_ADDRESS is the fallback arbitrator Safe. It is baked into the
           # escrow IMPLEMENTATION's bytecode and can NEVER be changed afterwards - rotating
           # it means a new implementation, a new codehash, a new factory and a new
           # marketplace. There is deliberately no default: an unset value must fail the
           # deploy, not silently pick something.
-          echo "DEFAULT_ARBITER_ADDRESS=${{ vars.DEFAULT_ARBITER_ADDRESS }}" >> .env
+          echo "DEFAULT_ARBITER_ADDRESS=${{ vars.DEFAULT_ARBITER_ADDRESS }}" >> "$GITHUB_ENV"
           # Fee recipient comes from the environment's FEE_RECIPIENT_ADDRESS
           # variable. Only written when set; the deploy script defaults the
           # recipient to the factory OWNER (relayer) when the variable is absent.
           if [ -n "${{ vars.FEE_RECIPIENT_ADDRESS }}" ]; then
-            echo "FEE_RECIPIENT_ADDRESS=${{ vars.FEE_RECIPIENT_ADDRESS }}" >> .env
+            echo "FEE_RECIPIENT_ADDRESS=${{ vars.FEE_RECIPIENT_ADDRESS }}" >> "$GITHUB_ENV"
           fi
 
       # Fail before touching the chain rather than mid-broadcast. This value is
@@ -73,7 +77,6 @@ jobs:
       - name: Deploy contracts
         id: deploy
         run: |
-          source .env
           # Deploy with verification. DeploymentScript deploys BOTH the legacy
           # and the completion (fan-out) implementation + factory. --retries/--delay
           # give blockscout's verification queue time to settle (it can sit in

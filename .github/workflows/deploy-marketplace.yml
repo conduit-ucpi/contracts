@@ -129,26 +129,30 @@ jobs:
           echo "Min offer (bps)       : ${MIN_OFFER_BPS:-1000 (default)}"
           echo "Offer duration (s)    : $OFFER_DURATION"
 
-      - name: Create .env file
+      # Exported into the job environment rather than a project .env file: recent
+      # Foundry refuses to auto-load an unapproved .env from the project directory
+      # ("refusing to load unapproved project dotenv files"). Real env vars are read
+      # by forge on every version, so this needs no --allow-project-env flag.
+      - name: Export deploy configuration
         run: |
-          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> .env
-          echo "NETWORK=${{ vars.NETWORK }}" >> .env
-          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> .env
-          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> .env
-          echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> .env
-          echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> .env
+          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> "$GITHUB_ENV"
+          echo "NETWORK=${{ vars.NETWORK }}" >> "$GITHUB_ENV"
+          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> "$GITHUB_ENV"
+          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> "$GITHUB_ENV"
+          echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> "$GITHUB_ENV"
+          echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> "$GITHUB_ENV"
           # The escrow implementation the factory will serve. The deploy script
           # cross-checks its DEFAULT_ARBITER and NOMINATION_WINDOW on-chain, which
           # is what stops this pointing at the pre-3.3 implementation.
-          echo "TRUSTED_IMPLEMENTATION_ADDRESS=${{ vars.TRUSTED_IMPLEMENTATION_ADDRESS }}" >> .env
-          echo "DEFAULT_ARBITER_ADDRESS=${{ vars.DEFAULT_ARBITER_ADDRESS }}" >> .env
-          echo "MARKETPLACE_OWNER_ADDRESS=${{ vars.MARKETPLACE_OWNER_ADDRESS }}" >> .env
-          echo "MARKETPLACE_FEE_RECIPIENT=${{ vars.MARKETPLACE_FEE_RECIPIENT }}" >> .env
-          echo "MARKETPLACE_FEE_BPS=${{ vars.MARKETPLACE_FEE_BPS }}" >> .env
-          echo "MARKETPLACE_OFFER_DURATION_SECS=${{ vars.MARKETPLACE_OFFER_DURATION_SECS }}" >> .env
+          echo "TRUSTED_IMPLEMENTATION_ADDRESS=${{ vars.TRUSTED_IMPLEMENTATION_ADDRESS }}" >> "$GITHUB_ENV"
+          echo "DEFAULT_ARBITER_ADDRESS=${{ vars.DEFAULT_ARBITER_ADDRESS }}" >> "$GITHUB_ENV"
+          echo "MARKETPLACE_OWNER_ADDRESS=${{ vars.MARKETPLACE_OWNER_ADDRESS }}" >> "$GITHUB_ENV"
+          echo "MARKETPLACE_FEE_RECIPIENT=${{ vars.MARKETPLACE_FEE_RECIPIENT }}" >> "$GITHUB_ENV"
+          echo "MARKETPLACE_FEE_BPS=${{ vars.MARKETPLACE_FEE_BPS }}" >> "$GITHUB_ENV"
+          echo "MARKETPLACE_OFFER_DURATION_SECS=${{ vars.MARKETPLACE_OFFER_DURATION_SECS }}" >> "$GITHUB_ENV"
           # Only written when set - the script falls back to 1000 bps (10%).
           if [ -n "${{ vars.MARKETPLACE_MIN_OFFER_BPS }}" ]; then
-            echo "MARKETPLACE_MIN_OFFER_BPS=${{ vars.MARKETPLACE_MIN_OFFER_BPS }}" >> .env
+            echo "MARKETPLACE_MIN_OFFER_BPS=${{ vars.MARKETPLACE_MIN_OFFER_BPS }}" >> "$GITHUB_ENV"
           fi
 
       - name: Install dependencies
@@ -166,7 +170,6 @@ jobs:
       - name: Deploy marketplace
         id: deploy
         run: |
-          source .env
           # --retries/--delay give blockscout's verification queue time to settle.
           forge script script/DeployMarketplace.s.sol:DeployMarketplace \
             --rpc-url $NETWORK_RPC_URL \
