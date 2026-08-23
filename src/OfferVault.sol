@@ -82,7 +82,6 @@ contract OfferVault is ReentrancyGuard {
     error EscrowNotSettled();
     error InsufficientDirectPayment();
     error OffersPaused();
-    error NotHoldbackParty(address caller);
     error OnlyFactoryOwner(address caller);
     error NothingToSweep();
 
@@ -329,6 +328,19 @@ contract OfferVault is ReentrancyGuard {
 
         // Conservation: netAmount + fee + holdback == offerAmount by construction, so what
         // remains in this contract after the transfers is exactly `holdback`.
+        //
+        // d. …unless the LP overpaid. `fund()` only requires the balance to REACH
+        //    offerAmount, so a mistyped transfer opens the offer with a surplus on top, and
+        //    from here the vault owes only the reserve — which would leave that surplus
+        //    sweepable to FEE_RECIPIENT. It is the LP's money and this is the last moment
+        //    they have a claim on it, so it goes home now. Costs nothing in the normal case:
+        //    the balance is exactly the reserve and the branch is skipped.
+        //
+        //    Written as a comparison rather than a subtraction so a fee-on-transfer token —
+        //    which can leave LESS than the reserve here — fails later at the release rather
+        //    than reverting an acceptance that is otherwise sound.
+        uint256 remaining = IERC20(_token).balanceOf(address(this));
+        if (remaining > holdback) IERC20(_token).safeTransfer(lp, remaining - holdback);
 
         emit OfferAccepted(escrowContract, lp, seller, _net, _fee, holdback);
     }
@@ -438,13 +450,25 @@ contract OfferVault is ReentrancyGuard {
         // ── EFFECTS FIRST ──
         address _token = token;
 
-        // A funded vault owes exactly the offer. A lapsed PENDING one owes whatever
-        // actually arrived, which may be a partial deposit — reading the balance is the
-        // only honest figure there, and paying out offerAmount would revert on a partial
-        // and strand it for good. Never zero: isWithdrawable() requires a non-zero balance
-        // in the PENDING branch, and offerAmount is floored at 1 by the factory's minimum.
-        uint256 amount =
-            status == Status.PENDING ? IERC20(_token).balanceOf(address(this)) : offerAmount;
+        /*
+         * THE WHOLE BALANCE, IN EVERY WITHDRAWABLE STATE — the LP is this vault's residual
+         * claimant until it is accepted, and after this call the vault owes nobody anything.
+         *
+         * ⚠️ PAYING `offerAmount` HERE GAVE AN OVERPAYMENT TO FEE_RECIPIENT. Funding is a
+         *    direct transfer, and `fund()` only requires the balance to REACH offerAmount —
+         *    so an LP who sends too much (a mistyped QR amount, a double transfer) opens the
+         *    offer with a surplus sitting in the vault. Paying out the face amount left that
+         *    surplus behind, and `owed()` then reported it as sweepable: their mistake became
+         *    the platform's revenue. Nobody but the LP has any reason to send this token to
+         *    this address, so the whole balance is theirs.
+         *
+         * A partial PENDING deposit is the same rule read the other way: pay what actually
+         * arrived, because paying offerAmount would revert and strand it for good.
+         *
+         * Never zero — isWithdrawable() requires a non-zero balance in the PENDING branch,
+         * and every other withdrawable state holds at least offerAmount.
+         */
+        uint256 amount = IERC20(_token).balanceOf(address(this));
 
         status = Status.SETTLED;
 
@@ -461,19 +485,26 @@ contract OfferVault is ReentrancyGuard {
     /**
      * 🏦 SETTLE THE RESERVE ONCE THE CASHFLOW HAS FINALLY COLLECTED
      *
-     * Callable by the two parties with a stake in it: the FUNDER (this vault's seller, who
-     * put the reserve up) and the current BENEFICIARY (whoever holds the cashflow now).
-     * Single-shot, and it takes no discretion — both destinations and both amounts are
-     * fixed by the escrow's own final state, so neither caller can influence the outcome
-     * by being the one to call.
+     * 🔓 CALLABLE BY ANYONE, AND THE SAME ARGUMENT AS withdraw() SAYS WHY THAT IS SAFE. The
+     *    caller chooses nothing: both destinations are fixed — the FUNDER is this vault's
+     *    seller, set at initialize(), and the BENEFICIARY is read live off the escrow — and
+     *    both amounts fall out of the escrow's own final state. Whoever sends the
+     *    transaction, the identical split lands in the identical two places, so a stranger
+     *    calling this can only do the parties a favour at their own gas expense.
      *
-     * 📌 DIVERGENCE FROM §6.7, DELIBERATE: the spec made this permissionless so a keeper
-     *    could fire it unprompted. Restricting it to the parties matches this design's rule
-     *    that a vault's functions answer only to that deal's participants. The cost is that
-     *    nobody sweeps up on the parties' behalf, so §15.2's "prompt or keeper-fire"
-     *    becomes prompt-only — the UI must detect a settled escrow with a live reserve and
-     *    tell them. Re-open it to all callers if unclaimed reserves become a real problem;
-     *    doing so is safe precisely because the destinations are fixed.
+     *    ⚠️ THE CONDITION IS ONE-WAY, WHICH IS THE OTHER HALF OF THAT ARGUMENT. A settled
+     *       escrow never becomes unsettled: `_state = 4` is absorbing on both terminal paths,
+     *       and `resolvedBuyerPercentage` is written before the payout and never rewritten.
+     *       So there is no window in which an early caller could settle the reserve against
+     *       a party's interest, and no reversible condition to race. Add no reversible term
+     *       here without restoring a caller check.
+     *
+     * 📌 §6.7 RESTORED. An earlier revision restricted this to the funder and the live
+     *    beneficiary, on the rule that a vault's functions answer only to that deal's
+     *    participants. That rule was doing no work here — neither party can influence the
+     *    outcome by being the one to call — and it cost the platform the ability to relay
+     *    the release, so both parties had to sign for a transaction with no decision in it.
+     *    Since the destinations are fixed, opening it up gives that away for nothing.
      *
      * ⏳ LIVENESS: releasable only once the escrow reaches its settled state. Since dispute
      *    resolution has no deadline, a dispute that never resolves leaves the reserve
@@ -487,12 +518,6 @@ contract OfferVault is ReentrancyGuard {
         if (status != Status.ACCEPTED || holdback == 0) revert NoHoldback();
 
         IStabledropEscrow escrow = IStabledropEscrow(escrowContract);
-
-        // Read live: the beneficiary is whoever holds the cashflow now, which may not be
-        // the LP who bought it from this vault's seller.
-        if (msg.sender != seller && msg.sender != escrow.recipient()) {
-            revert NotHoldbackParty(msg.sender);
-        }
 
         // Covers BOTH terminal paths — claimed at maturity and dispute-resolved — because
         // executing a resolution also marks the escrow claimed. An escrow still funded or
@@ -536,6 +561,25 @@ contract OfferVault is ReentrancyGuard {
         return status == Status.OPEN;
     }
 
+    /**
+     * 🔎 WOULD releaseHoldback() SUCCEED RIGHT NOW?
+     *
+     * The counterpart to isWithdrawable(), and it exists for the same reason (§15.2): nothing
+     * on-chain announces that an escrow settled, so the reserve's release has to be detected
+     * off-chain and either prompted or fired. A caller that restates the conditions here in
+     * its own code drifts from them; this way it reads the contract's own answer.
+     *
+     * ⚠️ IT MATTERS MOST FOR THE DISPUTED CASE, WHICH LOOKS UNRELEASABLE AND IS NOT. A
+     *    resolution marks the escrow claimed in the same transaction that pays it out, so a
+     *    dispute-resolved escrow is settled and its reserve is releasable — that is precisely
+     *    the case where the split is non-trivial. A caller that treats "disputed" as "leave
+     *    it alone" strands the reserve exactly when it is doing its job.
+     */
+    function isReleasable() external view returns (bool) {
+        if (status != Status.ACCEPTED || holdback == 0) return false;
+        return IStabledropEscrow(escrowContract).isClaimed();
+    }
+
     /// @notice What this vault still owes someone. Anything above it was sent here by
     ///         mistake and is recoverable by sweep().
     ///
@@ -549,9 +593,22 @@ contract OfferVault is ReentrancyGuard {
     ///      It is the live balance and NOT offerAmount because the deposit may be partial,
     ///      or absent entirely — claiming a fixed obligation against an empty vault would
     ///      report every unfunded offer as insolvent (§14.3.1).
+    ///
+    /// @dev ⚠️ OPEN AND CANCELLED OWE THE BALANCE WHEN IT EXCEEDS THE OFFER, for the same
+    ///      reason: an LP who overpaid still owns the difference, and `withdraw()` now hands
+    ///      it back. Reporting a flat offerAmount here declared that surplus sweepable — so
+    ///      the owner could take an LP's overpayment before they had any chance to recover
+    ///      it, and could take it from a live offer, not just a finished one.
+    ///
+    ///      Still floored at offerAmount rather than being the bare balance, so the solvency
+    ///      invariant keeps biting: a funded offer must cover its face value, and `owed()`
+    ///      collapsing to whatever happens to be present would make that assertion vacuous.
     function owed() public view returns (uint256) {
         if (status == Status.PENDING) return IERC20(token).balanceOf(address(this));
-        if (status == Status.OPEN || status == Status.CANCELLED) return offerAmount;
+        if (status == Status.OPEN || status == Status.CANCELLED) {
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            return balance > offerAmount ? balance : offerAmount;
+        }
         if (status == Status.ACCEPTED) return holdback;
         return 0;
     }

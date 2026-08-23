@@ -593,6 +593,66 @@ contract OfferVaultTest is Test {
         assertEq(usdc.balanceOf(lp2), 8_000e6);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Overpayment — the LP's own money, not the platform's
+    //
+    // ⚠️ `fund()` only requires the balance to REACH offerAmount, so a mistyped transfer
+    //    opens the offer with a surplus sitting on top. It used to be forfeited silently:
+    //    withdraw() paid the face amount, owed() declared the rest sweepable, and the
+    //    difference went to FEE_RECIPIENT. Nothing failed, nothing was logged, and the LP
+    //    had no way to notice — which is why it is pinned from three directions here.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Send more than the offer, then open it. The vault is OPEN and holds the surplus.
+    function _overfundedOffer(EscrowContract escrow, uint256 amount, uint256 surplus, uint256 holdback)
+        internal
+        returns (OfferVault vault)
+    {
+        vm.prank(platform);
+        vault = OfferVault(market.createOffer(address(escrow), lp, amount, holdback, 0));
+
+        usdc.mint(lp, amount + surplus);
+        vm.prank(lp);
+        usdc.transfer(address(vault), amount + surplus);
+        vault.fund();
+    }
+
+    function testWithdraw_ReturnsAnOverpaymentToTheLp() public {
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _overfundedOffer(escrow, 9_000e6, 500e6, 0);
+
+        vm.warp(vault.offerExpiry() + 1);
+        vault.withdraw();
+
+        // Everything they sent, not the face amount of the offer.
+        assertEq(usdc.balanceOf(lp), 9_500e6, "the LP must get their overpayment back too");
+        assertEq(usdc.balanceOf(address(vault)), 0, "and nothing is left for sweep()");
+    }
+
+    function testSweep_CannotTakeAnOverpaymentFromALiveOffer() public {
+        // The worse half of the bug: the owner could take it BEFORE the LP had any chance
+        // to withdraw, from an offer that was still standing.
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _overfundedOffer(escrow, 9_000e6, 500e6, 0);
+
+        vm.prank(owner);
+        vm.expectRevert(OfferVault.NothingToSweep.selector);
+        vault.sweep(address(usdc));
+    }
+
+    function testAccept_ReturnsAnOverpaymentToTheLp() public {
+        // Acceptance is the LP's last moment of claim: afterwards the vault owes only the
+        // reserve, so a surplus left here would become sweepable.
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _overfundedOffer(escrow, 9_000e6, 500e6, 1_000e6);
+
+        _accept(escrow, vault);
+
+        assertEq(usdc.balanceOf(lp), 500e6, "the overpayment goes back at acceptance");
+        assertEq(usdc.balanceOf(address(vault)), 1_000e6, "the vault holds exactly the reserve");
+        assertEq(vault.owed(), 1_000e6);
+    }
+
     function testReleaseHoldback_PaysFunderWhenNoDispute() public {
         EscrowContract escrow = _createFunded();
         OfferVault vault = _offer(escrow, lp, 9_000e6, 1_000e6);
@@ -609,7 +669,36 @@ contract OfferVaultTest is Test {
         assertEq(usdc.balanceOf(address(vault)), 0);
     }
 
-    function testReleaseHoldback_OnlyFunderOrBeneficiary() public {
+    /**
+     * 🔓 A STRANGER MAY FIRE IT, AND THE MONEY GOES WHERE IT ALWAYS WAS GOING.
+     *
+     * That is the whole permissionlessness argument, so it is asserted rather than described:
+     * the caller has no address of their own in the outcome. If a future change gives the
+     * caller any say — a destination, an amount, a share — this test is what should stop it.
+     */
+    function testReleaseHoldback_AnyoneMayFireIt() public {
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _offer(escrow, lp, 9_000e6, 1_000e6);
+        _accept(escrow, vault);
+
+        vm.warp(expiry + 1);
+        escrow.claimFunds();
+
+        uint256 funderBefore = usdc.balanceOf(seller);
+        uint256 outsiderBefore = usdc.balanceOf(outsider);
+
+        vm.prank(outsider);
+        vault.releaseHoldback();
+
+        // Never disputed, so the whole reserve goes to the funder — the outsider's own
+        // balance is untouched, and their gas bought them nothing but someone else's payout.
+        assertEq(usdc.balanceOf(seller) - funderBefore, 1_000e6, "funder is paid in full");
+        assertEq(usdc.balanceOf(outsider), outsiderBefore, "the caller gets nothing");
+        assertEq(usdc.balanceOf(address(vault)), 0);
+    }
+
+    /// Single-shot: whoever got there first, the second call finds nothing to release.
+    function testReleaseHoldback_IsSingleShot() public {
         EscrowContract escrow = _createFunded();
         OfferVault vault = _offer(escrow, lp, 9_000e6, 1_000e6);
         _accept(escrow, vault);
@@ -618,12 +707,49 @@ contract OfferVaultTest is Test {
         escrow.claimFunds();
 
         vm.prank(outsider);
-        vm.expectRevert(abi.encodeWithSelector(OfferVault.NotHoldbackParty.selector, outsider));
         vault.releaseHoldback();
 
-        // The current beneficiary (the LP who bought the cashflow) may.
-        vm.prank(lp);
+        vm.prank(seller);
+        vm.expectRevert(OfferVault.NoHoldback.selector);
         vault.releaseHoldback();
+    }
+
+    /**
+     * ⚠️ THE CASE A CALLER IS MOST LIKELY TO SKIP. A resolution marks the escrow claimed in
+     *    the same transaction that pays it out, so a dispute-resolved escrow IS settled and
+     *    its reserve IS releasable — and it is the only case where the split does anything.
+     *    Anything reading "disputed" as "leave it alone" strands the reserve precisely then.
+     */
+    function testIsReleasable_TracksTheContractsOwnConditions() public {
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _offer(escrow, lp, 9_000e6, 1_000e6);
+
+        // An offer that has not been accepted holds no reserve to release.
+        assertFalse(vault.isReleasable(), "not accepted => nothing to release");
+
+        _accept(escrow, vault);
+        assertFalse(vault.isReleasable(), "escrow still live => not settled");
+
+        vm.warp(expiry + 1);
+        escrow.claimFunds();
+        assertTrue(vault.isReleasable(), "settled => releasable");
+
+        vm.prank(outsider);
+        vault.releaseHoldback();
+        assertFalse(vault.isReleasable(), "already released");
+    }
+
+    function testIsReleasable_FalseWithoutAReserve() public {
+        EscrowContract escrow = _createFunded();
+        OfferVault vault = _offer(escrow, lp, 9_000e6, 0);
+        _accept(escrow, vault);
+
+        vm.warp(expiry + 1);
+        escrow.claimFunds();
+
+        // A reserveless sale is settled but has nothing to settle. Reporting it releasable
+        // would send every caller into a NoHoldback revert.
+        assertFalse(vault.isReleasable());
     }
 
     function testReleaseHoldback_RevertsBeforeSettlement() public {
@@ -658,27 +784,50 @@ contract OfferVaultTest is Test {
         assertEq(usdc.balanceOf(lp), 5_000e6);
     }
 
-    function testSweep_RecoversMisSentTokensButNeverTheDeposit() public {
+    /**
+     * 🧹 SWEEP RECOVERS A STRAY *OTHER* TOKEN — AND NEVER THE OFFER TOKEN.
+     *
+     * ⚠️ THE LINE MOVED, DELIBERATELY. This test used to sweep a mis-sent transfer of the
+     *    OFFER token to FEE_RECIPIENT. That looked like tidy housekeeping and was in fact
+     *    the overpayment bug wearing its costume: `fund()` accepts any balance at or above
+     *    offerAmount, so the commonest way extra offer-token lands in a vault is the LP
+     *    sending too much — and nobody else has any reason to send that token to that
+     *    address. Sweeping it converted an LP's slip into platform revenue, silently.
+     *
+     *    So the offer token now belongs to the LP whatever the balance, and only a
+     *    genuinely unrelated token is the platform's to recover.
+     */
+    function testSweep_RecoversAnUnrelatedTokenButNeverTheOfferToken() public {
         EscrowContract escrow = _createFunded();
         OfferVault vault = _offer(escrow, lp, 5_000e6, 0);
 
-        // Someone fat-fingers a transfer straight to the vault.
+        // Someone fat-fingers a transfer of the OFFER token straight to the vault.
         usdc.mint(outsider, 123e6);
         vm.prank(outsider);
         usdc.transfer(address(vault), 123e6);
 
+        // Not the platform's to take — it is indistinguishable from an LP overpayment.
         vm.prank(owner);
+        vm.expectRevert(OfferVault.NothingToSweep.selector);
         vault.sweep(address(usdc));
 
-        assertEq(usdc.balanceOf(feeRecipient), 123e6, "only the surplus");
-        assertEq(usdc.balanceOf(address(vault)), 5_000e6, "the LP's deposit is untouchable");
+        // A different token, though, has no claimant here at all.
+        MockERC20 stray = new MockERC20();
+        stray.mint(outsider, 77e6);
+        vm.prank(outsider);
+        stray.transfer(address(vault), 77e6);
 
-        // And the LP can still exit in full afterwards.
+        vm.prank(owner);
+        vault.sweep(address(stray));
+        assertEq(stray.balanceOf(feeRecipient), 77e6, "an unrelated token is recoverable");
+
+        // And the LP exits with the deposit AND the stray offer-token transfer.
         vm.prank(seller);
         vault.reject();
         vm.prank(lp);
         vault.withdraw();
-        assertEq(usdc.balanceOf(lp), 5_000e6);
+        assertEq(usdc.balanceOf(lp), 5_123e6, "the LP gets every offer-token in the vault");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "and the platform got none of it");
     }
 
     function testSweep_CannotTouchALiveReserve() public {

@@ -56,6 +56,11 @@ contract MarketplaceHandler is Test {
 
     OfferVault[] public vaults;
 
+    /// Times `isReleasable()` predicted an outcome the release itself then contradicted.
+    /// Must stay at zero — see the release handler for why it is measured rather than
+    /// asserted against a restatement of the conditions.
+    uint256 public releaseViewDisagreements;
+
     constructor(
         EscrowContract _escrow,
         OfferVaultFactory _market,
@@ -153,11 +158,32 @@ contract MarketplaceHandler is Test {
         try v.withdraw() {} catch {}
     }
 
-    function releaseHoldback(uint256 i) public {
+    /**
+     * Fired from an arbitrary caller, exactly like withdraw above: the release is
+     * permissionless, and the invariants must hold no matter who reaches it first.
+     *
+     * ⚠️ AND THE VAULT'S OWN PREDICTION IS CHECKED AGAINST WHAT HAPPENS. `releaseHoldback`
+     *    re-states its conditions in its own body rather than branching on `isReleasable()`,
+     *    which keeps two distinct revert reasons for the UI but leaves the view free to
+     *    drift from the function. Asking the view first and comparing it to the outcome is
+     *    what makes the drift impossible to land — a restatement of the conditions here
+     *    would only assert that the test agrees with itself.
+     *
+     *    The token in this suite is a plain mock and every destination is an EOA, so a
+     *    revert here can only be a condition revert, never a transfer failure.
+     */
+    function releaseHoldback(uint256 i, uint256 callerSeed) public {
         if (vaults.length == 0) return;
         OfferVault v = vaults[i % vaults.length];
-        vm.prank(v.seller());
-        try v.releaseHoldback() {} catch {}
+        address[5] memory callers = [v.seller(), v.lp(), lps[0], buyer, address(0xBEEF)];
+
+        bool predicted = v.isReleasable();
+        vm.prank(callers[callerSeed % 5]);
+        try v.releaseHoldback() {
+            if (!predicted) releaseViewDisagreements++;
+        } catch {
+            if (predicted) releaseViewDisagreements++;
+        }
     }
 
     function raiseDispute() public {
@@ -285,15 +311,23 @@ contract InvariantMarketplaceTest is Test {
         assertEq(usdc.balanceOf(address(market)), 0, "the factory must never custody funds");
     }
 
-    /// §14.3.2 — STATUS <=> OBLIGATION. A vault owes the gross deposit exactly while it is
+    /// §14.3.2 — STATUS <=> OBLIGATION. A vault owes at least the gross deposit while it is
     /// OPEN or CANCELLED, the reserve exactly while ACCEPTED, and nothing once SETTLED.
+    ///
+    /// ⚠️ "AT LEAST" FOR OPEN/CANCELLED, NOT "EXACTLY", AND THE DIFFERENCE IS THE LP'S MONEY.
+    ///    `fund()` only requires the balance to reach offerAmount, so an overpaying LP leaves
+    ///    a surplus in their own vault — and a flat obligation of offerAmount declared that
+    ///    surplus sweepable to FEE_RECIPIENT while the offer was still live. `owed()` is
+    ///    floored at the face amount instead, so this assertion still catches an
+    ///    under-collateralised offer while the surplus stays out of the owner's reach.
     function invariant_statusMatchesObligation() public view {
         uint256 n = handler.vaultCount();
         for (uint256 i = 0; i < n; i++) {
             OfferVault v = handler.vaultAt(i);
             OfferVault.Status s = v.status();
             if (s == OfferVault.Status.OPEN || s == OfferVault.Status.CANCELLED) {
-                assertEq(v.owed(), v.offerAmount(), "open/cancelled must owe the gross");
+                assertGe(v.owed(), v.offerAmount(), "open/cancelled must owe at least the gross");
+                assertEq(v.owed(), usdc.balanceOf(address(v)), "and any surplus on top of it");
             } else if (s == OfferVault.Status.ACCEPTED) {
                 assertEq(v.owed(), v.holdback(), "accepted must owe exactly the reserve");
             } else if (s == OfferVault.Status.PENDING) {
@@ -342,6 +376,15 @@ contract InvariantMarketplaceTest is Test {
 
             assertFalse(acceptable && v.isWithdrawable(), "an offer was both acceptable and withdrawable");
         }
+    }
+
+    /// §6.7 — `isReleasable()` NEVER LIES. The view and the function state their conditions
+    /// separately (the function keeps two distinct revert reasons the view cannot express),
+    /// so nothing structural stops them drifting. The handler asks the view immediately
+    /// before every release and records any disagreement with what actually happened; this
+    /// is the counterpart to reading `isWithdrawable()` off the vault above.
+    function invariant_isReleasableNeverLies() public view {
+        assertEq(handler.releaseViewDisagreements(), 0, "isReleasable() disagreed with releaseHoldback()");
     }
 
     /// A reserve can only exist on an escrow that has actually been sold.

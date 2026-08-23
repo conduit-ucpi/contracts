@@ -4,6 +4,41 @@ pragma solidity 0.8.26;
 import {Test, console} from "forge-std/Test.sol";
 import {CompletionEscrowContract} from "../src/CompletionEscrowContract.sol";
 import {CompletionEscrowContractFactory} from "../src/CompletionEscrowContractFactory.sol";
+import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
+
+/// A deflationary token: the recipient always receives 1% less than was sent. Declared
+/// here as well as in EscrowContract.t.sol — foundry compiles test files independently,
+/// and sharing it would mean importing that file's own MockERC20 alongside this one's.
+contract FeeOnTransferERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    uint8 public decimals = 6;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "balance");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount - (amount / 100);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(allowance[from][msg.sender] >= amount, "allowance");
+        require(balanceOf[from] >= amount, "balance");
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount - (amount / 100);
+        return true;
+    }
+}
 
 contract MockERC20 {
     mapping(address => uint256) public balanceOf;
@@ -648,11 +683,195 @@ contract CompletionEscrowContractTest is Test {
         assertTrue(escrow.isDisputed());
     }
 
-    function testDisputeOnlyBuyer() public {
+    /// The supplier still cannot dispute directly — a neutral party stays between them and
+    /// the buyer's funds. They reach the arbiter, who can (see below).
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Recovery — this contract had none at all
+    //
+    // ⚠️ EVERYTHING THAT ARRIVED HERE BY MISTAKE USED TO BE LOST OUTRIGHT: a wrong token,
+    //    or an overpayment on the right one, since `checkAndActivate` funds from the
+    //    balance while every payout moves a fixed figure derived from AMOUNT. The fan-out
+    //    flow makes the second case ordinary — a parent pays its children by direct
+    //    transfer, and a mis-sized child simply strands the difference, forever.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function testSweepReturnsAForeignToken() public {
+        CompletionEscrowContract escrow = _createAndFundSingle();
+
+        MockERC20 stray = new MockERC20();
+        stray.mint(other, 77e6);
+        vm.prank(other);
+        stray.transfer(address(escrow), 77e6);
+
+        escrow.sweepToken(address(stray));
+
+        // Always to the buyer, whoever called — the caller chooses nothing.
+        assertEq(stray.balanceOf(buyer), 77e6);
+    }
+
+    function testSweepCannotTakeTheEscrowTokenWhileLive() public {
+        CompletionEscrowContract escrow = _createAndFundSingle();
+
+        vm.expectRevert(CompletionEscrowContract.CannotSweepEscrowToken.selector);
+        escrow.sweepToken(address(usdc));
+    }
+
+    function testSweepReturnsAnOverpaymentOncePaidOut() public {
+        (address[] memory r, uint256[] memory b) = _single();
+        CompletionEscrowContract escrow = _create(r, b);
+
+        // Funded by direct transfer — the fan-out path — with 50 too much.
+        uint256 surplus = 50e6;
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT + surplus);
+        vm.prank(buyer);
+        escrow.checkAndActivate();
+
+        vm.prank(leadSupplier);
+        escrow.markComplete();
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        vm.prank(buyer);
+        escrow.verifyComplete();
+
+        // The payees got exactly the escrow; the surplus was left behind and is now free.
+        assertEq(usdc.balanceOf(payee1), ESCROW);
+        escrow.sweepToken(address(usdc));
+        assertEq(usdc.balanceOf(buyer) - buyerBefore, surplus, "the overpayment goes home");
+        assertEq(usdc.balanceOf(address(escrow)), 0);
+    }
+
+    /**
+     * ⚠️ A DEFLATIONARY TOKEN IS REFUSED AT THE DOOR, and it has to be: every payout is a
+     *    fixed figure derived from AMOUNT, so a short transfer does not shrink the payouts
+     *    — it makes the LAST payee's transfer revert, permanently, with the whole escrow
+     *    stuck behind it. The sweep cannot rescue that either, since it opens the escrow
+     *    token only in the terminal state a reverting distribution can never reach.
+     */
+    function testDepositRejectsAFeeOnTransferToken() public {
+        FeeOnTransferERC20 feeToken = new FeeOnTransferERC20();
+        feeToken.mint(buyer, AMOUNT);
+
+        (address[] memory r, uint256[] memory b) = _single();
+        vm.prank(buyer);
+        address addr = factory.createEscrowContract(
+            address(feeToken), buyer, leadSupplier, AMOUNT, r, b, address(0), description
+        );
+
+        vm.prank(buyer);
+        feeToken.approve(addr, AMOUNT);
+        vm.prank(buyer);
+        vm.expectRevert(CompletionEscrowContract.TransferAmountMismatch.selector);
+        CompletionEscrowContract(addr).depositFunds();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // The arbiter must be a third party
+    //
+    // ⚠️ SHARING THE ADDRESS DOES NOT MERELY DOUBLE A ROLE. `_checkAndExecuteConsensus`
+    //    reads both votes from the SAME storage slot, so ONE `submitResolutionVote` from a
+    //    party who is also the arbiter satisfies a 2-of-3 branch outright and pays out at
+    //    whatever split they named. The sibling escrow has always rejected this; the
+    //    omission here was the only thing standing between an ops mistake and a one-vote
+    //    drain, so it is pinned at both layers.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function testFactoryRejectsAnOwnerWhoIsAlsoTheBuyer() public {
+        // The factory arbitrates every escrow it creates with its OWNER.
+        (address[] memory r, uint256[] memory b) = _single();
+        vm.prank(buyer);
+        vm.expectRevert(CompletionEscrowContractFactory.ArbiterMustBeDistinct.selector);
+        factory.createEscrowContract(address(usdc), arbiter, leadSupplier, AMOUNT, r, b, address(0), description);
+    }
+
+    function testFactoryRejectsAnOwnerWhoIsAlsoTheSupplier() public {
+        (address[] memory r, uint256[] memory b) = _single();
+        vm.prank(buyer);
+        vm.expectRevert(CompletionEscrowContractFactory.ArbiterMustBeDistinct.selector);
+        factory.createEscrowContract(address(usdc), buyer, arbiter, AMOUNT, r, b, address(0), description);
+    }
+
+    /// The contract enforces it itself — a clone initialized directly, bypassing the
+    /// factory, must answer to the same rule.
+    function testInitializeRejectsAnArbiterWhoIsAParty() public {
+        CompletionEscrowContract impl = new CompletionEscrowContract();
+        address clone = Clones.clone(address(impl));
+        (address[] memory r, uint256[] memory b) = _single();
+
+        vm.expectRevert(CompletionEscrowContract.ArbiterMustBeDistinct.selector);
+        CompletionEscrowContract(clone).initialize(
+            CompletionEscrowContract.InitParams({
+                tokenAddress: address(usdc),
+                buyer: buyer,
+                leadSupplier: leadSupplier,
+                arbiter: buyer, // ← the whole point
+                amount: AMOUNT,
+                creatorFee: 0,
+                platformFeeWallet: arbiter,
+                payees: r,
+                payeeBps: b,
+                verifier: address(0)
+            })
+        );
+    }
+
+    function testDisputeNotByTheSupplier() public {
         CompletionEscrowContract escrow = _createAndFundSingle();
         vm.prank(leadSupplier);
-        vm.expectRevert(CompletionEscrowContract.OnlyBuyer.selector);
+        vm.expectRevert(CompletionEscrowContract.OnlyBuyerOrArbiter.selector);
         escrow.raiseDispute();
+    }
+
+    function testDisputeNotByAStranger() public {
+        CompletionEscrowContract escrow = _createAndFundSingle();
+        vm.prank(other);
+        vm.expectRevert(CompletionEscrowContract.OnlyBuyerOrArbiter.selector);
+        escrow.raiseDispute();
+    }
+
+    /**
+     * 🔓 THE ARBITER CAN OPEN A DISPUTE, AND IT IS THE SUPPLIER'S ONLY WAY OUT.
+     *
+     * ⚠️ THE FREEZE THIS UNDOES WAS PERMANENT AND SILENT. Payout needs the VERIFIER (the
+     *    buyer, or their delegate) to act; voting needs a dispute to exist; and only the
+     *    buyer could open one. A buyer who simply stopped responding left the supplier with
+     *    no lever at all, and no deadline would have helped — the trigger was missing, not
+     *    the clock. The whole path is exercised here rather than just the permission,
+     *    because it is the composition that was broken.
+     */
+    function testArbiterCanUnblockAnAbandonedProject() public {
+        CompletionEscrowContract escrow = _createAndFundSingle();
+
+        // The supplier finishes. The buyer never verifies and never disputes.
+        vm.prank(leadSupplier);
+        escrow.markComplete();
+
+        vm.prank(arbiter);
+        escrow.raiseDispute();
+        assertTrue(escrow.isDisputed(), "the question can now at least be asked");
+
+        // Settlement still needs two of the three — the arbiter cannot pay anyone alone.
+        vm.prank(arbiter);
+        escrow.submitResolutionVote(0);
+        assertFalse(escrow.isClaimed(), "one vote settles nothing");
+
+        vm.prank(leadSupplier);
+        escrow.submitResolutionVote(0);
+
+        assertTrue(escrow.isClaimed());
+        assertEq(usdc.balanceOf(payee1), ESCROW, "the supplier side is finally paid");
+    }
+
+    /// Raising a dispute moves no money — the property the buyer-only rule was protecting.
+    function testArbiterDisputeMovesNoMoney() public {
+        CompletionEscrowContract escrow = _createAndFundSingle();
+        uint256 held = usdc.balanceOf(address(escrow));
+
+        vm.prank(arbiter);
+        escrow.raiseDispute();
+
+        assertEq(usdc.balanceOf(address(escrow)), held, "a dispute pays nobody");
+        assertEq(usdc.balanceOf(payee1), 0);
+        assertEq(usdc.balanceOf(buyer), usdc.balanceOf(buyer));
     }
 
     /// The buyer's dispute right has no deadline - it survives arbitrary delay.

@@ -91,6 +91,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
     error InvalidLeadSupplierAddress();
     error InvalidArbiterAddress();
     error BuyerAndLeadSupplierMustDiffer();
+    error ArbiterMustBeDistinct();
     error NoPayees();
     error TooManyPayees();
     error PayeeArrayLengthMismatch();
@@ -98,6 +99,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
     error InvalidPayeeBps();
     error PayeeBpsSumNot10000();
     error CreatorFeeMustBeLessThanAmount();
+    error TransferAmountMismatch();
     error NotInitialized();
     error OnlyBuyer();
     error OnlyLeadSupplier();
@@ -113,6 +115,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
     error InvalidPercentage();
     error NotAuthorizedToVote();
     error ContractMustBeDisputed();
+    error CannotSweepEscrowToken();
+    error NoTokensToSweep();
 
     // 🔒 SECURITY: These addresses are SET ONCE and can NEVER be changed
     address public FACTORY;       // Factory contract that created this escrow
@@ -156,6 +160,7 @@ contract CompletionEscrowContract is ReentrancyGuard {
     event DisputeResolved(uint256 buyerPercentage, uint256 supplierPercentage, uint256 timestamp);
     event FundsClaimed(address payee, uint256 amount, uint256 timestamp);
     event VoteSubmitted(address indexed voter, uint256 buyerPercentage);
+    event TokensSwept(address indexed token, address indexed recipient, uint256 amount);
 
     // 🛡️ MODIFIERS
 
@@ -213,6 +218,22 @@ contract CompletionEscrowContract is ReentrancyGuard {
         if (p.leadSupplier == address(0)) revert InvalidLeadSupplierAddress();
         if (p.arbiter == address(0)) revert InvalidArbiterAddress();
         if (p.buyer == p.leadSupplier) revert BuyerAndLeadSupplierMustDiffer();
+        /*
+         * ⚠️ THE ARBITER MUST BE A THIRD PARTY, AND HERE THAT IS SHARPER THAN IT SOUNDS.
+         *    Sharing the arbiter address with a party does not merely give them two roles —
+         *    `_checkAndExecuteConsensus` reads both votes from the SAME storage slot, so a
+         *    single `submitResolutionVote` satisfies the buyer-and-arbiter (or
+         *    supplier-and-arbiter) branch outright and executes any split they name, in
+         *    that one transaction, with no second party involved.
+         *
+         *    The sibling escrow has carried this check since creation (EscrowContract's
+         *    `ArbiterMustBeDistinct`); its absence here was an omission, not a difference
+         *    of design. In practice the factory always passes its OWNER as arbiter, so the
+         *    reachable case is the platform being a party to its own project — but the
+         *    guard belongs on the contract, which is the only thing a directly-initialized
+         *    clone must still answer to.
+         */
+        if (p.arbiter == p.buyer || p.arbiter == p.leadSupplier) revert ArbiterMustBeDistinct();
         // A nominated verifier acts for the buyer - it must never be the supplier,
         // or the supplier could approve its own work. Unset (0) defaults to the buyer.
         if (p.verifier == p.leadSupplier) revert VerifierCannotBeLeadSupplier();
@@ -285,7 +306,17 @@ contract CompletionEscrowContract is ReentrancyGuard {
         }
 
         // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
+        /*
+         * ⚠️ REJECT FEE-ON-TRANSFER / DEFLATIONARY / REBASING TOKENS, as the base escrow
+         *    does. Every payout below is a FIXED figure derived from AMOUNT, so a short
+         *    transfer does not shrink the payouts — it makes the LAST payee's transfer
+         *    revert, permanently, with the whole escrow stuck behind it. And the sweep
+         *    cannot rescue that: it opens the escrow token only in the terminal state,
+         *    which a reverting distribution can never reach. Fail the deposit instead.
+         */
+        uint256 balanceBefore = tokenAddress.balanceOf(address(this));
         tokenAddress.safeTransferFrom(BUYER, address(this), AMOUNT);
+        if (tokenAddress.balanceOf(address(this)) - balanceBefore != AMOUNT) revert TransferAmountMismatch();
 
         // 💳 STEP 3: Platform gets their fee (the ONLY money the platform receives)
         if (CREATOR_FEE > 0) {
@@ -379,8 +410,23 @@ contract CompletionEscrowContract is ReentrancyGuard {
      * the VERIFIER signs off (state 4), which is the buyer's own act or that of their
      * nominated delegate. This guarantees the buyer always has a path to recover funds,
      * so an escrow can never be stranded by a missed date.
+     *
+     * ⚠️ THE ARBITER MAY ALSO RAISE ONE, AND THAT IS THE SUPPLIER'S ONLY WAY OUT. Payout
+     *    needs the VERIFIER (the buyer, or their delegate) to act, and voting needs a
+     *    dispute to exist. While this was buyer-only, those two facts composed into a
+     *    permanent freeze: a buyer who simply stopped responding left the supplier with no
+     *    lever at all — unable to verify, unable to dispute, and unable to reach the
+     *    arbiter, because the arbiter could not vote on a dispute nobody was allowed to
+     *    open. Not a missed-deadline problem, a missing-trigger one, which is why no clock
+     *    would have fixed it (see the header's note on deadlines).
+     *
+     *    Opening it to the arbiter changes nothing about who gets paid: raising a dispute
+     *    moves no money, and settlement still needs two of the three to agree. It only
+     *    ensures the question can always be ASKED. The supplier is deliberately not given
+     *    the trigger directly — routing it through the arbiter keeps a neutral party
+     *    between a supplier and the buyer's funds.
      */
-    function raiseDispute() external onlyBuyer initialized {
+    function raiseDispute() external onlyBuyerOrArbiter initialized {
         if (_state != 1 && _state != 3) revert CannotDisputeNow();
 
         _state = 2; // disputed - funds frozen until resolution
@@ -495,6 +541,40 @@ contract CompletionEscrowContract is ReentrancyGuard {
         }
     }
 
+    /**
+     * 🧹 RECOVER TOKENS THAT NOBODY IS OWED
+     *
+     * ⚠️ THIS CONTRACT PREVIOUSLY HAD NO RECOVERY PATH OF ANY KIND, so anything that
+     *    arrived here by mistake was lost outright: a wrong token, or — because
+     *    `checkAndActivate` funds from the balance and pays out a fixed
+     *    `AMOUNT − CREATOR_FEE` — any overpayment on the right one. The fan-out flow makes
+     *    the second case realistic, since a parent node pays its children by direct
+     *    transfer and a mis-sized child simply strands the difference.
+     *
+     * 🔒 TWO RULES, AND THE SECOND IS WHAT KEEPS IT SAFE:
+     *    • A foreign token is always recoverable — this contract's obligations are
+     *      denominated solely in `tokenAddress`, so it can never owe anyone a balance in
+     *      anything else.
+     *    • The ESCROW token is recoverable ONLY once the contract is terminal
+     *      (`_state == 4`). Before then the balance is the escrow itself; after it, every
+     *      obligation has been discharged by `verifyComplete` or `_executeResolution`, so
+     *      whatever remains is surplus by definition.
+     *
+     * ✅ Callable by anyone, and the destination is fixed to the BUYER — the depositor,
+     *    and the only party who can have overpaid. The caller chooses nothing, so this is
+     *    permissionless for the same reason the exits elsewhere are.
+     */
+    function sweepToken(address _token) external initialized nonReentrant {
+        if (_token == address(tokenAddress) && _state != 4) revert CannotSweepEscrowToken();
+
+        uint256 balance = IERC20(_token).balanceOf(address(this));
+        if (balance == 0) revert NoTokensToSweep();
+
+        emit TokensSwept(_token, BUYER, balance);
+
+        IERC20(_token).safeTransfer(BUYER, balance);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     // VIEW HELPERS
     // ─────────────────────────────────────────────────────────────────────────────
@@ -558,7 +638,8 @@ contract CompletionEscrowContract is ReentrancyGuard {
         return _state == 4;
     }
 
-    /// @notice True while the buyer can still dispute - i.e. any time before payout.
+    /// @notice True while a dispute can still be raised (by the buyer or the arbiter) —
+    ///         i.e. any time before payout.
     function canDispute() external view initialized returns (bool) {
         return _state == 1 || _state == 3;
     }

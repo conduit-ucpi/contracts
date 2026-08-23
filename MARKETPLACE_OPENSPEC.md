@@ -948,10 +948,20 @@ answer is not ours to assume.
   - A `PENDING` vault can therefore **hold money**: `owed()` reserves its live balance so
     `sweep` cannot take an in-flight deposit, and `withdraw()` returns it (partial deposits
     included) to the LP once the offer lapses.
-- **Every function answers to exactly one role**, with `fund` the deliberate exception
-  above: `withdraw` → the LP; `accept`/`reject` → the escrow's current recipient;
-  `releaseHoldback` → the funder or the live beneficiary; `sweep` → the factory owner, and
-  only above what the vault owes.
+  - ⚠️ **And it can hold TOO MUCH.** `fund()` only requires the balance to REACH
+    `offerAmount`, so a mistyped or repeated transfer opens the offer with a surplus on top.
+    The LP owns that surplus: `owed()` is floored at `offerAmount` but rises with the
+    balance while `OPEN`/`CANCELLED`, so `sweep` cannot reach it; `withdraw()` pays the
+    whole balance rather than the face amount; and `accept()` returns anything above the
+    reserve to the LP in the same transaction, which is their last moment of claim on it.
+    Reporting a flat `offerAmount` instead made an LP's slip sweepable to `FEE_RECIPIENT` —
+    **and sweepable from a still-live offer**, before they had any chance to withdraw.
+    Only a genuinely unrelated token is the platform's to recover.
+- **Every function answers to exactly one role, except where the sender chooses nothing**:
+  `accept`/`reject` → the escrow's current recipient; `sweep` → the factory owner, and only
+  above what the vault owes. `fund`, `withdraw` and `releaseHoldback` are permissionless —
+  each takes no arguments and pays destinations fixed at deployment or read live off the
+  escrow, so the caller has no discretion to abuse and the platform can relay all three.
 - **Fees are paid to `FEE_RECIPIENT` at acceptance**, not accrued. There is no pooled fee
   balance and therefore no owner-withdrawable balance anywhere in the system.
 - **The seller's §3.2 approval names the individual vault** as operator, not a global venue
@@ -1150,7 +1160,7 @@ the scenario they are engineering, and forfeit it to whoever holds the position 
 > | §6.2 `acceptOffer` → `accept` | `OfferVault` | the escrow's current recipient |
 > | §6.3 `rejectOffer` → `reject` | `OfferVault` | the escrow's current recipient |
 > | §6.4 `withdrawFunds` → `withdraw` | `OfferVault` | **anyone** — the destination is always that offer's LP |
-> | §6.7 `releaseHoldback` | `OfferVault` | the funder or the live beneficiary |
+> | §6.7 `releaseHoldback` | `OfferVault` | **anyone** — the destinations are the recorded funder and the live beneficiary |
 > | §6.5 owner surface | `OfferVaultFactory` | owner — **`withdrawFees` is gone**; fees pay out at acceptance |
 > | §6.6 `sweepToken` | both — factory sweeps its whole balance (it should have none); a vault sweeps only above what it owes | owner |
 
@@ -1584,7 +1594,7 @@ build from. Each item cites the section that created it.
 - **Accept flow:** tx 1 `approveRecipientTransfer(marketplace, lp)` on the escrow → tx 2 `acceptOffer` on the marketplace, within the **5-minute TTL** (§3.2). On expiry, simply re-prompt — an expired approval is inert and nothing is at risk.
 - **Dispute settlement (ALL escrows):** there is **no off-chain agreement stage** — each disputant's settlement figure goes on-chain as `submitResolutionVote(X)` from their own wallet the moment they name it, and the contract settles the instant any two of the three current votes match (§3.3A2a). Present every submission as **binding**: it is an offer that pays out on match, not a negotiating position. Votes remain revisable until consensus. The UI encodes the call, requests gas via `fund-wallet`, and the user's own provider sends it — chainservice relays nothing, because the wallet stack cannot produce a signed transaction to relay (§15.6b).
 - **Contested sold-escrow dispute:** nomination entry (free-form address + the §15.1 warning); a permissionless "seat default arbiter" action once the window lapses; a "request new arbiter" (`evictArbiter`) action once a seated arbiter has been silent 30 days (§3.3A1a).
-- **LP housekeeping:** expiry, staleness, rejection, and dispute-triggered withdrawability are all **lazy** — nothing on-chain notifies the LP. The indexer must detect each condition and prompt `withdrawFunds`; likewise prompt (or keeper-fire) `releaseHoldback` once the escrow settles — it is permissionless by design (§6.4, §6.7).
+- **LP housekeeping:** expiry, staleness, rejection, and dispute-triggered withdrawability are all **lazy** — nothing on-chain notifies the LP. The indexer must detect each condition and act on it. Both exits are permissionless, so both are **relayed rather than prompted-and-signed**: `POST /api/chain/marketplace/withdraw-offer` and `.../release-holdback` send them from the platform relayer, and neither costs the party a signature or gas. `withdraw` is additionally **keeper-swept** — contractservice returns lapsed and rejected offers on the batch-claim timer, for LPs who never come back. `releaseHoldback` is not swept: selecting candidates needs a chain read per sold position to learn the escrow settled, and both parties can fire it themselves. Staleness is likewise unsweepable — the acceptance that caused it is an event about a *different* vault — so a losing offer reads as standing until it lapses. Prompting still covers what the sweep cannot select (§6.4, §6.7).
 
 ### 15.3 Discovery & indexing (off-chain by design, §12)
 
@@ -2117,13 +2127,32 @@ user-signed and belong on the same sponsorship path as everything else.
 
 **Housekeeping is lazy — nothing on-chain notifies anyone** (§6.4, §6.7, §15.2). Expiry,
 staleness, rejection and dispute-triggered withdrawability all require the UI (or indexer) to
-detect the condition and prompt `withdraw()` on the LP's vault. An LP whose funds are
-withdrawable and who is never told simply never withdraws.
+detect the condition and act.
 
-⚠️ **`releaseHoldback` is no longer keeper-firable.** In the per-offer model it answers only
-to the reserve's funder or the live beneficiary (§5.0), so nobody can sweep up on the
-parties' behalf. §15.2's "prompt or keeper-fire" is therefore **prompt-only**: the UI must
-detect a settled escrow with a live reserve and tell them, or the reserve sits there. Find live reserves from `OfferAccepted` events.
+✅ **BOTH EXITS ARE RELAYED, so neither costs the party a signature or gas.** `withdraw()` and
+`releaseHoldback()` are permissionless — no arguments, destinations fixed at deployment or read
+live off the escrow, amounts fixed by state — so `POST /api/chain/marketplace/withdraw-offer`
+and `.../release-holdback` send them from the platform relayer. Do not present either as a
+wallet action. chainservice reads the vault's own `isWithdrawable()` / `isReleasable()` first, so
+a control pressed too early costs a chain read and returns a refusal rather than a revert.
+
+✅ **Lapsed and rejected offers are also SWEPT**, on contractservice's batch-claim timer, so the
+copy must not tell an LP that nothing returns their capital automatically.
+
+⚠️ **Two things are NOT swept, and a screen is all they have.** *Staleness*, because the
+acceptance that caused it is an event about a different vault, so the index reads the losing
+offer as standing until it lapses. And *reserves*, because selecting candidates needs a chain
+read per sold position. Both sides of a reserve are now prompted: the LP on their offers list,
+and the SUPPLIER on the dashboard, from `GET /api/marketplace/sellers/{sellerAddress}/reserves`.
+The supplier's view is the one that was missing and the one that matters most — the sale drops
+the escrow out of their contract list, so before it existed the reserve came back only when the
+LP happened to press release, which is exactly the case where the LP has no reason to bother.
+
+⚠️ **A RESOLVED DISPUTE IS RELEASABLE — never gate the reserve on "was it disputed".**
+Resolution marks the escrow claimed in the same transaction that pays it out, so the reserve is
+settleable, and that is the only case where the split does anything: the buyer's award comes off
+the reserve first and only the remainder returns to the funder. Treating a dispute as "leave it
+alone" strands the reserve exactly when it is doing its job.
 
 **Listing curation is a UI responsibility, not a contract one** (§15.3). The contract stays
 permissionless, but you need not list everything. Tells worth screening: buyer and seller
@@ -2144,11 +2173,15 @@ directly for marketplace data, and you never call chainservice for an offer book
 | Submit a settlement figure | encode + `fundAndSendTransaction` — **no endpoint** |
 | Nominate an arbiter | encode + `fundAndSendTransaction` — **no endpoint** |
 | Evict a silent arbiter | encode + `fundAndSendTransaction` — **no endpoint** |
-| Fund / accept / reject / withdraw / release an offer | encode + `fundAndSendTransaction` — **no endpoint** |
+| Accept / reject an offer | encode + `fundAndSendTransaction` — **no endpoint** |
+| Open an offer whose deposit has landed | `POST /api/chain/marketplace/fund-offer` `{vaultAddress}` — relayed; `fund()` takes no arguments and only observes the balance |
+| Return a lapsed offer's capital to its LP | `POST /api/chain/marketplace/withdraw-offer` `{vaultAddress}` — relayed, **unauthenticated**, no signature and no gas from the LP. Also fired by contractservice's batch-claim sweep. A 400 with `notWithdrawable` means the offer still stands or is already empty — expected, not an error |
+| Settle a sold position's reserve | `POST /api/chain/marketplace/release-holdback` `{vaultAddress}` — relayed, no signature from either party. A 400 with `notReleasable` means the escrow has not settled or the other party got there first |
 | Gas for any of the above | `POST /api/chain/fund-wallet` `{walletAddress, totalAmountNeededWei}` |
 | Create an offer vault for an LP | `POST /api/chain/marketplace/create-offer` — returns the `vaultAddress` the LP then funds |
 | Seat the default arbiter | `POST /api/chain/seat-default-arbiter` — relayer-fired, no signature |
 | Read arbiter seat state + action flags | `GET /api/chain/contract/{address}/arbiter` |
+| How escrows finished, for a reserve's split | `POST /api/chain/marketplace/settlement-outcomes` `{escrows:[…]}` — service-to-service. ⚠️ Needed because CLAIMED does not distinguish a clean claim from a resolved dispute; `resolvedBuyerPercentage` is the only witness |
 | Raise a dispute, deposit, claim | unchanged — same fund-then-send path you already use |
 
 **contractservice — reading things**
@@ -2157,6 +2190,7 @@ directly for marketplace data, and you never call chainservice for an offer book
 |---|---|
 | A seller's offer book for one escrow | `GET /api/marketplace/escrows/{escrowContract}/offers` |
 | An LP's own offers, across escrows | `GET /api/marketplace/lps/{lpAddress}/offers` |
+| **Reserves owed to a supplier on positions they sold** | `GET /api/marketplace/sellers/{sellerAddress}/reserves` — the ONLY view of these; the sale drops the escrow out of their own contract list. Each row carries a state (LIVE / DISPUTED / SETTLED / RESOLVED / RELEASED / UNKNOWN) and the figure that belongs to it, computed server-side |
 | Refresh from chain (§15.6f) | `POST /api/marketplace/refresh` — user-authenticated, scoped to the caller |
 | Contracts, disputes, notes | unchanged |
 
@@ -2168,15 +2202,16 @@ directly for marketplace data, and you never call chainservice for an offer book
   to. They become `OPEN` on funding.
 - ⚠️ **`expired` is computed, not observed.** An offer lapsing emits no on-chain event, so
   nothing will ever arrive to announce it. An `OPEN` offer with `expired: true` is the LP's cue
-  to withdraw.
+  to withdraw — and it is what the keeper sweep selects on, so such a row is on its way home
+  whether or not the LP acts.
 - `lastReconciledAt` on the book is when that escrow was last checked against the chain — use it
   to distinguish "no offers" from "no offers as of an hour ago".
 
 Full request and response shapes: `chainservice/API_REFERENCE.md`. contractservice's are on its
 Swagger UI, and the rationale behind them is §15.7.
 
-**Only three chainservice endpoints are new**, because party actions do not need one — the UI
-funds and sends. An earlier draft specified relay endpoints taking a `signedTransaction`; they
+**Few chainservice endpoints are new**, because the actions with a chooser do not need one — the
+UI funds and sends. The relayed ones are exactly those where the sender chooses nothing. An earlier draft specified relay endpoints taking a `signedTransaction`; they
 were built, found to be unusable by the wallet stack, and removed.
 
 #### 15.6f "Refresh from chain" — a user-facing action, not an admin tool
@@ -2325,6 +2360,21 @@ before mainnet**.
 
 ## 17. Changelog
 
+- **v0.9.3 (2026-08-23): full audit of `src/*.sol` — four fixes, all in the escrow contracts.** The marketplace came out clean; the findings were next door.
+  **A. The completion escrow let the arbiter be a party.** `CompletionEscrowContract.initialize` never required the arbiter to differ from the buyer or the lead supplier, though its sibling has always carried that check. The consequence is sharper than a doubled role: `_checkAndExecuteConsensus` reads both votes from the SAME storage slot, so one `submitResolutionVote` from a party who is also the arbiter satisfies a 2-of-3 branch outright and pays out at whatever split they name, in that transaction. Reachable only as an ops mistake (the factory always passes its OWNER as arbiter), so it needed the platform to be a party to its own project — now rejected at both layers.
+  **B. A silent buyer could freeze the supplier's money forever.** Payout needs the VERIFIER (the buyer or their delegate); voting needs a dispute; and only the buyer could open one. Those three composed into a permanent lock with no deadline, no arbiter recourse and no supplier lever — a missing TRIGGER, not a missing clock, which is why §the header's no-deadline reasoning did not cover it. `raiseDispute` is now `onlyBuyerOrArbiter`. The supplier deliberately still cannot fire it directly: routing through the arbiter keeps a neutral party between a supplier and the buyer's funds, and raising a dispute still moves no money — settlement needs two of three either way.
+  **C. The completion escrow had no recovery path at all.** No `sweepToken`, so a wrong token sent there was lost outright and any overpayment stranded — realistic in the fan-out flow, where a parent pays its children by direct transfer. It now has one, on the same rule as **D**. Its `depositFunds` also lacked the balance-delta check its sibling carries, so a deflationary token would under-fund the escrow and make the last payee's transfer revert forever; the sweep could not rescue that either, since it opens the escrow token only in a terminal state a reverting distribution never reaches. Rejected at the door now.
+  **D. Buyer overpayment on the base escrow was locked, not stolen.** `checkAndActivate` accepts any balance at or above AMOUNT while every payout moves a fixed figure derived from AMOUNT, and `sweepToken` refused the escrow token in EVERY state — so the excess could never leave. Both escrows now allow the escrow token to be swept to the BUYER once `_state == 4`: at that point every obligation has been discharged by a claim or a resolution, so whatever remains is surplus by definition.
+  **Declined, with reasons recorded:** clone salts include `block.timestamp`, so identical params in one block collide and revert (retriable, front-runnable as a nuisance — the test helpers already warp around it); and `EscrowContractFactory`'s `OWNER`/`FEE_RECIPIENT` are immutable with no rotation, unlike `OfferVaultFactory`'s settable recipient.
+  **Still open:** M-1's blocklist coupling across all four payout paths, and the absence of any dispute deadline in either escrow — a 2-of-3 that never agrees still freezes the funds, and `evictArbiter` covers silence, not deadlock.
+  **308 tests passing.** The fan-out service's `CompletionEscrowContract` and factory ABIs were regenerated for the new function and errors.
+
+- **v0.9.2 (2026-08-23): audit of `src/*.sol` — one real defect fixed, plus the exits opened up.** Two changes to `OfferVault`, both in the LP's favour.
+  **1. An overpayment no longer becomes platform revenue.** `fund()` only requires the balance to REACH `offerAmount`, so a mistyped or repeated transfer opens the offer with a surplus on top — the likeliest way extra offer-token ever lands in a vault, and a live path now that funding shares the QR shape where a human types the amount. `withdraw()` paid the face amount and `owed()` reported a flat `offerAmount`, so the difference was left behind and declared sweepable to `FEE_RECIPIENT` — **and sweepable from a still-live offer**, before the LP had any chance to recover it. Nothing reverted and nothing was logged. Now: `withdraw()` pays the whole balance in every withdrawable state; `owed()` is floored at `offerAmount` but tracks the balance while `OPEN`/`CANCELLED`, so the solvency invariant still bites while `sweep` cannot reach the surplus; and `accept()` returns anything above the reserve to the LP in the same transaction, which is their last moment of claim on it. **The line moved deliberately:** the offer token is the LP's whatever the balance, and only a genuinely unrelated token is the platform's to recover (`testSweep_RecoversAnUnrelatedTokenButNeverTheOfferToken`, which used to assert the opposite).
+  **2. `releaseHoldback` is permissionless again (§6.7 as originally written), and `isReleasable()` joins `isWithdrawable()`.** The interim party-only restriction was doing no work — neither party can influence the outcome by being the one to call — and cost both of them a signature for a transaction with no decision in it. Verified rather than assumed: `_transferRecipient` reverts outside states 1–2, so the beneficiary is frozen once the escrow settles; `resolvedBuyerPercentage` is written before the payout; `loss` uses the identical expression and base as the escrow's own `buyerAmount`, so the reserve covers the shortfall to the wei. The new view is pinned by `invariant_isReleasableNeverLies`, which asks the vault immediately before every fuzzed release and compares the prediction to what happened — the function keeps two distinct revert reasons the view cannot express, so the agreement is measured rather than restated.
+  **296 tests passing**, including 10 marketplace invariants at 128,000 calls each.
+  **M-1 remains open and was independently rediscovered:** `releaseHoldback` pays beneficiary and funder in one transaction, so a blocklisted recipient freezes the other party's share too — and the recipient cannot rotate after settlement. The same shape applies to `accept` (fee + net) and `_executeResolution` (buyer + seller). Push payments are a deliberate style here; pull payments would be the remedy. **Also noted, not fixed:** a fee-on-transfer token cannot open an offer at all (`fund()` requires the full balance) but, if one ever reached acceptance, would leave the vault holding less than the reserve and strand the release.
+
 - **v0.9.0 (2026-08-07): the marketplace no longer pools LP capital — one `OfferVault` per offer replaces the single `MarketplaceEscrow`.** Prompted by a custody concern §13.14 never asked about: the pooled venue commingled every LP's deposit at one platform-deployed address. The technical position was defensible (the owner could reach only genuine surplus; `withdrawFunds` was unpausable) but commingling is a regulatory trigger in its own right, and resting on an unobtained legal reading was the wrong risk. **New shape (§5.0), mirroring the escrow exactly:** `OfferVaultFactory` validates, prices, deploys and keeps the per-escrow registry while **holding no tokens ever**; each offer's capital sits in its own ERC-1167 `OfferVault` clone. Creation is permissionless and **moves no money** — the LP is a parameter, not the caller, so chainservice deploys on a user's behalf without gaining power over funds — and funding is a **direct transfer** from the LP's own wallet, opened by permissionless `fund()`. Every vault function answers to exactly one role: `fund`/`withdraw` → the LP, `accept`/`reject` → the escrow's current recipient, `releaseHoldback` → funder or live beneficiary, `sweep` → the factory owner and only above what the vault owes. **Fees pay out to `FEE_RECIPIENT` at acceptance rather than accruing**, so `withdrawFees` is gone and no owner-withdrawable balance exists anywhere in the system. The seller's §3.2 approval now names the individual vault, the narrowest authority the swap can be granted.
   **Economics, validation and lifecycle are unchanged** — §5.1–5.3 and §6 remain authoritative for the rules; §5.0 and the §6 routing table say where they live. The factory retains **no** per-escrow or per-offer state at all — see the next paragraph for where the one cross-offer fact ended up.
   **Cost:** a ~45k-gas clone per offer (well under a cent at current Base prices) and an on-chain offer book that is enumerable per escrow rather than a single mapping — discovery was already off-chain by design (§12, §15.3). **Benefit:** no commingling, blast radius of one offer instead of all of them, conservation checkable per contract, and a narrower approval at the swap.
@@ -2332,7 +2382,7 @@ before mainnet**.
   **The one-reserve rule moved onto the escrow.** `hasBeenSold` is now a flag on `EscrowContract`, set by `transferRecipientFrom` (never `changeRecipient` — an OTC rotation is not a sale, the same line §3.3A draws for arbiter unseating). An interim revision of this design kept it in a factory registry alongside `holdbackVault`, `isVault` and an on-chain offer book; that carried a real hazard — **redeploying the venue would have lost the fact, allowing a second reserve to be stacked on an escrow that already had one**, which `releaseHoldback` would then compensate twice from the second funder's pocket. Putting it where the fact belongs makes the marketplace **stateless per escrow and per offer** and therefore freely redeployable, and lets the offer book fall back to `OfferCreated` events, which §15.3 had already designated the index. **Cost: a new escrow implementation** (new storage ⇒ new bytecode ⇒ new clone codehash ⇒ new escrow factory ⇒ chainservice repoints again). Backwards compatibility was explicitly waived; escrows on `0x77acD2d…` become a third superseded lineage. `DEPLOYMENT_ADDRESSES.md` marks the pair redeploy-pending and the recorded codehash stale.
   **⚠️ Correction to §15.4's item 3, and to this section's first draft: chainservice does not relay transactions.** Three endpoints taking a `signedTransaction` (`submit-resolution-vote`, `nominate-arbiter`, `evict-arbiter`) were built and then **removed** — embedded wallet providers do not expose raw transaction signing, and `getSigner()` is forbidden after connection, so the webapp has no signed transaction to hand over. Gas sponsorship has always worked the other way round: the UI encodes the call, `POST /api/chain/fund-wallet` moves ETH into the user's wallet, and the user's provider broadcasts. `fund-wallet` takes a wei amount rather than an operation name, so it already covers every new action with **no new endpoint**. What survives is what the UI genuinely cannot do: `seat-default-arbiter` (permissionless, relayer-fired) and the arbiter-state read. The same correction applies to the marketplace — chainservice deploys vaults, supplies gas and indexes; it relays none of the five party actions.
   **§15.3 promoted to load-bearing, with two rules added (§15.3a).** Removing the on-chain offer book means the indexer is no longer a convenience — without it there is no book at all. The rules: **index for reading, never for deciding** (nothing off-chain may gate what the contracts gate — the generalisation of §3.3A2a, and why `hasBeenSold` sits on the escrow), and **derive the index from events, not UI reports** (every vault function is callable directly by its party without touching our UI, so a UI-reported index diverges silently). Note this deliberately differs from §15.6b, where the UI reports a settlement vote: that records a *conversation* and gates nothing, whereas the marketplace index mirrors *chain state* and must be built from the chain. **Settled the same day: chainservice does the reading and pushes to contractservice** — not a subgraph — so contractservice never becomes chain-aware, chainservice owns replay from any block, and the push must be idempotent on `(vault, event)`. Row 4.4 folded into new row 4.6, which also carries the marketplace API: chainservice mediates everything, so the webapp never holds an RPC or an ABI (§15.6a).
-  **⚠️ Regression against §15.2, recorded in §15.6d:** `releaseHoldback` was permissionless in the pooled design so a keeper could fire it. Restricting vault functions to the deal's parties makes it prompt-only — nobody sweeps up on the parties' behalf. Re-opening it to all callers is safe if unclaimed reserves prove a problem, since both destinations and amounts are fixed by the escrow's final state. **§13.15 added** recording the custody decision; **the escrow model's own custody position and §13.14's arbitration question remain counsel's to confirm.**
+  **✅ Regression resolved.** `releaseHoldback` was briefly restricted to the deal's parties, which made it prompt-and-sign; it is permissionless again, matching §6.7 as originally written. Safe because both destinations and both amounts are fixed by the escrow's final state, and the gating condition (`isClaimed`) is one-way — the same argument invariant 11 makes for `withdraw`. It is relayed but deliberately not swept: candidate selection needs a chain read per sold position, and both parties can fire it themselves. **§13.15 added** recording the custody decision; **the escrow model's own custody position and §13.14's arbitration question remain counsel's to confirm.**
 - **v0.8.1 (2026-08-06): §3.3A2a revised — the off-chain agreement stage is removed; every vote goes straight on-chain.** Superseding v0.6.1's "negotiate off-chain, then prompt both parties to ratify", a disputant's settlement figure is now submitted as `submitResolutionVote(X)` **the moment they name it**, and the contract is the only place agreement is detected. The retired design had the platform mirror `_checkAndExecuteConsensus` off-chain — recording each side's figure, comparing them, then triggering the votes — which is duplicated logic whose only possible behaviours are *agree with the chain* or *be wrong*, and which created an "agreed off-chain, unsettled on-chain" state that could persist indefinitely and had to be chased. **Removing the mirror removes the state**, and with it contractservice's entire settlement role: §15.5 becomes a deletion rather than a rewrite (no agreement detection, no vote triggering, no chasing). contractservice keeps the genuinely off-chain parts — dispute record, discussion, evidence, notifications.
   **The load-bearing consequence is a UI obligation, added to §15.1.** The contract holds one value per role (the latest) and settles the instant any two of the three match, so **on-chain there is no difference between "I propose 40%" and "I accept 40%"** — every submitted figure is a **binding offer that pays out on match, irreversibly**. §15.6 accordingly forbids sliders, counter-offer threads, or any presentation implying a number can be floated and refined: a user typing the other side's standing figure as an opening anchor has ended the dispute at that figure. Both the counterparty's and any seated arbiter's standing figures must be shown and labelled as settling on match — note **any two of three** settle, so a party matching the *arbiter* ends the dispute without the third party's assent. Figures stay revisable until consensus; each revision is another sponsored transaction, and cheap, since the slot is already non-zero.
   **Measured gas, replacing estimates** (§15.4a): a first vote is ~28k gas all-in, the consensus-triggering vote ~99k (worst observed ~160k) — roughly 10× the first, because the settling transaction executes the whole payout. A fully settled dispute is on the order of a tenth of a cent at sponsored rates, so on-chain revisions cost nothing worth optimising. §15.6 now requires the front-end to size gas **per transaction rather than per flow**: gas-payer funds against whatever the signed transaction declares, so a limit derived from a first vote and reused would strand the settling vote out of gas.

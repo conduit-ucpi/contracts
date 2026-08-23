@@ -741,18 +741,28 @@ contract EscrowContract is ReentrancyGuard {
     }
 
     /**
-     * 🧹 SWEEP WRONG TOKENS - EMERGENCY RECOVERY
+     * 🧹 SWEEP TOKENS NOBODY IS OWED - RECOVERY
      *
-     * If someone accidentally sends the wrong ERC20 token to this contract,
-     * this function sends the entire balance of that token to the BUYER.
+     * If someone accidentally sends the wrong ERC20 token to this contract, this function
+     * sends the entire balance of that token to the BUYER.
+     *
+     * ⚠️ AND THE ESCROW TOKEN TOO, BUT ONLY ONCE THE ESCROW IS FINISHED (`_state == 4`).
+     *    Direct-transfer funding is a first-class path here — `checkAndActivate` accepts
+     *    any balance at or above AMOUNT — while every payout moves a FIXED figure derived
+     *    from AMOUNT. So a buyer who sends too much (a mistyped QR amount, an exchange
+     *    withdrawal rounded up) leaves the excess behind, and while this refused the escrow
+     *    token in every state that excess could never leave: not stolen, but locked for
+     *    good. After a claim or a resolution every obligation has been discharged, so any
+     *    remaining balance is surplus by definition and belongs to the depositor.
      *
      * 🔒 SECURITY:
-     * ✅ Cannot sweep the escrow token (tokenAddress) - escrowed funds are protected
+     * ✅ The escrow token is untouchable while the escrow is live, disputed or unfunded —
+     *    only state 4 (claimed, whether at maturity or by resolution) opens it
      * ✅ Callable by anyone - funds always go to BUYER regardless of caller
      * ✅ Funds always go to BUYER (the depositor)
      */
     function sweepToken(address _token) external initialized nonReentrant {
-        if (_token == address(tokenAddress)) revert CannotSweepEscrowToken();
+        if (_token == address(tokenAddress) && _state != 4) revert CannotSweepEscrowToken();
 
         uint256 balance = IERC20(_token).balanceOf(address(this));
         if (balance == 0) revert NoTokensToSweep();

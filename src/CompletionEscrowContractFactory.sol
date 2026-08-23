@@ -27,6 +27,7 @@ contract CompletionEscrowContractFactory {
     error InvalidBuyerAddress();
     error InvalidLeadSupplierAddress();
     error BuyerAndLeadSupplierMustDiffer();
+    error ArbiterMustBeDistinct();
     error VerifierCannotBeLeadSupplier();
     error AmountMustBeGreaterThanZero();
     error OnlyOwner();
@@ -127,6 +128,12 @@ contract CompletionEscrowContractFactory {
         if (p.buyer == address(0)) revert InvalidBuyerAddress();
         if (p.leadSupplier == address(0)) revert InvalidLeadSupplierAddress();
         if (p.buyer == p.leadSupplier) revert BuyerAndLeadSupplierMustDiffer();
+        // Every escrow this factory creates is arbitrated by OWNER (see _init), so a party
+        // that IS the owner would hold two of the three votes — and because both votes read
+        // one storage slot, a single vote would settle the dispute at any split they chose.
+        // The escrow enforces this itself; pre-checking here turns it into a clear refusal
+        // at creation rather than an opaque revert from inside initialize.
+        if (p.buyer == OWNER || p.leadSupplier == OWNER) revert ArbiterMustBeDistinct();
         // A nominated verifier acts for the buyer - it must never be the supplier
         if (p.verifier == p.leadSupplier) revert VerifierCannotBeLeadSupplier();
         if (p.amount == 0) revert AmountMustBeGreaterThanZero();

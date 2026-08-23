@@ -1364,6 +1364,62 @@ contract EscrowContractTest is Test {
         escrow.sweepToken(address(usdc));
     }
 
+    /**
+     * 💸 AN OVERPAYMENT COMES BACK TO THE BUYER — BUT ONLY ONCE THE ESCROW IS FINISHED.
+     *
+     * ⚠️ IT USED TO BE LOCKED FOREVER. Direct-transfer funding accepts any balance at or
+     *    above AMOUNT while every payout moves a fixed figure derived from AMOUNT, so the
+     *    excess stayed behind — and refusing the escrow token in EVERY state meant it could
+     *    never leave. Not stolen; simply gone. The exchange-withdrawal and QR funding paths
+     *    make overpaying a realistic slip, not an exotic one.
+     */
+    function testSweepReturnsAnOverpaymentOnceTheEscrowIsClaimed() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        // Fund by direct transfer, and send 50 too much.
+        uint256 surplus = 50 * 10 ** 6;
+        usdc.mint(buyer, AMOUNT + surplus);
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT + surplus);
+        escrow.checkAndActivate();
+
+        // While the escrow is live the balance is the escrow itself — untouchable.
+        vm.expectRevert(EscrowContract.CannotSweepEscrowToken.selector);
+        escrow.sweepToken(address(usdc));
+
+        vm.warp(escrow.EXPIRY_TIMESTAMP() + 1);
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        escrow.claimFunds();
+
+        // Now every obligation is discharged, so what is left is surplus by definition.
+        escrow.sweepToken(address(usdc));
+
+        assertEq(usdc.balanceOf(buyer) - buyerBefore, surplus, "the overpayment goes home");
+        assertEq(usdc.balanceOf(address(escrow)), 0, "and nothing is stranded");
+    }
+
+    /// The same after a dispute resolution, which reaches the identical terminal state.
+    function testSweepReturnsAnOverpaymentAfterAResolution() public {
+        EscrowContract escrow = createUnfundedEscrow();
+
+        uint256 surplus = 25 * 10 ** 6;
+        usdc.mint(buyer, AMOUNT + surplus);
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT + surplus);
+        escrow.checkAndActivate();
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        vm.prank(buyer);
+        escrow.submitResolutionVote(40);
+        vm.prank(arbiter);
+        escrow.submitResolutionVote(40); // 2-of-3 settles here
+
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        escrow.sweepToken(address(usdc));
+        assertEq(usdc.balanceOf(buyer) - buyerBefore, surplus);
+    }
+
     function testSweepTokenNoTokensToSweep() public {
         EscrowContract escrow = createUnfundedEscrow();
 

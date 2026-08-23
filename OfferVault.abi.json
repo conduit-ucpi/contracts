@@ -143,6 +143,19 @@
   },
   {
     "type": "function",
+    "name": "isReleasable",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "isWithdrawable",
     "inputs": [],
     "outputs": [
@@ -524,17 +537,6 @@
   {
     "type": "error",
     "name": "NotEscrowRecipient",
-    "inputs": [
-      {
-        "name": "caller",
-        "type": "address",
-        "internalType": "address"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "NotHoldbackParty",
     "inputs": [
       {
         "name": "caller",
