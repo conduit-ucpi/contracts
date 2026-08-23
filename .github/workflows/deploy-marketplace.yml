@@ -36,7 +36,16 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          # ⚠️ NOT `nightly`. Nightly tags are created before their per-platform binaries
+          # finish uploading, so foundryup can resolve a tag and then fail verifying it
+          # ("checking if forge, cast, anvil, chisel, solar for nightly-...") — an upstream
+          # race that breaks this job for reasons nothing in this repo controls.
+          #
+          # `stable` always resolves, and is the channel the contracts are developed on
+          # (v1.7.1 at the time of writing). It does still MOVE, so a re-run months later
+          # can compile with a newer toolchain than the one the suite was validated against
+          # — if a deploy ever needs to be reproduced exactly, pin the SemVer instead.
+          version: stable
 
       # Everything the marketplace needs is checked BEFORE the chain is touched.
       # OfferVaultFactory is immutable in every constructor argument that matters,
@@ -155,11 +164,29 @@ jobs:
             echo "MARKETPLACE_MIN_OFFER_BPS=${{ vars.MARKETPLACE_MIN_OFFER_BPS }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Install dependencies
+      # ⚠️ NO `forge install` HERE, DELIBERATELY. This step used to run
+      #    `forge install OpenZeppelin/openzeppelin-contracts --shallow` — unconditionally
+      #    and with no version — which resolves OZ's default-branch HEAD at deploy time and
+      #    OVERWRITES the pinned submodule. The bytecode that went on-chain was therefore
+      #    built against whatever OZ shipped that morning, not the revision any test ran
+      #    against, and it failed silently rather than erroring. The recursive checkout
+      #    above already provides lib/openzeppelin-contracts at the locked revision; all
+      #    this step has to do is prove it, before the chain is touched.
+      - name: Verify pinned dependencies
         run: |
-          forge install OpenZeppelin/openzeppelin-contracts --shallow
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
+          if [ ! -f lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol ]; then
+            echo "::error::lib/openzeppelin-contracts is not populated - the recursive submodule checkout did not run"
+            exit 1
+          fi
+
+          LOCKED=$(jq -r '."lib/openzeppelin-contracts".rev' foundry.lock)
+          ACTUAL=$(git -C lib/openzeppelin-contracts rev-parse HEAD)
+          echo "OpenZeppelin locked: $LOCKED"
+          echo "OpenZeppelin actual: $ACTUAL"
+          if [ "$LOCKED" != "$ACTUAL" ]; then
+            echo "::error::OpenZeppelin is at $ACTUAL but foundry.lock pins $LOCKED - refusing to deploy bytecode built against an unpinned dependency"
+            exit 1
+          fi
 
       - name: Build contracts
         run: forge build
