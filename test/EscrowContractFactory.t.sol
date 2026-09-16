@@ -370,17 +370,15 @@ contract EscrowContractFactoryTest is Test {
     }
 
     /**
-     * ⚠️ DOCUMENTS A REAL HAZARD introduced by deploying lazily.
+     * Money that arrives after the dispute window has already closed must still be
+     * recoverable. Refusing the deploy would strand it permanently: nothing else can move
+     * funds at an address that holds no code.
      *
-     * The terms are fixed at quote time, expiry included, and _validate rejects an expiry
-     * that has already passed. So if funds reach the predicted address but nothing deploys
-     * the escrow before that expiry, the deploy can never succeed afterwards - and since the
-     * address holds no code, nothing else can move the money either.
-     *
-     * Not stealable (the salt fixes every term), but stuck. Whatever drives deployment has
-     * to act well inside the window, and quotes need an expiry far enough out that it can.
+     * The escrow therefore lands funded-and-expired - seller can claim, buyer cannot
+     * dispute - which is the same bargain an instant transfer makes, except the buyer did
+     * not choose it here.
      */
-    function testFundedAddressBecomesUndeployableOnceItsExpiryPasses() public {
+    function testLateFundingStillDeploysSoTheMoneyIsNotStranded() public {
         bytes32 externalId = keccak256("late");
         address predicted =
             factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
@@ -390,14 +388,35 @@ contract EscrowContractFactoryTest is Test {
 
         vm.warp(expiryTimestamp + 1);
 
-        vm.prank(owner);
-        vm.expectRevert(EscrowContractFactory.InvalidExpiryTimestamp.selector);
-        factory.createAndActivate(
+        vm.prank(other);
+        address deployed = factory.createAndActivate(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
         );
+        assertEq(deployed, predicted);
 
-        assertEq(usdc.balanceOf(predicted), AMOUNT, "the money is still sitting there");
-        assertEq(predicted.code.length, 0, "and nothing can be deployed to reach it");
+        EscrowContract escrow = EscrowContract(deployed);
+        assertTrue(escrow.isFunded(), "funded, not stranded");
+
+        // The window is gone, so there is no dispute to be had...
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.CannotDisputeAfterExpiry.selector);
+        escrow.raiseDispute();
+
+        // ...and the seller can take the money straight away.
+        uint256 sellerBefore = usdc.balanceOf(seller);
+        escrow.claimFunds();
+        assertGt(usdc.balanceOf(seller) - sellerBefore, 0, "seller can claim immediately");
+    }
+
+    /// A fresh escrow whose window has already closed is a caller bug, and there is no
+    /// stranded money to rescue - so the ordinary entry point still rejects it.
+    function testCreateEscrowContractStillRejectsAPastExpiry() public {
+        vm.warp(block.timestamp + 100);
+        vm.prank(owner);
+        vm.expectRevert(EscrowContractFactory.InvalidExpiryTimestamp.selector);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, block.timestamp - 1, description, owner, keccak256("past")
+        );
     }
 
     function testPredictedAddressMatchesDeployment() public {

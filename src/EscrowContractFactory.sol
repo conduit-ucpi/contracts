@@ -113,7 +113,9 @@ contract EscrowContractFactory {
         address arbiter,
         bytes32 externalId
     ) external returns (address) {
-        return _create(Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId), description);
+        return _create(
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId), description, true
+        );
     }
 
     /**
@@ -131,6 +133,24 @@ contract EscrowContractFactory {
      *
      * Permissionless, like checkAndActivate() itself — the parameters are fixed by the salt,
      * so a caller cannot influence where the money goes. Whoever calls it only pays the gas.
+     *
+     * ⚠️ A PAST EXPIRY IS ACCEPTED HERE, and rejected by createEscrowContract.
+     *
+     * The terms were fixed when the address was quoted, so by the time money arrives the
+     * dispute window may already have run out. Refusing to deploy would be the stricter
+     * reading, but it would also mean nothing could ever deploy at that address again — and
+     * because the address holds no code, nobody could move the funds either. That strands
+     * real money to defend a window that has already gone.
+     *
+     * So we deploy. The escrow lands funded-and-expired: the seller can claim at once and
+     * the buyer cannot dispute (CannotDisputeAfterExpiry). The system already has this
+     * shape — an instant transfer (expiryTimestamp == 0) is the same bargain, chosen up
+     * front. The difference worth remembering is that here the buyer did NOT choose it, so
+     * callers should treat a late funding as something to surface, not to pass over
+     * quietly.
+     *
+     * createEscrowContract keeps the check: creating a fresh escrow whose window has
+     * already closed is a caller bug, and there is no stranded money to rescue.
      */
     function createAndActivate(
         address tokenAddress,
@@ -142,7 +162,9 @@ contract EscrowContractFactory {
         address arbiter,
         bytes32 externalId
     ) external returns (address clone) {
-        clone = _create(Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId), description);
+        clone = _create(
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId), description, false
+        );
         EscrowContract(clone).checkAndActivate();
     }
 
@@ -201,13 +223,15 @@ contract EscrowContractFactory {
         );
     }
 
-    function _validate(Terms memory t) internal view {
+    function _validate(Terms memory t, bool requireFutureExpiry) internal view {
         if (t.tokenAddress == address(0)) revert InvalidTokenAddress();
         if (t.buyer == address(0)) revert InvalidBuyerAddress();
         if (t.seller == address(0)) revert InvalidSellerAddress();
         if (t.buyer == t.seller) revert BuyerSellerMustBeDifferent();
         if (t.amount == 0) revert AmountMustBeGreaterThanZero();
-        if (t.expiryTimestamp != 0 && t.expiryTimestamp <= block.timestamp) revert InvalidExpiryTimestamp();
+        if (requireFutureExpiry && t.expiryTimestamp != 0 && t.expiryTimestamp <= block.timestamp) {
+            revert InvalidExpiryTimestamp();
+        }
         // No msg.sender default any more. The arbiter is in the salt, so it has to be a value
         // the caller states and a client can reproduce — silently substituting the relayer
         // would make the address unpredictable to everyone except the relayer itself.
@@ -234,8 +258,11 @@ contract EscrowContractFactory {
         bytes32 externalId;
     }
 
-    function _create(Terms memory t, string memory description) internal returns (address clone) {
-        _validate(t);
+    function _create(Terms memory t, string memory description, bool requireFutureExpiry)
+        internal
+        returns (address clone)
+    {
+        _validate(t, requireFutureExpiry);
 
         // 🏭 Create from the secure template, at the address the salt determines
         clone = Clones.cloneDeterministic(IMPLEMENTATION, _salt(t));
