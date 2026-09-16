@@ -419,6 +419,128 @@ contract EscrowContractFactoryTest is Test {
         );
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // The wallet that pays is not the wallet that holds the buyer's rights
+    // ═══════════════════════════════════════════════════════════════════════════
+    //
+    // An ERC20 transfer is a balance entry inside the token contract, so an escrow has no way
+    // of knowing who funded it and never asks. BUYER is fixed by the terms its address was
+    // derived from, which is what lets a payment link be paid from any wallet at all - and
+    // what means the dispute right and any refund stay with the named buyer rather than
+    // following the money back to its source.
+
+    /// Funds an escrow from `funder` and brings it into existence around them.
+    function _fundedByStranger(address funder, uint256 sent) internal returns (EscrowContract) {
+        bytes32 externalId = keccak256("stranger-funded");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+
+        usdc.mint(funder, sent);
+        vm.prank(funder);
+        usdc.transfer(predicted, sent);
+
+        vm.prank(funder);
+        return EscrowContract(
+            factory.createAndActivate(
+                address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
+            )
+        );
+    }
+
+    function testAnyWalletMayFundAnEscrowWithoutBecomingItsBuyer() public {
+        address stranger = makeAddr("stranger");
+        EscrowContract escrow = _fundedByStranger(stranger, AMOUNT);
+
+        assertTrue(escrow.isFunded(), "a stranger's money funds it just the same");
+        assertEq(escrow.BUYER(), buyer, "the named buyer is unchanged by who paid");
+        assertTrue(escrow.BUYER() != stranger, "funding confers nothing");
+    }
+
+    function testOnlyTheNamedBuyerMayDispute() public {
+        address stranger = makeAddr("stranger");
+        EscrowContract escrow = _fundedByStranger(stranger, AMOUNT);
+
+        // Paying for it does not buy the right to dispute it.
+        vm.prank(stranger);
+        vm.expectRevert(EscrowContract.OnlyBuyer.selector);
+        escrow.raiseDispute();
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        assertTrue(escrow.hasActiveDispute(), "the named buyer may");
+    }
+
+    /**
+     * The consequence worth knowing about: a refund does not go back where the money came
+     * from. It goes to BUYER, which is whoever was named when the address was derived.
+     */
+    function testARefundReturnsToTheNamedBuyerNotTheFunder() public {
+        address stranger = makeAddr("stranger");
+        EscrowContract escrow = _fundedByStranger(stranger, AMOUNT);
+        uint256 escrowAmount = escrow.payoutAmount();
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+
+        // Two matching votes settle it: the buyer's and the arbiter's.
+        vm.prank(buyer);
+        escrow.submitResolutionVote(100);
+        vm.prank(owner);
+        escrow.submitResolutionVote(100);
+
+        assertEq(usdc.balanceOf(buyer) - buyerBefore, escrowAmount, "the refund went to the named buyer");
+        assertEq(usdc.balanceOf(stranger), 0, "and not to whoever paid");
+    }
+
+    /// Short of the amount, there is nothing to activate - and the money waits rather than
+    /// being lost. Any later transfer to the same address completes it.
+    function testAnUnderfundedEscrowCannotActivateUntilToppedUp() public {
+        bytes32 externalId = keccak256("short");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+
+        vm.prank(buyer);
+        usdc.transfer(predicted, AMOUNT - 1);
+
+        vm.prank(owner);
+        vm.expectRevert(EscrowContract.InsufficientDirectPayment.selector);
+        factory.createAndActivate(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId);
+
+        // The shortfall can come from anywhere too.
+        address stranger = makeAddr("stranger");
+        usdc.mint(stranger, 1);
+        vm.prank(stranger);
+        usdc.transfer(predicted, 1);
+
+        vm.prank(owner);
+        address deployed = factory.createAndActivate(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
+        );
+        assertTrue(EscrowContract(deployed).isFunded(), "topped up, it activates");
+    }
+
+    /// An overpayment is recoverable, but only once the escrow has settled - and it too goes
+    /// to the named buyer rather than back to the wallet that sent it.
+    function testAnOverpaymentReturnsToTheNamedBuyerOnceClaimed() public {
+        address stranger = makeAddr("stranger");
+        uint256 extra = 1_000_000;
+        EscrowContract escrow = _fundedByStranger(stranger, AMOUNT + extra);
+
+        // Still held while the escrow is live.
+        vm.expectRevert(EscrowContract.CannotSweepEscrowToken.selector);
+        escrow.sweepToken(address(usdc));
+
+        vm.warp(expiryTimestamp + 1);
+        escrow.claimFunds();
+
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        escrow.sweepToken(address(usdc));
+        assertEq(usdc.balanceOf(buyer) - buyerBefore, extra, "the overpayment returns to the named buyer");
+        assertEq(usdc.balanceOf(stranger), 0, "not to whoever sent it");
+    }
+
     function testPredictedAddressMatchesDeployment() public {
         vm.startPrank(owner);
 
