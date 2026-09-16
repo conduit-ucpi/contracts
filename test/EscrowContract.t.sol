@@ -151,7 +151,7 @@ contract EscrowContractTest is Test {
     function createAndFundEscrow() internal returns (EscrowContract) {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(34))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -192,7 +192,7 @@ contract EscrowContractTest is Test {
 
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(33))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -381,7 +381,7 @@ contract EscrowContractTest is Test {
 
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(32))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -415,7 +415,7 @@ contract EscrowContractTest is Test {
     function testDepositFunds() public {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(31))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -449,7 +449,7 @@ contract EscrowContractTest is Test {
     function testAnyoneCanDeposit() public {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(30))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -470,7 +470,7 @@ contract EscrowContractTest is Test {
     function testCannotUseUnfundedContract() public {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(29))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -492,7 +492,7 @@ contract EscrowContractTest is Test {
     function testCreatorFeeTransferOnDeposit() public {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(28))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -690,7 +690,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer - expiry = 0
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(27))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -733,7 +734,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(26))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -762,7 +764,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(25))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -786,7 +789,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(24))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -815,7 +819,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(23))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -854,7 +859,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(22))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -903,7 +909,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(21))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -938,7 +945,8 @@ contract EscrowContractTest is Test {
             smallAmount,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(20))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -966,7 +974,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(19))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -987,7 +995,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(18))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1000,7 +1008,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(17))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1041,7 +1049,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(16))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1070,7 +1078,8 @@ contract EscrowContractTest is Test {
             AMOUNT,
             0, // Instant transfer
             description,
-            address(0)
+            arbiter,
+            bytes32(uint256(15))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1104,7 +1113,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(14))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1131,7 +1140,7 @@ contract EscrowContractTest is Test {
 
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, smallAmount, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, smallAmount, expiryTimestamp, description, arbiter, bytes32(uint256(13))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1158,7 +1167,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(12))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1181,7 +1190,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(11))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1208,7 +1217,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(10))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1237,7 +1246,7 @@ contract EscrowContractTest is Test {
         // Verify existing approve+deposit flow still works unchanged after adding checkAndActivate
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(9))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1268,7 +1277,7 @@ contract EscrowContractTest is Test {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(8))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -1305,7 +1314,7 @@ contract EscrowContractTest is Test {
     function createUnfundedEscrow() internal returns (EscrowContract) {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(7))
         );
         EscrowContract escrow = EscrowContract(escrowAddress);
 
@@ -2039,13 +2048,17 @@ contract EscrowContractTest is Test {
     function testFactoryRejectsArbiterEqualsBuyer() public {
         vm.prank(arbiter);
         vm.expectRevert(EscrowContractFactory.ArbiterMustBeDistinct.selector);
-        factory.createEscrowContract(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, buyer);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, buyer, bytes32(uint256(6))
+        );
     }
 
     function testFactoryRejectsArbiterEqualsSeller() public {
         vm.prank(arbiter);
         vm.expectRevert(EscrowContractFactory.ArbiterMustBeDistinct.selector);
-        factory.createEscrowContract(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, seller);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, seller, bytes32(uint256(5))
+        );
     }
 
     // Pins the initialize-level guard independently of the factory's own check
@@ -2070,12 +2083,15 @@ contract EscrowContractTest is Test {
         EscrowContract(clone).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiryTimestamp, 0, address(0));
     }
 
-    function testFactoryRejectsCreatorDefaultingSelfAsArbiter() public {
-        // Buyer creates their own escrow without specifying an arbiter; the default
-        // (msg.sender == buyer) must be rejected rather than granting them 2 votes.
+    function testFactoryRejectsCreatorNamingSelfAsArbiter() public {
+        // Buyer creates their own escrow and names themselves arbiter, which would grant
+        // them 2 of the 3 dispute votes. (There is no msg.sender default to fall into any
+        // more - the arbiter must be stated - but naming yourself is still rejected.)
         vm.prank(buyer);
         vm.expectRevert(EscrowContractFactory.ArbiterMustBeDistinct.selector);
-        factory.createEscrowContract(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0));
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, buyer, bytes32(uint256(4))
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -2088,7 +2104,7 @@ contract EscrowContractTest is Test {
 
         vm.prank(arbiter);
         address esc = factory.createEscrowContract(
-            address(feeToken), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter
+            address(feeToken), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(3))
         );
         EscrowContract escrow = EscrowContract(esc);
 
@@ -2111,7 +2127,7 @@ contract EscrowContractTest is Test {
         // Creation must not revert just because decimals() is absent.
         vm.prank(arbiter);
         address esc = factory.createEscrowContract(
-            address(noDec), buyer, seller, bigAmount, expiryTimestamp, description, arbiter
+            address(noDec), buyer, seller, bigAmount, expiryTimestamp, description, arbiter, bytes32(uint256(2))
         );
         assertTrue(esc != address(0));
 

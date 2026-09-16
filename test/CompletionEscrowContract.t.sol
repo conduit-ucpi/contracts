@@ -87,9 +87,9 @@ contract CompletionEscrowContractTest is Test {
     address public payee2 = address(0x12);
     address public other = address(0x4);
 
-    uint256 public constant AMOUNT = 1000 * 10**6; // 1000 USDC
+    uint256 public constant AMOUNT = 1000 * 10 ** 6; // 1000 USDC
     uint256 public CREATOR_FEE; // 1% of AMOUNT
-    uint256 public ESCROW;      // AMOUNT - CREATOR_FEE
+    uint256 public ESCROW; // AMOUNT - CREATOR_FEE
     string public description = "Test completion escrow";
 
     function setUp() public {
@@ -127,9 +127,8 @@ contract CompletionEscrowContractTest is Test {
 
     function _create(address[] memory r, uint256[] memory b) internal returns (CompletionEscrowContract) {
         vm.prank(buyer);
-        address addr = factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        address addr =
+            factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
         return CompletionEscrowContract(addr);
     }
 
@@ -191,9 +190,7 @@ contract CompletionEscrowContractTest is Test {
         b[1] = 4000; // sum 9000
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContract.PayeeBpsSumNot10000.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testCreateRevertsBpsSumTooHigh() public {
@@ -201,33 +198,31 @@ contract CompletionEscrowContractTest is Test {
         b[1] = 6000; // sum 11000
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContract.PayeeBpsSumNot10000.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testCreateRevertsZeroBps() public {
         address[] memory r = new address[](2);
         uint256[] memory b = new uint256[](2);
-        r[0] = payee1; r[1] = payee2;
-        b[0] = 10000; b[1] = 0; // a zero share is not allowed
+        r[0] = payee1;
+        r[1] = payee2;
+        b[0] = 10000; // a zero share is not allowed
+        b[1] = 0;
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContract.InvalidPayeeBps.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testCreateRevertsZeroPayeeAddress() public {
         address[] memory r = new address[](2);
         uint256[] memory b = new uint256[](2);
-        r[0] = payee1; r[1] = address(0);
-        b[0] = 5000; b[1] = 5000;
+        r[0] = payee1;
+        r[1] = address(0);
+        b[0] = 5000;
+        b[1] = 5000;
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContract.InvalidPayeeAddress.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testCreateRevertsNoPayees() public {
@@ -235,21 +230,18 @@ contract CompletionEscrowContractTest is Test {
         uint256[] memory b = new uint256[](0);
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContract.NoPayees.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testCreateRevertsArrayLengthMismatch() public {
         address[] memory r = new address[](2);
         uint256[] memory b = new uint256[](1);
-        r[0] = payee1; r[1] = payee2;
+        r[0] = payee1;
+        r[1] = payee2;
         b[0] = 10000;
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContract.PayeeArrayLengthMismatch.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testCreateRevertsTooManyPayees() public {
@@ -262,9 +254,7 @@ contract CompletionEscrowContractTest is Test {
         }
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContract.TooManyPayees.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testImplementationCannotBeInitialized() public {
@@ -285,9 +275,8 @@ contract CompletionEscrowContractTest is Test {
         // legacy schedule, small amounts never revert creation.
         (address[] memory r, uint256[] memory b) = _single();
         vm.prank(buyer);
-        address addr = factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, 99, r, b, address(0), description
-        );
+        address addr =
+            factory.createEscrowContract(address(usdc), buyer, leadSupplier, 99, r, b, address(0), description);
         assertEq(CompletionEscrowContract(addr).CREATOR_FEE(), 0);
     }
 
@@ -297,9 +286,8 @@ contract CompletionEscrowContractTest is Test {
         (address[] memory r, uint256[] memory b) = _single();
         uint256 amount = 200_000; // 0.20 USDC - inside the legacy revert band
         vm.prank(buyer);
-        address addr = factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, amount, r, b, address(0), description
-        );
+        address addr =
+            factory.createEscrowContract(address(usdc), buyer, leadSupplier, amount, r, b, address(0), description);
         assertEq(CompletionEscrowContract(addr).CREATOR_FEE(), amount / 100);
     }
 
@@ -324,9 +312,7 @@ contract CompletionEscrowContractTest is Test {
         (address[] memory r, uint256[] memory b) = _single();
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.OnlyOwner.selector);
-        factory.createChildEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        factory.createChildEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
     function testChildDepositPaysNoFee() public {
@@ -358,9 +344,7 @@ contract CompletionEscrowContractTest is Test {
         (address[] memory r, uint256[] memory b) = _single();
         vm.prank(arbiter);
         vm.expectRevert(CompletionEscrowContractFactory.BuyerAndLeadSupplierMustDiffer.selector);
-        factory.createChildEscrowContract(
-            address(usdc), buyer, buyer, AMOUNT, r, b, address(0), description
-        );
+        factory.createChildEscrowContract(address(usdc), buyer, buyer, AMOUNT, r, b, address(0), description);
     }
 
     // ── deposit ─────────────────────────────────────────────────────────────
@@ -435,8 +419,8 @@ contract CompletionEscrowContractTest is Test {
         address finalPayee = address(0x21);
         address otherPayee = address(0x22);
 
-        uint256 parentAmount = 2000 * 10**6;
-        uint256 childAmount = 990 * 10**6;
+        uint256 parentAmount = 2000 * 10 ** 6;
+        uint256 childAmount = 990 * 10 ** 6;
 
         (address[] memory childR, uint256[] memory childB) = _single();
         childR[0] = finalPayee;
@@ -450,8 +434,10 @@ contract CompletionEscrowContractTest is Test {
         // Parent: 2000 USDC, 50/50 between the child and another payee
         address[] memory parentR = new address[](2);
         uint256[] memory parentB = new uint256[](2);
-        parentR[0] = childAddr; parentR[1] = otherPayee;
-        parentB[0] = 5000; parentB[1] = 5000;
+        parentR[0] = childAddr;
+        parentR[1] = otherPayee;
+        parentB[0] = 5000;
+        parentB[1] = 5000;
 
         vm.prank(buyer);
         address parentAddr = factory.createEscrowContract(
@@ -602,9 +588,8 @@ contract CompletionEscrowContractTest is Test {
         address verifier = address(0x31);
         (address[] memory r, uint256[] memory b) = _single();
         vm.prank(buyer);
-        address addr = factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, verifier, description
-        );
+        address addr =
+            factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, verifier, description);
         CompletionEscrowContract escrow = CompletionEscrowContract(addr);
         assertEq(escrow.VERIFIER(), verifier);
         _fund(escrow);
@@ -627,9 +612,8 @@ contract CompletionEscrowContractTest is Test {
         address verifier = address(0x31);
         (address[] memory r, uint256[] memory b) = _single();
         vm.prank(buyer);
-        address addr = factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, verifier, description
-        );
+        address addr =
+            factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, verifier, description);
         CompletionEscrowContract escrow = CompletionEscrowContract(addr);
         _fund(escrow);
 
@@ -642,9 +626,7 @@ contract CompletionEscrowContractTest is Test {
         (address[] memory r, uint256[] memory b) = _single();
         vm.prank(buyer);
         vm.expectRevert(CompletionEscrowContractFactory.VerifierCannotBeLeadSupplier.selector);
-        factory.createEscrowContract(
-            address(usdc), buyer, leadSupplier, AMOUNT, r, b, leadSupplier, description
-        );
+        factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, leadSupplier, description);
     }
 
     // ── no deadline: time alone changes nothing ─────────────────────────────
@@ -753,9 +735,8 @@ contract CompletionEscrowContractTest is Test {
 
         (address[] memory r, uint256[] memory b) = _single();
         vm.prank(buyer);
-        address addr = factory.createEscrowContract(
-            address(feeToken), buyer, leadSupplier, AMOUNT, r, b, address(0), description
-        );
+        address addr =
+            factory.createEscrowContract(address(feeToken), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
 
         vm.prank(buyer);
         feeToken.approve(addr, AMOUNT);
@@ -798,8 +779,9 @@ contract CompletionEscrowContractTest is Test {
         (address[] memory r, uint256[] memory b) = _single();
 
         vm.expectRevert(CompletionEscrowContract.ArbiterMustBeDistinct.selector);
-        CompletionEscrowContract(clone).initialize(
-            CompletionEscrowContract.InitParams({
+        CompletionEscrowContract(clone)
+            .initialize(
+                CompletionEscrowContract.InitParams({
                 tokenAddress: address(usdc),
                 buyer: buyer,
                 leadSupplier: leadSupplier,
@@ -811,7 +793,7 @@ contract CompletionEscrowContractTest is Test {
                 payeeBps: b,
                 verifier: address(0)
             })
-        );
+            );
     }
 
     function testDisputeNotByTheSupplier() public {
@@ -1035,10 +1017,7 @@ contract CompletionEscrowContractTest is Test {
 
         assertEq(usdc.balanceOf(payee1), expected1);
         assertEq(usdc.balanceOf(payee2), supplierAmount - expected1);
-        assertEq(
-            buyerAmount + usdc.balanceOf(payee1) + usdc.balanceOf(payee2),
-            ESCROW
-        );
+        assertEq(buyerAmount + usdc.balanceOf(payee1) + usdc.balanceOf(payee2), ESCROW);
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
 

@@ -96,7 +96,9 @@ contract OfferVaultTest is Test {
     function _createFunded() internal returns (EscrowContract escrow) {
         vm.warp(block.timestamp + 1); // keep the factory's clone salt unique
         vm.prank(platform);
-        address addr = escrowFactory.createEscrowContract(address(usdc), buyer, seller, AMOUNT, expiry, "test", arbiter);
+        address addr = escrowFactory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiry, "test", arbiter, bytes32(uint256(66))
+        );
         escrow = EscrowContract(addr);
 
         usdc.mint(buyer, AMOUNT);
@@ -885,7 +887,9 @@ contract OfferVaultTest is Test {
 
     function testImplementationCannotBeInitialized() public {
         vm.expectRevert(OfferVault.ImplementationCannotBeInitialized.selector);
-        vaultImpl.initialize(address(1), address(2), address(3), address(usdc), 1, 0, 1, 0, block.timestamp + 1, uint64(0));
+        vaultImpl.initialize(
+            address(1), address(2), address(3), address(usdc), 1, 0, 1, 0, block.timestamp + 1, uint64(0)
+        );
     }
 
     function testFactoryHasNoPerEscrowStorage() public {

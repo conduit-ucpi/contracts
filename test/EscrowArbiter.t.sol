@@ -82,9 +82,16 @@ contract EscrowArbiterTest is Test {
     // Helpers
     // ───────────────────────────────────────────────────────────────────────────
 
+    /// Distinguishes escrows that are otherwise identical. The salt no longer includes
+    /// block.timestamp, so same-terms escrows need their own externalId to get their own
+    /// address - exactly as a real caller uses the pending contract's id.
+    uint256 private _escrowNonce;
+
     function _createFunded() internal returns (EscrowContract escrow) {
         vm.prank(platform);
-        address addr = factory.createEscrowContract(address(usdc), buyer, seller, AMOUNT, expiry, "test", arbiter);
+        address addr = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiry, "test", arbiter, bytes32(++_escrowNonce)
+        );
         escrow = EscrowContract(addr);
 
         usdc.mint(buyer, AMOUNT);
@@ -719,8 +726,7 @@ contract EscrowArbiterTest is Test {
         assertEq(before, implementation.NOMINATION_WINDOW(), "identical to the implementation");
 
         // A second escrow, from the same factory, sees the identical value.
-        // (Warp first: the factory's clone salt includes block.timestamp.)
-        vm.warp(block.timestamp + 1);
+        // (No warp needed: escrows are separated by externalId, not block.timestamp.)
         assertEq(_createFunded().NOMINATION_WINDOW(), before, "identical across clones");
 
         // Exercise every state-mutating path that touches arbiter machinery.

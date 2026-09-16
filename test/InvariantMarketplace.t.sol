@@ -133,7 +133,8 @@ contract MarketplaceHandler is Test {
         address current = escrow.recipient();
         address offerLp = v.lp();
         vm.prank(current);
-        try escrow.approveRecipientTransfer(address(v), offerLp) {} catch {
+        try escrow.approveRecipientTransfer(address(v), offerLp) {}
+        catch {
             return;
         }
         vm.prank(current);
@@ -273,14 +274,13 @@ contract InvariantMarketplaceTest is Test {
         implementation = new EscrowContract(defaultArbiter);
         escrowFactory = new EscrowContractFactory(platform, address(implementation), platform);
         vaultImpl = new OfferVault();
-        market = new OfferVaultFactory(
-            address(vaultImpl), address(implementation), 50, 1000, 24 hours, feeRecipient, owner
-        );
+        market =
+            new OfferVaultFactory(address(vaultImpl), address(implementation), 50, 1000, 24 hours, feeRecipient, owner);
 
         vm.prank(platform);
         escrow = EscrowContract(
             escrowFactory.createEscrowContract(
-                address(usdc), buyer, seller, AMOUNT, block.timestamp + 30 days, "inv", arbiter
+                address(usdc), buyer, seller, AMOUNT, block.timestamp + 30 days, "inv", arbiter, bytes32(uint256(65))
             )
         );
         usdc.mint(buyer, AMOUNT);

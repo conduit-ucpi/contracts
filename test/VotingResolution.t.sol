@@ -80,7 +80,7 @@ contract VotingResolutionTest is Test {
         // Create escrow
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, admin, bytes32(uint256(68))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -142,7 +142,7 @@ contract VotingResolutionTest is Test {
         // Create and fund escrow but don't dispute
         vm.prank(admin);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, admin, bytes32(uint256(67))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);

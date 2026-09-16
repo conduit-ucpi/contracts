@@ -114,7 +114,7 @@ contract EscrowContractFactoryTest is Test {
         // Gas-payer (owner) calls factory with buyer and seller addresses
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(63))
         );
 
         assertTrue(escrowAddress != address(0));
@@ -138,12 +138,12 @@ contract EscrowContractFactoryTest is Test {
 
         // Create USDC escrow
         address usdcEscrow = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "USDC escrow", address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "USDC escrow", owner, bytes32(uint256(62))
         );
 
         // Create DAI escrow
         address daiEscrow = factory.createEscrowContract(
-            address(dai), buyer, seller, AMOUNT, expiryTimestamp, "DAI escrow", address(0)
+            address(dai), buyer, seller, AMOUNT, expiryTimestamp, "DAI escrow", owner, bytes32(uint256(61))
         );
 
         assertTrue(usdcEscrow != daiEscrow);
@@ -161,7 +161,7 @@ contract EscrowContractFactoryTest is Test {
         // Test that non-owner addresses can create escrow contracts
         vm.prank(other);
         address contractAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(60))
         );
 
         // Verify contract was created successfully
@@ -176,44 +176,41 @@ contract EscrowContractFactoryTest is Test {
 
         vm.prank(other);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, customArbiter
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, customArbiter, bytes32(uint256(59))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
         assertEq(escrow.ARBITER(), customArbiter, "Arbiter should be the explicit address");
     }
 
-    function testArbiterDefaultsToCaller() public {
-        // Passing address(0) as arbiter should default to msg.sender (the caller)
-        vm.prank(other);
-        address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
-        );
-
-        EscrowContract escrow = EscrowContract(escrowAddress);
-        assertEq(escrow.ARBITER(), other, "Arbiter should default to the factory caller");
-    }
-
     function testCreateEscrowValidation() public {
         vm.startPrank(owner);
 
         vm.expectRevert(EscrowContractFactory.InvalidTokenAddress.selector);
-        factory.createEscrowContract(address(0), buyer, seller, AMOUNT, expiryTimestamp, description, address(0));
+        factory.createEscrowContract(
+            address(0), buyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(57))
+        );
 
         vm.expectRevert(EscrowContractFactory.InvalidBuyerAddress.selector);
         factory.createEscrowContract(
-            address(usdc), address(0), seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), address(0), seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(56))
         );
 
         vm.expectRevert(EscrowContractFactory.InvalidSellerAddress.selector);
-        factory.createEscrowContract(address(usdc), buyer, address(0), AMOUNT, expiryTimestamp, description, address(0));
+        factory.createEscrowContract(
+            address(usdc), buyer, address(0), AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(55))
+        );
 
         // Test same buyer and seller
         vm.expectRevert(EscrowContractFactory.BuyerSellerMustBeDifferent.selector);
-        factory.createEscrowContract(address(usdc), buyer, buyer, AMOUNT, expiryTimestamp, description, address(0));
+        factory.createEscrowContract(
+            address(usdc), buyer, buyer, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(54))
+        );
 
         vm.expectRevert(EscrowContractFactory.AmountMustBeGreaterThanZero.selector);
-        factory.createEscrowContract(address(usdc), buyer, seller, 0, expiryTimestamp, description, address(0));
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, 0, expiryTimestamp, description, owner, bytes32(uint256(53))
+        );
 
         // Warp forward so block.timestamp > 1, then test with past timestamp
         vm.warp(block.timestamp + 100);
@@ -226,7 +223,8 @@ contract EscrowContractFactoryTest is Test {
             AMOUNT,
             block.timestamp - 1, // This will be 100, which is less than current 101
             description,
-            address(0)
+            owner,
+            bytes32(uint256(69))
         );
 
         // Test that amounts equal to minimum fee are rejected
@@ -240,13 +238,14 @@ contract EscrowContractFactoryTest is Test {
             300000, // 0.3 USDC - exactly equal to minimum fee
             expiryTimestamp,
             description,
-            address(0)
+            owner,
+            bytes32(uint256(52))
         );
 
         // Test with invalid parameters - zero addresses
         vm.expectRevert(EscrowContractFactory.InvalidBuyerAddress.selector);
         factory.createEscrowContract(
-            address(usdc), address(0), seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), address(0), seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(51))
         );
 
         vm.stopPrank();
@@ -265,7 +264,7 @@ contract EscrowContractFactoryTest is Test {
 
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(50))
         );
 
         assertTrue(escrowAddress != address(0));
@@ -277,11 +276,12 @@ contract EscrowContractFactoryTest is Test {
         string memory firstDesc = "First escrow";
         string memory secondDesc = "Second escrow";
 
-        address escrow1 =
-            factory.createEscrowContract(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, firstDesc, address(0));
+        address escrow1 = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, firstDesc, owner, bytes32(uint256(49))
+        );
 
         address escrow2 = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT * 2, expiryTimestamp + 1 days, secondDesc, address(0)
+            address(usdc), buyer, seller, AMOUNT * 2, expiryTimestamp + 1 days, secondDesc, owner, bytes32(uint256(48))
         );
 
         assertTrue(escrow1 != escrow2);
@@ -298,29 +298,219 @@ contract EscrowContractFactoryTest is Test {
         vm.stopPrank();
     }
 
-    function testDeterministicAddresses() public {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Counterfactual funding: money arrives BEFORE the escrow exists
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function testCreateAndActivateOnAnAddressFundedBeforeItExisted() public {
+        bytes32 externalId = keccak256("pending-contract-1");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+
+        // Nothing is deployed there yet - it is empty space.
+        assertEq(predicted.code.length, 0, "must not exist yet");
+
+        // The payer sends to the bare address. This is a ledger update inside the TOKEN
+        // contract: no code runs at `predicted`, nothing is triggered, nobody is notified.
+        vm.prank(buyer);
+        usdc.transfer(predicted, AMOUNT);
+        assertEq(usdc.balanceOf(predicted), AMOUNT);
+        assertEq(predicted.code.length, 0, "a transfer does not deploy anything");
+
+        // Someone - anyone - then brings the escrow into existence on top of those funds.
+        vm.prank(other);
+        address deployed = factory.createAndActivate(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
+        );
+
+        assertEq(deployed, predicted, "deployed where the money already was");
+
+        EscrowContract escrow = EscrowContract(deployed);
+        assertTrue(escrow.isFunded(), "activated from the pre-existing balance");
+        assertEq(escrow.BUYER(), buyer);
+        assertEq(escrow.SELLER(), seller);
+        assertEq(escrow.ARBITER(), owner);
+        assertEq(escrow.AMOUNT(), AMOUNT);
+        assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
+    }
+
+    function testCreateAndActivateIsAllOrNothingWhenUnfunded() public {
+        bytes32 externalId = keccak256("pending-contract-1");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+
+        // checkAndActivate reverts without the balance, and it is in the same transaction
+        // as the deploy - so the whole thing rolls back rather than leaving a deployed but
+        // unfunded escrow sitting at the predicted address.
+        vm.prank(owner);
+        vm.expectRevert(EscrowContract.InsufficientDirectPayment.selector);
+        factory.createAndActivate(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId);
+
+        assertEq(predicted.code.length, 0, "nothing may be left behind");
+    }
+
+    function testCreateAndActivateSettlesAnInstantTransferStraightToSeller() public {
+        bytes32 externalId = keccak256("instant");
+        // expiryTimestamp == 0 is the instant-transfer branch: no escrow period, no dispute.
+        address predicted = factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, 0, owner, externalId);
+
+        vm.prank(buyer);
+        usdc.transfer(predicted, AMOUNT);
+
+        uint256 sellerBefore = usdc.balanceOf(seller);
+
+        vm.prank(other);
+        address deployed =
+            factory.createAndActivate(address(usdc), buyer, seller, AMOUNT, 0, description, owner, externalId);
+
+        EscrowContract escrow = EscrowContract(deployed);
+        assertGt(usdc.balanceOf(seller) - sellerBefore, 0, "seller paid immediately");
+        assertEq(usdc.balanceOf(deployed), 0, "nothing retained");
+        assertFalse(escrow.canDispute(), "an instant transfer has no dispute window");
+    }
+
+    /**
+     * ⚠️ DOCUMENTS A REAL HAZARD introduced by deploying lazily.
+     *
+     * The terms are fixed at quote time, expiry included, and _validate rejects an expiry
+     * that has already passed. So if funds reach the predicted address but nothing deploys
+     * the escrow before that expiry, the deploy can never succeed afterwards - and since the
+     * address holds no code, nothing else can move the money either.
+     *
+     * Not stealable (the salt fixes every term), but stuck. Whatever drives deployment has
+     * to act well inside the window, and quotes need an expiry far enough out that it can.
+     */
+    function testFundedAddressBecomesUndeployableOnceItsExpiryPasses() public {
+        bytes32 externalId = keccak256("late");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+
+        vm.prank(buyer);
+        usdc.transfer(predicted, AMOUNT);
+
+        vm.warp(expiryTimestamp + 1);
+
+        vm.prank(owner);
+        vm.expectRevert(EscrowContractFactory.InvalidExpiryTimestamp.selector);
+        factory.createAndActivate(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
+        );
+
+        assertEq(usdc.balanceOf(predicted), AMOUNT, "the money is still sitting there");
+        assertEq(predicted.code.length, 0, "and nothing can be deployed to reach it");
+    }
+
+    function testPredictedAddressMatchesDeployment() public {
         vm.startPrank(owner);
 
-        uint256 creationTime1 = block.timestamp;
-        address escrow1 = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+        bytes32 externalId = keccak256("pending-contract-1");
+
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+
+        address deployed = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
         );
 
-        vm.warp(block.timestamp + 1);
-
-        uint256 creationTime2 = block.timestamp;
-        address escrow2 = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
-        );
-
-        assertTrue(escrow1 != escrow2);
-
-        // Test that the prediction function exists and runs without error
-        factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, creationTime1);
-
-        factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, creationTime2);
+        // The whole point: the address was knowable before anything was on-chain.
+        assertEq(deployed, predicted);
 
         vm.stopPrank();
+    }
+
+    function testExternalIdSeparatesOtherwiseIdenticalEscrows() public {
+        vm.startPrank(owner);
+
+        address a = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, keccak256("pending-a")
+        );
+        address b = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, keccak256("pending-b")
+        );
+
+        // Same terms, same block - previously separated by block.timestamp, now by externalId.
+        assertTrue(a != b);
+
+        vm.stopPrank();
+    }
+
+    function testRedeployingTheSameEscrowReverts() public {
+        vm.startPrank(owner);
+
+        bytes32 externalId = keccak256("pending-contract-1");
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
+        );
+
+        // Clones.cloneDeterministic reverts when the address is already occupied, so a
+        // predicted address cannot be quietly taken over after the fact.
+        vm.expectRevert();
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
+        );
+
+        vm.stopPrank();
+    }
+
+    /**
+     * Every initialize parameter must be in the salt, or an attacker could front-run the
+     * deploy of a known address and choose that parameter themselves. Changing any one of
+     * them must move the address.
+     */
+    function testEveryParameterChangesThePredictedAddress() public {
+        bytes32 externalId = keccak256("pending-contract-1");
+        address base =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+
+        assertTrue(
+            base != factory.getContractAddress(address(dai), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId),
+            "token must change the address"
+        );
+        assertTrue(
+            base
+                != factory.getContractAddress(address(usdc), other, seller, AMOUNT, expiryTimestamp, owner, externalId),
+            "buyer must change the address"
+        );
+        assertTrue(
+            base != factory.getContractAddress(address(usdc), buyer, other, AMOUNT, expiryTimestamp, owner, externalId),
+            "seller must change the address"
+        );
+        assertTrue(
+            base
+                != factory.getContractAddress(
+                    address(usdc), buyer, seller, AMOUNT + 1, expiryTimestamp, owner, externalId
+                ),
+            "amount must change the address"
+        );
+        assertTrue(
+            base
+                != factory.getContractAddress(
+                    address(usdc), buyer, seller, AMOUNT, expiryTimestamp + 1, owner, externalId
+                ),
+            "expiry must change the address"
+        );
+        assertTrue(
+            base
+                != factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, other, externalId),
+            "arbiter must change the address"
+        );
+        assertTrue(
+            base
+                != factory.getContractAddress(
+                    address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, keccak256("other")
+                ),
+            "externalId must change the address"
+        );
+    }
+
+    function testArbiterMustBeStatedExplicitly() public {
+        vm.prank(owner);
+        // address(0) used to mean "default to msg.sender", which made the address
+        // unpredictable to everyone but the caller. It is now rejected.
+        vm.expectRevert(EscrowContractFactory.InvalidArbiterAddress.selector);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0), keccak256("x")
+        );
     }
 
     function testNoFeeThreshold() public {
@@ -331,7 +521,7 @@ contract EscrowContractFactoryTest is Test {
         uint256 noFeeAmount = 1000; // 1000 microUSDC = 0.001 USDC
 
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, noFeeAmount, expiryTimestamp, "No fee test", address(0)
+            address(usdc), buyer, seller, noFeeAmount, expiryTimestamp, "No fee test", owner, bytes32(uint256(45))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -342,7 +532,7 @@ contract EscrowContractFactoryTest is Test {
         uint256 smallFeeAmount = 400000; // 0.4 USDC - above threshold and minimum fee
 
         address escrowAddress2 = factory.createEscrowContract(
-            address(usdc), buyer, seller, smallFeeAmount, expiryTimestamp, "Small fee test", address(0)
+            address(usdc), buyer, seller, smallFeeAmount, expiryTimestamp, "Small fee test", owner, bytes32(uint256(44))
         );
 
         EscrowContract escrow2 = EscrowContract(escrowAddress2);
@@ -362,14 +552,21 @@ contract EscrowContractFactoryTest is Test {
 
         vm.expectRevert(EscrowContractFactory.AmountTooSmallForMinFee.selector);
         factory.createEscrowContract(
-            address(usdc), buyer, seller, tooSmallAmount, expiryTimestamp, "Too small amount test", address(0)
+            address(usdc),
+            buyer,
+            seller,
+            tooSmallAmount,
+            expiryTimestamp,
+            "Too small amount test",
+            owner,
+            bytes32(uint256(43))
         );
     }
 
     function testReentrancyProtection() public {
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(42))
         );
 
         assertTrue(escrowAddress != address(0));
@@ -382,7 +579,7 @@ contract EscrowContractFactoryTest is Test {
         // Factory no longer transfers funds, so this should succeed
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), poorBuyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), poorBuyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(41))
         );
 
         assertTrue(escrowAddress != address(0));
@@ -398,7 +595,7 @@ contract EscrowContractFactoryTest is Test {
         // Factory no longer transfers funds, so creation should succeed
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(40))
         );
 
         assertTrue(escrowAddress != address(0));
@@ -428,7 +625,14 @@ contract EscrowContractFactoryTest is Test {
         // Create escrow contract and verify it inherits custom fee recipient
         vm.prank(owner);
         address escrowAddress = customFactory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "Custom fee recipient test", address(0)
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "Custom fee recipient test",
+            owner,
+            bytes32(uint256(39))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -448,7 +652,14 @@ contract EscrowContractFactoryTest is Test {
         // Create escrow contract and verify it uses owner as fee recipient
         vm.prank(owner);
         address escrowAddress = defaultFactory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "Default fee recipient test", address(0)
+            address(usdc),
+            buyer,
+            seller,
+            AMOUNT,
+            expiryTimestamp,
+            "Default fee recipient test",
+            owner,
+            bytes32(uint256(38))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
@@ -466,11 +677,18 @@ contract EscrowContractFactoryTest is Test {
 
         // Create multiple escrow contracts
         address escrow1 = customFactory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "First escrow", address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "First escrow", owner, bytes32(uint256(37))
         );
 
         address escrow2 = customFactory.createEscrowContract(
-            address(usdc), address(0x7), address(0x8), AMOUNT * 2, expiryTimestamp + 1 days, "Second escrow", address(0)
+            address(usdc),
+            address(0x7),
+            address(0x8),
+            AMOUNT * 2,
+            expiryTimestamp + 1 days,
+            "Second escrow",
+            owner,
+            bytes32(uint256(36))
         );
 
         vm.stopPrank();
@@ -489,7 +707,7 @@ contract EscrowContractFactoryTest is Test {
 
         vm.prank(owner);
         address escrowAddress = customFactory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "Fee test", address(0)
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, "Fee test", owner, bytes32(uint256(35))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
