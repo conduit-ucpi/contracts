@@ -101,6 +101,29 @@ jobs:
       - name: Run tests
         run: forge test -vvv
 
+      # The off-chain address predictors - chainservice, the browser, the AP2 adapter - each
+      # derive escrow addresses without asking the chain, so they are replicas of what this
+      # factory does. They are pinned to the vector below.
+      #
+      # Regenerating it here is what stops a change to the CREATE2 salt leaving all of them
+      # quietly agreeing with a stale answer: change the salt and this step fails until the
+      # vector is committed, which is the prompt to go and update the consumers. Without it,
+      # every predictor keeps passing its own tests while sending funds to an address nothing
+      # can be deployed to.
+      - name: Address vector is current
+        run: |
+          forge test --match-contract PredictVectorTest >/dev/null
+          if ! git diff --quiet -- counterfactual-vectors.json; then
+            echo "::error::counterfactual-vectors.json is out of date. The escrow address"
+            echo "::error::derivation changed, so every off-chain predictor is now wrong."
+            echo "::error::Run 'forge test --match-contract PredictVectorTest', commit the"
+            echo "::error::result, and update chainservice / webapp / the AP2 adapter to match."
+            git --no-pager diff -- counterfactual-vectors.json
+            exit 1
+          fi
+          echo "Address vector matches the factory."
+
+
       - name: Deploy contracts
         id: deploy
         run: |

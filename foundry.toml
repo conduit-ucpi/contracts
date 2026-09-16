@@ -7,6 +7,8 @@ optimizer = true
 optimizer_runs = 200
 via_ir = false
 verbosity = 3
+# PredictVectorTest writes the vector every off-chain address predictor is pinned to.
+fs_permissions = [{ access = "read-write", path = "./counterfactual-vectors.json" }]
 
 [rpc_endpoints]
 default = "${NETWORK_RPC_URL}"
