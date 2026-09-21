@@ -123,6 +123,31 @@ jobs:
           fi
           echo "Address vector matches the factory."
 
+      # The ABI files at the repo root are what the services copy (chainservice keeps its own
+      # under src/main/resources/abi and checks them against these at release time). They are
+      # only a reference if they are true, so they are regenerated here and the build fails if
+      # the committed copy differs — the prompt to commit the new ABI and go and update the
+      # consumers, exactly as the address vector above does for the salt.
+      #
+      # ⚠️ AN EVENT WHOSE PARAMETER TYPES CHANGE GETS A NEW TOPIC HASH, and a consumer decoding
+      #    with the old ABI stops seeing it without a single error. A narrowed getter type is
+      #    harmless on the wire (every integer is a 32-byte word) but still shows up here, so a
+      #    reviewer sees it happen rather than discovers it.
+      - name: Committed ABIs are current
+        run: |
+          for name in EscrowContract EscrowContractFactory OfferVault OfferVaultFactory; do
+            forge inspect "$name" abi --json > "$name.abi.json"
+          done
+          if ! git diff --quiet -- '*.abi.json'; then
+            echo "::error::A committed *.abi.json no longer matches the compiled contract."
+            echo "::error::Run 'forge inspect <Name> abi --json > <Name>.abi.json' for each, commit"
+            echo "::error::the result, and update chainservice's copy under src/main/resources/abi."
+            git --no-pager diff --stat -- '*.abi.json'
+            git --no-pager diff -- '*.abi.json' | head -200
+            exit 1
+          fi
+          echo "Committed ABIs match the compiled contracts."
+
 
       - name: Deploy contracts
         id: deploy
