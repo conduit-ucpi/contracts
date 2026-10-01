@@ -80,8 +80,8 @@ contract OfferVaultTest is Test {
 
     function setUp() public {
         usdc = new MockERC20();
-        implementation = new EscrowContract(defaultArbiter);
-        escrowFactory = new EscrowContractFactory(platform, address(implementation), platform);
+        implementation = new EscrowContract(defaultArbiter, bytes20(0));
+        escrowFactory = new EscrowContractFactory(platform, address(implementation), platform, address(0), bytes20(0));
         vaultImpl = new OfferVault();
         market = new OfferVaultFactory(
             address(vaultImpl), address(implementation), FEE_BPS, MIN_OFFER_BPS, DEFAULT_DURATION, feeRecipient, owner
@@ -154,7 +154,7 @@ contract OfferVaultTest is Test {
     }
 
     function testCreate_RejectsWrongImplementationClone() public {
-        EscrowContract otherImpl = new EscrowContract(defaultArbiter);
+        EscrowContract otherImpl = new EscrowContract(defaultArbiter, bytes20(0));
         address rogue = Clones.clone(address(otherImpl));
         vm.expectRevert(abi.encodeWithSelector(OfferVaultFactory.UntrustedEscrow.selector, rogue));
         market.createOffer(rogue, lp, 1000e6, 0, 0);

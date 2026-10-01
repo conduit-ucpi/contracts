@@ -19,6 +19,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * ✅ BUYER: Gets refund based on dispute outcome or mutual agreement
  * ✅ SELLER: Gets payment after expiry OR based on dispute outcome
  * ✅ PLATFORM: Gets small upfront fee only (disclosed transparently)
+ * ✅ PARTNER: May receive a share OF that same fee, if the platform signed for it
+ *    at creation - never anything beyond the disclosed fee
  * ❌ NOBODY ELSE: Code makes it impossible for funds to go anywhere else
  *
  * ─────────────────────────────────────────────────────────────────────────────────
@@ -257,6 +259,8 @@ contract EscrowContract is ReentrancyGuard {
     error BuyerSellerMustBeDifferent();
     error ArbiterMustBeDistinct();
     error CreatorFeeMustBeLessThanAmount();
+    error PartnerFeeExceedsCreatorFee();
+    error InvalidPartnerFeeRecipient();
     error NotInitialized();
     error OnlyBuyer();
     error OnlySeller();
@@ -388,6 +392,12 @@ contract EscrowContract is ReentrancyGuard {
     ///         MUST be a multisig whose signers rotate while the address stays fixed.
     address public immutable DEFAULT_ARBITER;
 
+    /// @notice The git commit this implementation was built from, stamped at deploy.
+    /// @dev    Immutable, so it lives in the implementation's runtime bytecode and every
+    ///         clone reports the same value through its delegatecall - no per-escrow
+    ///         storage. It cannot be a source constant: committing a SHA changes the SHA.
+    bytes20 public immutable GIT_COMMIT;
+
     /// @notice Deadline after which seatDefaultArbiter() may fire. Set when a dispute and
     ///         the unseated state coincide. Never blocks a matching nomination — a late
     ///         match still seats right up until the fallback actually executes.
@@ -433,6 +443,25 @@ contract EscrowContract is ReentrancyGuard {
     ///         slots and an extra SSTORE on every recipient transfer.
     uint64 public recipientNonce;
 
+    /// @notice Revenue-share partner paid PARTNER_FEE out of CREATOR_FEE at funding
+    ///         (address(0) = no split). Set once at initialize, never changed.
+    ///
+    /// @dev    Declared HERE so it packs into the slot `resolvedBuyerPercentage` and
+    ///         `recipientNonce` already share (1 + 8 + 20 bytes), and initialize writes
+    ///         that slot anyway - a split costs no extra slot for the address.
+    ///
+    ///         The partner is carved out of the fee, never added to it: the buyer pays
+    ///         AMOUNT and the seller nets AMOUNT - CREATOR_FEE whether or not a split
+    ///         exists. Only the platform's own portion shrinks. The factory admits a split
+    ///         only with a signature from its FEE_SPLIT_SIGNER - see
+    ///         EscrowContractFactory._validateSplit.
+    address public PARTNER_FEE_RECIPIENT;
+
+    /// @notice Portion of CREATOR_FEE paid to PARTNER_FEE_RECIPIENT (0 = no split).
+    ///         Always <= CREATOR_FEE. Only written when non-zero, so an unsplit escrow
+    ///         pays nothing for the slot.
+    uint256 public PARTNER_FEE;
+
     /// @notice Grace period for buyer + current recipient to agree an arbiter on a SOLD
     ///         escrow before the DEFAULT_ARBITER fallback becomes seatable.
     ///
@@ -466,6 +495,7 @@ contract EscrowContract is ReentrancyGuard {
     // 📢 PUBLIC EVENTS: These events prove what happened (recorded permanently on blockchain)
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
     event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
+    event PartnerFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
     event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
@@ -503,10 +533,12 @@ contract EscrowContract is ReentrancyGuard {
      *        into this implementation's bytecode and shared by every clone, so it cannot
      *        be forged by a directly-created clone. MUST be a multisig: rotating it
      *        requires deploying a whole new implementation, factory and marketplace.
+     * @param _gitCommit The commit the deployed bytecode was built from (see GIT_COMMIT).
      */
-    constructor(address _defaultArbiter) {
+    constructor(address _defaultArbiter, bytes20 _gitCommit) {
         if (_defaultArbiter == address(0)) revert InvalidDefaultArbiterAddress();
         DEFAULT_ARBITER = _defaultArbiter;
+        GIT_COMMIT = _gitCommit;
         // Implementation contract - disable initialization
         // FACTORY will remain address(0) for the implementation
         _state = 255; // Mark as disabled
@@ -520,7 +552,9 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _amount,
         uint256 _expiryTimestamp,
         uint256 _creatorFee,
-        address _feeRecipient
+        address _feeRecipient,
+        address _partnerFeeRecipient,
+        uint256 _partnerFee
     ) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
@@ -556,12 +590,19 @@ contract EscrowContract is ReentrancyGuard {
         CREATOR_FEE = _creatorFee;
         createdAt = block.timestamp; // Set the creation timestamp
         if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
+        // The partner share is carved out of the fee, so it can never exceed it - that is
+        // what keeps the buyer's and seller's figures independent of any split.
+        if (_partnerFee > _creatorFee) revert PartnerFeeExceedsCreatorFee();
+        if (_partnerFee > 0) {
+            if (_partnerFeeRecipient == address(0)) revert InvalidPartnerFeeRecipient();
+            PARTNER_FEE_RECIPIENT = _partnerFeeRecipient;
+            PARTNER_FEE = _partnerFee;
+        }
         _state = 0; // Set to unfunded state
 
         // NOTE: the arbiter nomination window is the NOMINATION_WINDOW constant and is
-        // deliberately NOT a parameter here - see its declaration for why. That keeps this
-        // signature identical to the pre-marketplace implementation, so the factory ABI is
-        // unchanged and integrators need only repoint at the new address.
+        // deliberately NOT a parameter here - see its declaration for why. (This signature
+        // did grow the partner-split pair; only the factory calls it in production.)
 
         // §3.3C: 255 = "no dispute resolution has occurred". This MUST be written here
         // rather than as a declaration initializer - clone storage starts at zero, and a
@@ -623,9 +664,7 @@ contract EscrowContract is ReentrancyGuard {
 
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
             emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            if (CREATOR_FEE > 0) {
-                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
-            }
+            _emitFeeEvents();
             emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
 
             // 🔒 STEP 2: BUYER's money is transferred to this contract temporarily
@@ -637,9 +676,7 @@ contract EscrowContract is ReentrancyGuard {
             if (tokenAddress.balanceOf(address(this)) - balanceBefore != AMOUNT) revert TransferAmountMismatch();
 
             // 💳 STEP 3: Platform gets their fee (transparent and upfront)
-            if (CREATOR_FEE > 0) {
-                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
-            }
+            _payFees();
 
             // 💰 STEP 4: Immediately transfer to SELLER (no escrow period)
             tokenAddress.safeTransfer(SELLER, escrowAmount);
@@ -648,9 +685,7 @@ contract EscrowContract is ReentrancyGuard {
 
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
             emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            if (CREATOR_FEE > 0) {
-                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
-            }
+            _emitFeeEvents();
 
             // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
             uint256 balanceBefore = tokenAddress.balanceOf(address(this));
@@ -662,9 +697,7 @@ contract EscrowContract is ReentrancyGuard {
 
             // 💳 STEP 3: Platform gets their fee (transparent and upfront)
             // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
-            if (CREATOR_FEE > 0) {
-                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
-            }
+            _payFees();
 
             // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
         }
@@ -675,7 +708,7 @@ contract EscrowContract is ReentrancyGuard {
      *
      * 🔒 SECURITY GUARANTEE: This function can be called by ANYONE - this is safe because
      *    it only distributes funds to the escrow's own roles (BUYER, current SELLER,
-     *    FEE_RECIPIENT) - never to an arbitrary caller.
+     *    FEE_RECIPIENT, PARTNER_FEE_RECIPIENT) - never to an arbitrary caller.
      *
      * What happens when checkAndActivate is called:
      * 1. Checks if tokens were already sent directly to this contract address
@@ -709,15 +742,11 @@ contract EscrowContract is ReentrancyGuard {
 
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
             emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            if (CREATOR_FEE > 0) {
-                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
-            }
+            _emitFeeEvents();
             emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
 
             // 💳 STEP 2: Platform gets their fee (transparent and upfront)
-            if (CREATOR_FEE > 0) {
-                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
-            }
+            _payFees();
 
             // 💰 STEP 3: Immediately transfer to SELLER (no escrow period)
             tokenAddress.safeTransfer(SELLER, escrowAmount);
@@ -726,17 +755,46 @@ contract EscrowContract is ReentrancyGuard {
 
             // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
             emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            if (CREATOR_FEE > 0) {
-                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE, block.timestamp);
-            }
+            _emitFeeEvents();
 
             // 💳 STEP 2: Platform gets their fee (transparent and upfront)
             // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
-            if (CREATOR_FEE > 0) {
-                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE);
-            }
+            _payFees();
 
             // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
+        }
+    }
+
+    /**
+     * The fee, split between the platform and (if any) the partner. Together they are
+     * exactly CREATOR_FEE, so every caller's escrowAmount = AMOUNT - CREATOR_FEE holds.
+     *
+     * PlatformFeeCollected now reports the PLATFORM'S portion; on an unsplit escrow that
+     * is the whole fee, as before. Sum it with PartnerFeeCollected for the total.
+     */
+    function _emitFeeEvents() internal {
+        uint256 partnerFee = PARTNER_FEE;
+        unchecked {
+            // Safe: PARTNER_FEE <= CREATOR_FEE is checked in initialize
+            if (CREATOR_FEE - partnerFee > 0) {
+                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE - partnerFee, block.timestamp);
+            }
+        }
+        if (partnerFee > 0) {
+            emit PartnerFeeCollected(PARTNER_FEE_RECIPIENT, partnerFee, block.timestamp);
+        }
+    }
+
+    function _payFees() internal {
+        uint256 partnerFee = PARTNER_FEE;
+        unchecked {
+            // Safe: PARTNER_FEE <= CREATOR_FEE is checked in initialize
+            if (CREATOR_FEE - partnerFee > 0) {
+                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE - partnerFee);
+            }
+        }
+        if (partnerFee > 0) {
+            tokenAddress.safeTransfer(PARTNER_FEE_RECIPIENT, partnerFee);
         }
     }
 

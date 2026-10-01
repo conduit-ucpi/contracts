@@ -76,7 +76,7 @@ contract ArbiterNominationWindowTest is Test {
     uint256 internal constant CREATOR_FEE = 10 * 10 ** 6;
 
     function setUp() public {
-        impl = new EscrowContract(DEFAULT_ARBITER);
+        impl = new EscrowContract(DEFAULT_ARBITER, bytes20(0));
         usdc = new MockERC20();
         usdc.mint(BUYER, AMOUNT * 10);
         vm.warp(1_700_000_000);
@@ -88,7 +88,7 @@ contract ArbiterNominationWindowTest is Test {
 
     function _init(EscrowContract e) internal {
         e.initialize(
-            address(usdc), BUYER, SELLER, ARBITER, AMOUNT, block.timestamp + 365 days, CREATOR_FEE, FEE_RECIPIENT
+            address(usdc), BUYER, SELLER, ARBITER, AMOUNT, block.timestamp + 365 days, CREATOR_FEE, FEE_RECIPIENT, address(0), 0
         );
     }
 

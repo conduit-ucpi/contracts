@@ -142,8 +142,8 @@ contract GasOptimisationSafetyNetTest is Test {
     function setUp() public {
         vm.warp(CREATION_TIME);
         usdc = new SafetyNetToken(6);
-        implementation = new EscrowContract(DEFAULT_ARBITER);
-        factory = new EscrowContractFactory(owner, address(implementation), feeRecipient);
+        implementation = new EscrowContract(DEFAULT_ARBITER, bytes20(0));
+        factory = new EscrowContractFactory(owner, address(implementation), feeRecipient, address(0), bytes20(0));
         usdc.mint(buyer, AMOUNT * 1_000);
     }
 
@@ -663,9 +663,9 @@ contract GasOptimisationSafetyNetTest is Test {
 
     function test_AnEscrowPaysTheRecipientOfTheFactoryThatMadeIt() public {
         address otherRecipient = address(0xFEE2);
-        EscrowContract otherImplementation = new EscrowContract(DEFAULT_ARBITER);
+        EscrowContract otherImplementation = new EscrowContract(DEFAULT_ARBITER, bytes20(0));
         EscrowContractFactory otherFactory =
-            new EscrowContractFactory(owner, address(otherImplementation), otherRecipient);
+            new EscrowContractFactory(owner, address(otherImplementation), otherRecipient, address(0), bytes20(0));
 
         bytes32 id = keccak256("other");
         address at = otherFactory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiry, arbiter, id);
@@ -809,14 +809,14 @@ contract GasOptimisationSafetyNetTest is Test {
         // The constructor marks the implementation as already initialised; that guard fires first.
         // Whichever guard a rewrite keeps, the implementation must refuse — pinned by the revert.
         vm.expectRevert(EscrowContract.AlreadyInitialized.selector);
-        implementation.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient);
+        implementation.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient, address(0), 0);
     }
 
     function test_ACloneCanBeInitialisedOnlyOnce() public {
         EscrowContract escrow = funded();
         vm.prank(address(factory));
         vm.expectRevert(EscrowContract.AlreadyInitialized.selector);
-        escrow.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient);
+        escrow.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient, address(0), 0);
     }
 
     function test_ACloneRecordsWhoeverInitialisedItAsItsFactory() public {
@@ -824,7 +824,7 @@ contract GasOptimisationSafetyNetTest is Test {
         // factory is the only thing that should. Pinned so a slot removal does not lose the getter.
         address raw = Clones.clone(address(implementation));
         vm.prank(stranger);
-        EscrowContract(raw).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient);
+        EscrowContract(raw).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient, address(0), 0);
         assertEq(EscrowContract(raw).FACTORY(), stranger);
     }
 

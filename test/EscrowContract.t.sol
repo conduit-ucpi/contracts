@@ -129,8 +129,8 @@ contract EscrowContractTest is Test {
 
     function setUp() public {
         usdc = new MockERC20();
-        EscrowContract implementation = new EscrowContract(address(0xDEFA17));
-        factory = new EscrowContractFactory(arbiter, address(implementation), address(0));
+        EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
+        factory = new EscrowContractFactory(arbiter, address(implementation), address(0), address(0), bytes20(0));
 
         expiryTimestamp = block.timestamp + 7 days;
 
@@ -168,7 +168,7 @@ contract EscrowContractTest is Test {
 
     function testConstructorValidation() public {
         // Test implementation contract constructor
-        EscrowContract implementation = new EscrowContract(address(0xDEFA17));
+        EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
 
         // Implementation should be disabled (state 255)
         vm.expectRevert(EscrowContract.NotInitialized.selector);
@@ -2065,22 +2065,22 @@ contract EscrowContractTest is Test {
     // (defense in depth): a raw clone initialized with a colliding arbiter must
     // revert even if the factory guard were ever bypassed or removed.
     function testInitializeRejectsArbiterEqualsBuyerOrSeller() public {
-        EscrowContract impl = new EscrowContract(address(0xDEFA17));
+        EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
 
         address cloneA = Clones.clone(address(impl));
         vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
-        EscrowContract(cloneA).initialize(address(usdc), buyer, seller, buyer, AMOUNT, expiryTimestamp, 0, arbiter);
+        EscrowContract(cloneA).initialize(address(usdc), buyer, seller, buyer, AMOUNT, expiryTimestamp, 0, arbiter, address(0), 0);
 
         address cloneB = Clones.clone(address(impl));
         vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
-        EscrowContract(cloneB).initialize(address(usdc), buyer, seller, seller, AMOUNT, expiryTimestamp, 0, arbiter);
+        EscrowContract(cloneB).initialize(address(usdc), buyer, seller, seller, AMOUNT, expiryTimestamp, 0, arbiter, address(0), 0);
     }
 
     function testInitializeRejectsZeroFeeRecipient() public {
-        EscrowContract impl = new EscrowContract(address(0xDEFA17));
+        EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
         address clone = Clones.clone(address(impl));
         vm.expectRevert(EscrowContract.InvalidFeeRecipientAddress.selector);
-        EscrowContract(clone).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiryTimestamp, 0, address(0));
+        EscrowContract(clone).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiryTimestamp, 0, address(0), address(0), 0);
     }
 
     function testFactoryRejectsCreatorNamingSelfAsArbiter() public {
@@ -2180,7 +2180,7 @@ contract EscrowContractTest is Test {
     }
 
     function testAdapterViewsRevertBeforeInit() public {
-        EscrowContract implementation = new EscrowContract(address(0xDEFA17));
+        EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
 
         vm.expectRevert(EscrowContract.NotInitialized.selector);
         implementation.recipient();
