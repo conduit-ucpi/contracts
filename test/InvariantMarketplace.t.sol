@@ -271,8 +271,8 @@ contract InvariantMarketplaceTest is Test {
 
     function setUp() public {
         usdc = new InvMockERC20();
-        implementation = new EscrowContract(defaultArbiter);
-        escrowFactory = new EscrowContractFactory(platform, address(implementation), platform);
+        implementation = new EscrowContract(defaultArbiter, bytes20(0));
+        escrowFactory = new EscrowContractFactory(platform, address(implementation), platform, address(0), bytes20(0));
         vaultImpl = new OfferVault();
         market =
             new OfferVaultFactory(address(vaultImpl), address(implementation), 50, 1000, 24 hours, feeRecipient, owner);

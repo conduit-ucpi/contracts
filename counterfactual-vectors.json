@@ -63,6 +63,38 @@
       "contractserviceId": "abcdef012345678901234567",
       "externalId": "0xc01b0883dea34695bde8721f8b805ba5a602dfe272750fffa6785c8ae97c46cb",
       "expectedAddress": "0x322634d278F5999D5A1966F81d8276AAA3e74BC6"
+    },
+    {
+      "name": "partner-split-half-fee",
+      "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "buyer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "seller": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "amount": "1000000000",
+      "expiryTimestamp": 1793500000,
+      "arbiter": "0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C",
+      "contractserviceId": "507f1f77bcf86cd799439011",
+      "externalId": "0x003c8aad7259f1acb10b8d4011e74b2fdd2fd7fe8b7604b84211d3b361e12d47",
+      "partner": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+      "partnerBps": 5000,
+      "chainId": 31337,
+      "feeSplitDigest": "0x79fa24b83aaea648c8c15b0cf9fb87d8aa9eab3cde2412ea0fe4ab7dc12c0417",
+      "expectedAddress": "0xb47AD3D2D122AC08CC1dedEEd2BfD1e9814a57D3"
+    },
+    {
+      "name": "partner-split-whole-fee",
+      "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "buyer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "seller": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "amount": "1000000000",
+      "expiryTimestamp": 1793500000,
+      "arbiter": "0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C",
+      "contractserviceId": "507f1f77bcf86cd799439011",
+      "externalId": "0x003c8aad7259f1acb10b8d4011e74b2fdd2fd7fe8b7604b84211d3b361e12d47",
+      "partner": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+      "partnerBps": 10000,
+      "chainId": 31337,
+      "feeSplitDigest": "0xa6021d6d564f80d74b463dda99ead92ba037bd37f3644f66f3932b09de85ed9c",
+      "expectedAddress": "0x0aa2789930fe11E4242d38845Ce068Ea2b58053b"
     }
   ]
 }

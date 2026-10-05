@@ -73,8 +73,8 @@ contract EscrowArbiterTest is Test {
 
     function setUp() public {
         usdc = new MockERC20();
-        implementation = new EscrowContract(defaultArbiter);
-        factory = new EscrowContractFactory(platform, address(implementation), platform);
+        implementation = new EscrowContract(defaultArbiter, bytes20(0));
+        factory = new EscrowContractFactory(platform, address(implementation), platform, address(0), bytes20(0));
         expiry = block.timestamp + 30 days;
     }
 
@@ -783,11 +783,11 @@ contract EscrowArbiterTest is Test {
         address clone = Clones.clone(address(implementation));
 
         vm.expectRevert(EscrowContract.PartyCannotBeDefaultArbiter.selector);
-        EscrowContract(clone).initialize(address(usdc), defaultArbiter, seller, arbiter, AMOUNT, expiry, 0, platform);
+        EscrowContract(clone).initialize(address(usdc), defaultArbiter, seller, arbiter, AMOUNT, expiry, 0, platform, address(0), 0);
 
         address clone2 = Clones.clone(address(implementation));
         vm.expectRevert(EscrowContract.PartyCannotBeDefaultArbiter.selector);
-        EscrowContract(clone2).initialize(address(usdc), buyer, defaultArbiter, arbiter, AMOUNT, expiry, 0, platform);
+        EscrowContract(clone2).initialize(address(usdc), buyer, defaultArbiter, arbiter, AMOUNT, expiry, 0, platform, address(0), 0);
     }
 
     /// §3.3A1's load-bearing property: no code path may change the window after initialize.
@@ -847,7 +847,7 @@ contract EscrowArbiterTest is Test {
         // 1. Direct clone — no factory involved. The codehash is nonetheless genuine.
         address clone = Clones.clone(address(implementation));
         EscrowContract escrow = EscrowContract(clone);
-        escrow.initialize(address(usdc), attackerBuyer, attacker, attackerArbiter, AMOUNT, expiry, 0, platform);
+        escrow.initialize(address(usdc), attackerBuyer, attacker, attackerArbiter, AMOUNT, expiry, 0, platform, address(0), 0);
 
         // 2. Fund it with real tokens so it passes funded/undisputed/unclaimed.
         usdc.mint(attackerBuyer, AMOUNT);

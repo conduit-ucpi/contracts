@@ -62,8 +62,8 @@ contract VotingResolutionTest is Test {
 
     function setUp() public {
         usdc = new MockERC20();
-        EscrowContract implementation = new EscrowContract(address(0xDEFA17));
-        factory = new EscrowContractFactory(admin, address(implementation), address(0));
+        EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
+        factory = new EscrowContractFactory(admin, address(implementation), address(0), address(0), bytes20(0));
 
         expiryTimestamp = block.timestamp + 7 days;
         CREATOR_FEE = AMOUNT / 100; // 1% of 1000 USDC

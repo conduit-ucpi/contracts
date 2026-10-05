@@ -54,6 +54,13 @@ jobs:
           if [ -n "${{ vars.FEE_RECIPIENT_ADDRESS }}" ]; then
             echo "FEE_RECIPIENT_ADDRESS=${{ vars.FEE_RECIPIENT_ADDRESS }}" >> "$GITHUB_ENV"
           fi
+          # Sole authority for partner fee splits. Immutable on the factory; only written
+          # when set, and the deploy script defaults it to OWNER (the relayer) otherwise.
+          if [ -n "${{ vars.FEE_SPLIT_SIGNER_ADDRESS }}" ]; then
+            echo "FEE_SPLIT_SIGNER_ADDRESS=${{ vars.FEE_SPLIT_SIGNER_ADDRESS }}" >> "$GITHUB_ENV"
+          fi
+          # Stamped into the implementation and factory bytecode as GIT_COMMIT().
+          echo "GIT_COMMIT=0x${{ github.sha }}" >> "$GITHUB_ENV"
 
       # Fail before touching the chain rather than mid-broadcast. This value is
       # unchangeable once deployed, so a missing or malformed one must stop the run here.
@@ -152,24 +159,21 @@ jobs:
       - name: Deploy contracts
         id: deploy
         run: |
-          # Deploy with verification. DeploymentScript deploys BOTH the legacy
-          # and the completion (fan-out) implementation + factory. --retries/--delay
+          # Deploy with verification. DeployEscrow deploys ONLY the legacy
+          # EscrowContract + EscrowContractFactory; the completion pair and the
+          # marketplace are deployed separately, by hand. --retries/--delay
           # give blockscout's verification queue time to settle (it can sit in
           # "Pending in queue" longer than the default 5x5s budget).
-          forge script script/DeploymentScript.s.sol:DeploymentScript --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url $VERIFIER_URL --retries 10 --delay 15 -vvvv 2>&1 | tee deployment_output.txt
+          forge script script/DeployEscrow.s.sol:DeployEscrow --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url $VERIFIER_URL --retries 10 --delay 15 -vvvv 2>&1 | tee deployment_output.txt
 
           # Extract addresses from the output. The script logs a distinct line per
-          # contract; match each precisely (a bare "Factory deployed at:" no longer
-          # exists — the lines are now "Legacy factory..." / "Completion factory...").
+          # contract; match each precisely.
           IMPLEMENTATION_ADDRESS=$(grep "Implementation deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
           FACTORY_ADDRESS=$(grep "Legacy factory deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
-          FANOUT_IMPLEMENTATION_ADDRESS=$(grep "Completion implementation deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
-          FANOUT_FACTORY_ADDRESS=$(grep "Completion factory deployed at:" deployment_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
 
           # Fail loudly if any address failed to parse, rather than emitting a
           # summary with blank fields (which silently breaks downstream config).
-          for pair in "legacy implementation:$IMPLEMENTATION_ADDRESS" "legacy factory:$FACTORY_ADDRESS" \
-                      "completion implementation:$FANOUT_IMPLEMENTATION_ADDRESS" "completion factory:$FANOUT_FACTORY_ADDRESS"; do
+          for pair in "legacy implementation:$IMPLEMENTATION_ADDRESS" "legacy factory:$FACTORY_ADDRESS"; do
             if [ -z "${pair#*:}" ]; then
               echo "ERROR: could not parse the ${pair%%:*} address from deployment output" >&2
               exit 1
@@ -179,13 +183,15 @@ jobs:
           echo "Contracts deployed"
           echo "Legacy implementation: $IMPLEMENTATION_ADDRESS"
           echo "Legacy factory: $FACTORY_ADDRESS"
-          echo "Completion implementation: $FANOUT_IMPLEMENTATION_ADDRESS"
-          echo "Completion factory: $FANOUT_FACTORY_ADDRESS"
 
           # Fee recipient for the summary (vars are public, safe to print).
           FEE_RECIPIENT_DISPLAY="${{ vars.FEE_RECIPIENT_ADDRESS }}"
           if [ -z "$FEE_RECIPIENT_DISPLAY" ]; then
             FEE_RECIPIENT_DISPLAY="Default (OWNER)"
+          fi
+          FEE_SPLIT_SIGNER_DISPLAY="${{ vars.FEE_SPLIT_SIGNER_ADDRESS }}"
+          if [ -z "$FEE_SPLIT_SIGNER_DISPLAY" ]; then
+            FEE_SPLIT_SIGNER_DISPLAY="Default (OWNER)"
           fi
 
           # Create a summary with important addresses
@@ -194,13 +200,10 @@ jobs:
           echo "==================================================="
           echo "Legacy implementation:     $IMPLEMENTATION_ADDRESS"
           echo "Legacy factory:            $FACTORY_ADDRESS"
-          echo "Completion implementation: $FANOUT_IMPLEMENTATION_ADDRESS"
-          echo "Completion factory:        $FANOUT_FACTORY_ADDRESS"
+          echo "Git commit:                0x${{ github.sha }}"
           echo "Fee Recipient:             $FEE_RECIPIENT_DISPLAY"
+          echo "Fee split signer:          $FEE_SPLIT_SIGNER_DISPLAY  (IMMUTABLE)"
           echo "Fallback arbiter (Safe):   ${{ vars.DEFAULT_ARBITER_ADDRESS }}  (IMMUTABLE)"
           echo "==================================================="
           echo "LEGACY FACTORY ADDRESS FOR UI CONFIG: $FACTORY_ADDRESS"
-          echo "fanOutChainService env:"
-          echo "  FANOUT_CONTRACT_FACTORY_ADDRESS      = $FANOUT_FACTORY_ADDRESS"
-          echo "  FANOUT_ESCROW_IMPLEMENTATION_ADDRESS = $FANOUT_IMPLEMENTATION_ADDRESS"
           echo "==================================================="

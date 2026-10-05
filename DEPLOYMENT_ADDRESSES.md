@@ -11,9 +11,17 @@ it gates `claimFunds()`, and `EXPIRY_TIMESTAMP == 0` means instant transfer.
 
 Carries the marketplace additions: §3.2 approve/pull recipient transfer and §3.3
 sale-triggered arbiter reset (`resolvedBuyerPercentage`, nominate/seat/evict, the
-72-hour `NOMINATION_WINDOW` constant). **`initialize` and `createEscrowContract`
-keep their previous signatures** — integrators repoint at the new addresses and
-change no call sites.
+72-hour `NOMINATION_WINDOW` constant). `createEscrowContract`, `createAndActivate`
+and `getContractAddress` keep their signatures and, for escrows without a partner
+split, their addresses.
+
+> ⚠️ **Partner fee splits (unreleased, needs a redeploy).** The factory gains
+> `*WithSplit` variants that route a share of the platform fee to a partner, admitted
+> only with an EIP-712 signature from the factory's immutable `FEE_SPLIT_SIGNER`.
+> `initialize` gained two parameters and both contracts gained a constructor
+> argument, so this is a new implementation (new clone codehash), factory and
+> marketplace `TRUSTED_IMPLEMENTATION`. Record `FEE_SPLIT_SIGNER` and `GIT_COMMIT`
+> against each deployment below.
 
 > ⚠️ **These addresses are stale as of 2026-08-07.** `EscrowContract` gained a `hasBeenSold`
 > flag (spec §5.3 — the one-reserve rule moved out of the marketplace and onto the escrow),
@@ -114,6 +122,23 @@ if such escrows still hold funds.
 | EscrowContractFactory | - | - | - |
 
 ## Deployment Instructions
+
+The legacy escrow pair deploys on its own, stamped with the commit it was built from:
+
+- CI: the deploy job runs `script/DeployEscrow.s.sol:DeployEscrow` with
+  `GIT_COMMIT=0x${{ github.sha }}`. It deploys **only** EscrowContract +
+  EscrowContractFactory — the completion pair and marketplace are separate.
+- Locally: `./script/deploy-escrow-keystore.sh` (refuses a dirty tree, sets
+  `GIT_COMMIT` from `HEAD`). `DeploymentScript` still deploys legacy + completion
+  together when that is wanted.
+
+Env: `DEFAULT_ARBITER_ADDRESS` and `GIT_COMMIT` are required;
+`FEE_RECIPIENT_ADDRESS` and `FEE_SPLIT_SIGNER_ADDRESS` default to the owner
+(relayer) when unset — set the signer explicitly, since it is immutable and every
+signature it issues stays valid for the factory's lifetime.
+
+Read the commit back from any escrow, factory or implementation with
+`cast call <address> "GIT_COMMIT()(bytes20)"`.
 
 After deploying contracts:
 

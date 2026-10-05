@@ -72,8 +72,8 @@ contract EscrowContractFactoryTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         dai = new MockERC20();
-        EscrowContract implementation = new EscrowContract(address(0xDEFA17));
-        factory = new EscrowContractFactory(owner, address(implementation), address(0)); // feeRecipient defaults to owner
+        EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
+        factory = new EscrowContractFactory(owner, address(implementation), address(0), address(0), bytes20(0)); // feeRecipient defaults to owner
 
         expiryTimestamp = block.timestamp + 7 days;
 
@@ -97,8 +97,8 @@ contract EscrowContractFactoryTest is Test {
 
     function testConstructorValidation() public {
         // Constructor should accept valid addresses without reverting
-        EscrowContract impl = new EscrowContract(address(0xDEFA17));
-        EscrowContractFactory testFactory = new EscrowContractFactory(owner, address(impl), address(0));
+        EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
+        EscrowContractFactory testFactory = new EscrowContractFactory(owner, address(impl), address(0), address(0), bytes20(0));
         assertEq(testFactory.OWNER(), owner);
         assertEq(testFactory.IMPLEMENTATION(), address(impl));
         assertEq(testFactory.FEE_RECIPIENT(), owner); // Should default to owner
@@ -757,8 +757,8 @@ contract EscrowContractFactoryTest is Test {
         // Test factory with custom fee recipient address
         address customFeeRecipient = address(0x999);
 
-        EscrowContract impl = new EscrowContract(address(0xDEFA17));
-        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient);
+        EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
+        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient, address(0), bytes20(0));
 
         assertEq(customFactory.OWNER(), owner);
         assertEq(customFactory.FEE_RECIPIENT(), customFeeRecipient); // Should use custom fee recipient
@@ -785,8 +785,8 @@ contract EscrowContractFactoryTest is Test {
 
     function testDefaultFeeRecipientWhenAddressZero() public {
         // Test that address(0) defaults to OWNER
-        EscrowContract impl = new EscrowContract(address(0xDEFA17));
-        EscrowContractFactory defaultFactory = new EscrowContractFactory(owner, address(impl), address(0));
+        EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
+        EscrowContractFactory defaultFactory = new EscrowContractFactory(owner, address(impl), address(0), address(0), bytes20(0));
 
         assertEq(defaultFactory.FEE_RECIPIENT(), owner); // Should default to owner
 
@@ -811,8 +811,8 @@ contract EscrowContractFactoryTest is Test {
         // Test that all escrows from same factory inherit same fee recipient
         address customFeeRecipient = address(0x888);
 
-        EscrowContract impl = new EscrowContract(address(0xDEFA17));
-        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient);
+        EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
+        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient, address(0), bytes20(0));
 
         vm.startPrank(owner);
 
@@ -843,8 +843,8 @@ contract EscrowContractFactoryTest is Test {
         // Test that custom fee recipient actually receives the fee
         address customFeeRecipient = address(0x777);
 
-        EscrowContract impl = new EscrowContract(address(0xDEFA17));
-        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient);
+        EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
+        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient, address(0), bytes20(0));
 
         vm.prank(owner);
         address escrowAddress = customFactory.createEscrowContract(
