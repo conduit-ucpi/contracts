@@ -18,16 +18,20 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # ⚠️ NOT `nightly`. Nightly tags are created before their per-platform binaries
-          # finish uploading, so foundryup can resolve a tag and then fail verifying it
-          # ("checking if forge, cast, anvil, chisel, solar for nightly-...") — an upstream
-          # race that breaks this job for reasons nothing in this repo controls.
+          # ⚠️ AN EXACT VERSION, NOT `stable` AND NOT `nightly`.
           #
-          # `stable` always resolves, and is the channel the contracts are developed on
-          # (v1.7.1 at the time of writing). It does still MOVE, so a re-run months later
-          # can compile with a newer toolchain than the one the suite was validated against
-          # — if a deploy ever needs to be reproduced exactly, pin the SemVer instead.
-          version: stable
+          # `stable` moves. It took this job from 1.7-era gas metering to 1.8.4, where each
+          # test call is its own transaction, and every gas ceiling failed on a deploy tag
+          # without a line of contract code changing (2026-10-05). The toolchain the suite
+          # is validated against and the toolchain that deploys must be the same one.
+          #
+          # `nightly` is worse: its tags are created before their per-platform binaries
+          # finish uploading, so the install can fail for reasons nothing here controls.
+          #
+          # To upgrade: install the new version locally, run `forge test`, re-measure the gas
+          # ceilings in test/GasOptimisationSafetyNet.t.sol if they moved, then change this
+          # pin (in BOTH workflows) in the same commit.
+          version: v1.8.4
 
       # Exported into the job environment rather than a project .env file: recent
       # Foundry refuses to auto-load an unapproved .env from the project directory

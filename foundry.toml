@@ -6,6 +6,12 @@ solc_version = "0.8.26"
 optimizer = true
 optimizer_runs = 200
 via_ir = false
+# Pinned, not left to Foundry's default. The default follows the Foundry version, and a changed
+# EVM target changes the bytecode that gets deployed without anyone deciding it should.
+evm_version = "cancun"
+# Each call in a test runs as its own transaction. Foundry's default from 1.8 (it was false
+# before); pinned because the gas ceilings in GasOptimisationSafetyNet.t.sol are measured under it.
+isolate = true
 verbosity = 3
 # PredictVectorTest writes the vector every off-chain address predictor is pinned to.
 fs_permissions = [{ access = "read-write", path = "./counterfactual-vectors.json" }]

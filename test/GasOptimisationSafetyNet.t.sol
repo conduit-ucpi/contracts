@@ -863,21 +863,27 @@ contract GasOptimisationSafetyNetTest is Test {
     // ═════════════════════════════════════════════════════════════════════════
     // F. Gas ceilings. ⚠️ THE ONE PART OF THIS FILE THAT IS MEANT TO CHANGE.
     //
-    //    Each ceiling is the figure measured on 2026-09-21 plus a few percent, so a change that
-    //    makes creation MORE expensive fails here. When the gas work lands, lower each ceiling to
-    //    the new figure plus the same margin, so the saving is locked in and cannot erode.
+    //    Each ceiling is the measured figure plus a few percent, so a change that makes a call
+    //    MORE expensive fails here. When the gas work lands, lower each ceiling to the new figure
+    //    plus the same margin, so the saving is locked in and cannot erode.
     //
-    //    Measured with gasleft() around the external call. A test is ONE transaction, so slots
-    //    touched earlier in it are warm: the claim measures ~28k here against ~54k in the gas
-    //    report, where it runs cold. Ceilings are relative guards, not billing figures; compare
-    //    like with like, and use `forge test --gas-report` for the cold numbers.
+    //    Measured with gasleft() around the external call, under `isolate = true` (pinned in
+    //    foundry.toml, and Foundry's default from 1.8): each call runs as its OWN transaction,
+    //    so the figure includes the 21,000 base cost and cold storage access. That is close to
+    //    what a caller is billed, which the earlier warm, same-transaction figures were not
+    //    (the claim read ~28k warm against ~78k here).
+    //
+    //    ⚠️ THE FIGURES ARE ONLY COMPARABLE UNDER THE SAME FOUNDRY SETTINGS. Re-measured on
+    //       2026-10-05 with Foundry 1.8.4, after CI moved from 1.7-era metering and every
+    //       ceiling failed at once without a line of contract code changing. The Foundry
+    //       version is pinned in the workflows for that reason; when it is bumped, re-measure.
     // ═════════════════════════════════════════════════════════════════════════
 
-    uint256 internal constant CEILING_CREATE_AND_ACTIVATE = 495_000; // measured 471,376
-    uint256 internal constant CEILING_CLAIM = 30_000; // measured 27,956 (warm)
-    uint256 internal constant CEILING_DISPUTE = 27_000; // measured 24,997
-    uint256 internal constant CEILING_RESOLVING_VOTE = 61_000; // measured 57,396
-    uint256 internal constant CEILING_TRANSFER_TO_PREDICTED = 33_000; // measured 31,179 on the mock token
+    uint256 internal constant CEILING_CREATE_AND_ACTIVATE = 542_000; // measured 516,109
+    uint256 internal constant CEILING_CLAIM = 83_000; // measured 78,376
+    uint256 internal constant CEILING_DISPUTE = 63_000; // measured 59,295
+    uint256 internal constant CEILING_RESOLVING_VOTE = 138_000; // measured 130,400
+    uint256 internal constant CEILING_TRANSFER_TO_PREDICTED = 58_000; // measured 54,775 on the mock token
 
     function test_GasCeiling_CreateAndActivate() public {
         bytes32 id = keccak256("gas-create");
