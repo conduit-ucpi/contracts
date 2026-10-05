@@ -1566,65 +1566,67 @@ contract EscrowContractTest is Test {
         escrow.changeRecipient(other);
     }
 
-    function testChangeRecipientAllowedWhenDisputed() public {
+    function testChangeRecipientRejectedWhenDisputed() public {
         EscrowContract escrow = createAndFundEscrow();
 
         vm.prank(buyer);
         escrow.raiseDispute();
 
-        // Reassignment is permitted during a dispute so a recipient-holder can unwind.
+        // The recipient is fixed for the life of a dispute.
         vm.prank(seller);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
         escrow.changeRecipient(other);
-        assertEq(escrow.recipient(), other);
+        assertEq(escrow.recipient(), seller);
         assertTrue(escrow.isDisputed());
     }
 
-    // The marketplace-unwind scenario: seller hands the recipient role to a contract,
-    // the buyer then disputes, and the contract (as current seller) restores the
-    // original seller mid-dispute. Resolution then pays the restored seller.
-    function testChangeRecipientRestoresSellerMidDispute() public {
+    // Whoever holds the recipient role when a dispute is raised holds it until the dispute
+    // resolves: it cannot be handed back mid-dispute, and resolution pays the holder. (A
+    // role handed back BEFORE the dispute is covered by the plain changeRecipient tests.)
+    function testRecipientRoleCannotBeHandedBackMidDispute() public {
         EscrowContract escrow = createAndFundEscrow();
 
-        // Stand in for the marketplace contract holding the recipient role.
-        address marketplace = makeAddr("marketplace");
+        address holder = makeAddr("holder");
 
         vm.prank(seller);
-        escrow.changeRecipient(marketplace);
+        escrow.changeRecipient(holder);
 
         vm.prank(buyer);
         escrow.raiseDispute();
-        assertEq(escrow.recipient(), marketplace);
+        assertEq(escrow.recipient(), holder);
 
-        // Marketplace (current seller) restores the original seller during the dispute.
-        vm.prank(marketplace);
+        vm.prank(holder);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
         escrow.changeRecipient(seller);
-        assertEq(escrow.recipient(), seller);
+        assertEq(escrow.recipient(), holder);
 
-        // Dispute resolves normally; the restored seller receives the seller share.
+        // Dispute resolves normally; the holder votes and receives the seller share.
         uint256 sellerBefore = usdc.balanceOf(seller);
-        vm.prank(seller);
-        escrow.submitResolutionVote(0); // 0% to buyer => 100% to seller
+        vm.prank(holder);
+        escrow.submitResolutionVote(0); // 0% to buyer => 100% to the recipient
         vm.prank(arbiter);
         escrow.submitResolutionVote(0);
 
         assertTrue(escrow.consensusReached());
-        assertEq(usdc.balanceOf(seller), sellerBefore + (AMOUNT - CREATOR_FEE));
-        assertEq(usdc.balanceOf(marketplace), 0);
+        assertEq(usdc.balanceOf(holder), AMOUNT - CREATOR_FEE);
+        assertEq(usdc.balanceOf(seller), sellerBefore);
     }
 
-    // A seller cannot stall resolution by resetting their own vote via reassignment:
-    // buyer + arbiter still form a 2-of-3 majority.
-    function testMidDisputeReassignCannotStallBuyerArbiterConsensus() public {
+    // A seller cannot reset their own vote by reassigning mid-dispute: the reassignment is
+    // refused and the vote stands. Buyer + arbiter still form a 2-of-3 majority.
+    function testMidDisputeReassignIsRefusedAndTheSellerVoteStands() public {
         EscrowContract escrow = createAndFundEscrow();
 
         vm.prank(buyer);
         escrow.raiseDispute();
 
-        // Seller votes, then reassigns to reset their own vote to "not voted".
         vm.prank(seller);
         escrow.submitResolutionVote(100);
         vm.prank(seller);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
         escrow.changeRecipient(other);
+        (uint8 sellerVote) = escrow.resolutionVotes(seller);
+        assertEq(sellerVote, 100);
 
         // Buyer + arbiter agree and resolution executes regardless of the seller.
         vm.prank(buyer);
@@ -1706,13 +1708,14 @@ contract EscrowContractTest is Test {
         escrow.approveRecipientTransfer(makeAddr("marketplace"), other);
     }
 
-    function testApproveAllowedWhenDisputed() public {
+    function testApproveRejectedWhenDisputed() public {
         EscrowContract escrow = createAndFundEscrow();
         vm.prank(buyer);
         escrow.raiseDispute();
         vm.prank(seller);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
         escrow.approveRecipientTransfer(makeAddr("marketplace"), other);
-        assertEq(escrow.recipientOperator(), makeAddr("marketplace"));
+        assertEq(escrow.recipientOperator(), address(0));
     }
 
     function testApproveRejectedWhenClaimed() public {
@@ -1877,20 +1880,22 @@ contract EscrowContractTest is Test {
         assertEq(escrow.recipient(), other);
     }
 
-    function testPullWorksMidDispute() public {
+    function testPullRefusedMidDispute() public {
         EscrowContract escrow = createAndFundEscrow();
         address marketplace = makeAddr("marketplace");
         address lp = makeAddr("lp");
 
+        // Approved while funded, executed after the buyer disputes: refused at execution.
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
         vm.prank(buyer);
         escrow.raiseDispute();
 
-        vm.prank(seller);
-        escrow.approveRecipientTransfer(marketplace, lp);
         vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
         escrow.transferRecipientFrom(lp);
 
-        assertEq(escrow.recipient(), lp);
+        assertEq(escrow.recipient(), seller);
         assertTrue(escrow.isDisputed());
     }
 

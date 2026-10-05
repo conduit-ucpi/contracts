@@ -1,7 +1,7 @@
 # Stabledrop Liquidity Marketplace — Contract OpenSpec
 
-**Version:** 0.9.0
-**Date:** 2026-08-07
+**Version:** 0.9.4
+**Date:** 2026-10-05
 **Status:** §3.2 (atomic swap) implemented ✅. **§3.3 (sale-triggered arbiter reset) implemented ✅.** **Marketplace implemented ✅ as per-offer vaults** (§5.0 — the pooled design was replaced to avoid commingling LP capital; §13.15). Full suite green: **282 tests, 0 failing**. **chainservice migrated onto the new contracts ✅ (§15.4, 263 tests green)** — the platform now holds no dispute power on any escrow it creates. Build log and deviations: **§0**. Remaining gates are external, not code: audit (§16 phase 3), counsel (§13.14), the Safe's outstanding test transaction (§13.8), and deploy-day parameters (§13.1/13.2). Test & audit plan: §14. UI & off-chain obligations: §15. Path to production: §16.
 **Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic. Serves `EscrowContract` clones only — see §3.0.
 
@@ -143,7 +143,7 @@ holdback payouts) and L-2 (`renounceOwnership`).
 | §14 requirement | Where |
 |---|---|
 | 14.1 vote-trap trio | `EscrowArbiter.t.sol::testVoteTrap_*` (3 tests + zero-address sentinel) |
-| 14.1 unseating | `testUnseat_*` (5) — incl. `changeRecipient` does NOT unseat, mid-dispute restart |
+| 14.1 unseating | `testUnseat_*` — incl. `changeRecipient` does NOT unseat; a sale is refused mid-dispute (v0.9.4) |
 | 14.1 nomination & seating | `testNominate_*` (6), `testSeat*` (6) — incl. late-match-still-wins |
 | 14.1 eviction | `testEvict_*` (8) — incl. rolling clock, unsold-escrow exit, fund-neutrality |
 | 14.1 window immutability | `testWindow_IsAConstantSharedByEveryClone` + `test_DirectCloneCannotForgeTheWindow` |
@@ -303,7 +303,7 @@ state-layout change, not a configuration change.
 | `token() → address` | The escrowed ERC20 (any ERC20 permitted) |
 | `payoutAmount() → uint256` | Net amount the recipient receives (`AMOUNT − CREATOR_FEE`) — **the figure LPs price against** |
 | `isFunded() / isClaimed()` | State views. NOTE: `isFunded()` is `_state >= 1` (includes disputed/claimed). "Sellable" is the composite: `isFunded() && !hasActiveDispute() && !isClaimed()` |
-| `changeRecipient(address)` | Callable only by current recipient, funded OR disputed state; new recipient cannot be zero/buyer/arbiter; new recipient's vote reset to "not voted" |
+| `changeRecipient(address)` | Callable only by current recipient, **funded state only** (reverts `CannotChangeRecipientDuringDispute` while disputed, v0.9.4); new recipient cannot be zero/buyer/arbiter; new recipient's vote reset to "not voted" |
 | `FACTORY() → address` | Set to whoever initialized the clone. **Informational only — NOT usable for provenance** (a fake contract can return any address). Genuineness is verified via the ERC-1167 codehash check (§8.1). |
 
 ### 3.2 One-shot recipient-transfer approval — implemented ✅
@@ -318,7 +318,7 @@ function approveRecipientTransfer(address operator, address newRecipient) extern
 function transferRecipientFrom(address newRecipient) external;
 ```
 
-- `approveRecipientTransfer(operator, newRecipient)`: callable **only by the current recipient**, in the same states `changeRecipient` allows (funded or disputed). Binds **both** the operator **and** the exact destination — even a malicious operator can only execute the precise move the seller sanctioned. The destination is validated at grant time (zero/buyer/arbiter rejected). Valid for **5 minutes** (`RECIPIENT_APPROVAL_TTL`) — covers the human gap between the two signed transactions; an expired approval just means re-approving. `operator == address(0)` revokes. Emits `RecipientTransferApproved(operator, newRecipient, expiry)`.
+- `approveRecipientTransfer(operator, newRecipient)`: callable **only by the current recipient**, in the same state `changeRecipient` allows (funded only; refused while disputed, v0.9.4, and refused again at execution, so an approval granted just before a dispute cannot be used after it). Binds **both** the operator **and** the exact destination — even a malicious operator can only execute the precise move the seller sanctioned. The destination is validated at grant time (zero/buyer/arbiter rejected). Valid for **5 minutes** (`RECIPIENT_APPROVAL_TTL`) — covers the human gap between the two signed transactions; an expired approval just means re-approving. `operator == address(0)` revokes. Emits `RecipientTransferApproved(operator, newRecipient, expiry)`.
 - `transferRecipientFrom(newRecipient)`: callable **only by the approved operator**, **only** with `newRecipient == approvedRecipientTarget`, **only** before expiry. Applies the identical guards and effects as `changeRecipient` (state check, zero/buyer/arbiter rejection, vote reset, `RecipientChanged` event), then **clears the approval** (one-shot, no replay).
 - **Any** recipient change (direct or operator-driven) clears the approval — an approval granted by a previous seller can never act on the new seller's role.
 - A dangling approval is harmless: it moves nothing by itself, blocks nothing (claims/disputes/votes unaffected), expires in 5 minutes, and is inert once the escrow settles regardless.
@@ -466,10 +466,12 @@ if (_state == 2) nominationDeadline = uint64(block.timestamp + NOMINATION_WINDOW
 emit ArbiterUnseated(previous);
 ```
 
-The `_state == 2` branch covers a sale executed mid-dispute (§3.2 permits the transfer in
-funded *or* disputed state — though the marketplace itself never sells into a dispute, a
-direct operator flow could): the new recipient gets a full window from the moment they hold
-the role. For the normal funded-state sale, the deadline is instead set by `raiseDispute()`:
+⚠️ **Superseded in v0.9.4: the `_state == 2` branch is removed.** It restarted the window on
+every operator-executed transfer, and nothing can tell a real sale from a staged one (the
+operator is whoever the recipient approves), so the recipient of a disputed escrow could
+repeat the transfer inside each window and keep the fallback out for ever. No recipient
+change, by either path, is now possible while disputed, so a sale only ever happens in the
+funded state and the deadline is set once, by `raiseDispute()`:
 **if `ARBITER == address(0)` at that point, `raiseDispute` sets `nominationDeadline =
 block.timestamp + NOMINATION_WINDOW`.**
 
@@ -511,8 +513,8 @@ resolutionVotes[a].buyerPercentage = 255;   // ⚠️ MANDATORY — see §3.3D
 emit ArbiterSeated(a, /* byAgreement */ a != DEFAULT_ARBITER);
 ```
 
-The vote reset also covers a re-confirmed incumbent who had already voted before the sale
-unseated them mid-dispute — they return to office with a clean slate.
+The vote reset also covers a re-confirmed incumbent who had already voted before being
+evicted mid-dispute — they return to office with a clean slate.
 
 **`evictArbiter()` — remedy for a seated-but-silent arbiter.**
 
@@ -1501,7 +1503,7 @@ and why.
 **Unseating:**
 - `transferRecipientFrom` unseats, clears both nominations, emits `ArbiterUnseated`.
 - `changeRecipient` does NOT unseat.
-- Mid-dispute transfer restarts `nominationDeadline` with a full window.
+- Mid-dispute transfer is refused (`CannotChangeRecipientDuringDispute`); `nominationDeadline` cannot be re-armed by the recipient (`testAttack_RecipientCannotPostponeTheFallbackByRotating`).
 - Old arbiter's `submitResolutionVote` reverts after unseating (`NotAuthorizedToVote`).
 
 **Nomination & seating (§3.3A1a):**
@@ -2360,6 +2362,7 @@ before mainnet**.
 
 ## 17. Changelog
 
+- **v0.9.4 (2026-10-05):** **The recipient is fixed for the life of a dispute.** Reported bug: on a disputed escrow the recipient could repeat the one-shot `approveRecipientTransfer` → `transferRecipientFrom` rotation (to another wallet, or to itself) inside every 72-hour window. Each call unseated the arbiter and re-armed `nominationDeadline`, so `seatDefaultArbiter` never became callable: two voters, no way to add a third, escrow and any vault holdback locked with no time bound. This is the same end state v0.7's saturating-deadline finding named as the vulnerability, reached by a different path, and it also let the recipient unseat an already-seated arbiter, the default included. **Fix:** `_transferRecipient` (so both `changeRecipient` and `transferRecipientFrom`) and `approveRecipientTransfer` revert `CannotChangeRecipientDuringDispute` in state 2; the `_state == 2` re-arm in `_unseatArbiter` is removed. The marketplace is unaffected (`acceptOffer` already refuses a disputed escrow). **Behaviour removed on purpose:** `changeRecipient` mid-dispute (v0.3), so whoever holds the recipient role when a dispute is raised holds it, and votes, until it resolves. **ABI:** one new error. **Not fixed:** escrows already deployed.
 - **v0.9.3 (2026-08-23): full audit of `src/*.sol` — four fixes, all in the escrow contracts.** The marketplace came out clean; the findings were next door.
   **A. The completion escrow let the arbiter be a party.** `CompletionEscrowContract.initialize` never required the arbiter to differ from the buyer or the lead supplier, though its sibling has always carried that check. The consequence is sharper than a doubled role: `_checkAndExecuteConsensus` reads both votes from the SAME storage slot, so one `submitResolutionVote` from a party who is also the arbiter satisfies a 2-of-3 branch outright and pays out at whatever split they name, in that transaction. Reachable only as an ops mistake (the factory always passes its OWNER as arbiter), so it needed the platform to be a party to its own project — now rejected at both layers.
   **B. A silent buyer could freeze the supplier's money forever.** Payout needs the VERIFIER (the buyer or their delegate); voting needs a dispute; and only the buyer could open one. Those three composed into a permanent lock with no deadline, no arbiter recourse and no supplier lever — a missing TRIGGER, not a missing clock, which is why §the header's no-deadline reasoning did not cover it. `raiseDispute` is now `onlyBuyerOrArbiter`. The supplier deliberately still cannot fire it directly: routing through the arbiter keeps a neutral party between a supplier and the buyer's funds, and raising a dispute still moves no money — settlement needs two of three either way.

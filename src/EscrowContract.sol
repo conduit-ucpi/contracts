@@ -263,6 +263,7 @@ contract EscrowContract is ReentrancyGuard {
     error NotApprovedOperator();
     error ApprovedTargetMismatch();
     error RecipientApprovalExpired();
+    error CannotChangeRecipientDuringDispute();
     error OnlyArbiter();
     error AlreadyFundedOrClaimed();
     error CannotDisputeInstantTransfer();
@@ -782,27 +783,26 @@ contract EscrowContract is ReentrancyGuard {
      *
      * 🔒 SCOPE:
      * ✅ Callable ONLY by the current SELLER (the current recipient)
-     * ✅ Allowed while funded OR disputed (_state == 1 or 2)
+     * ✅ Allowed ONLY while funded (_state == 1)
      *    - Not before funding, not after claim/resolution
-     *    - Disputed is permitted so a contract holding the recipient role (e.g. a
-     *      liquidity marketplace) can hand it back to the seller even if the buyer
-     *      raised a dispute in the meantime, avoiding stranded funds.
+     *    - NOT while disputed. See below.
      * ✅ New seller cannot be the zero address, the BUYER, or the ARBITER (preserves
      *    buyer != seller and keeps the arbiter an independent third vote)
      *
-     * 🔐 WHY MID-DISPUTE REASSIGNMENT IS SAFE:
-     *    - The ARBITER guard prevents collapsing two of the three votes into one
-     *      address, so no one can gain unilateral control of the outcome.
-     *    - The new seller is reset to "not voted" (below), so a reassignment can only
-     *      clear the seller's own vote, never manufacture a false consensus.
-     *    - Consensus is evaluated on every vote, so if one had been reached the escrow
-     *      would already be resolved (state 4) and this call would revert. A seller
-     *      resetting their vote cannot stall resolution: buyer + arbiter alone still
-     *      form a 2-of-3 majority.
+     * 🔐 WHY THE RECIPIENT IS FIXED FOR THE LIFE OF A DISPUTE:
+     *    A dispute needs three voters who stay put. While recipient moves were allowed
+     *    mid-dispute, the operator-executed path (transferRecipientFrom) unseated the
+     *    arbiter and restarted the 72-hour nomination window on every call, so the
+     *    recipient could repeat it inside each window and keep the fallback arbiter out
+     *    for ever: two voters, no way to add a third, funds locked with no time bound.
+     *    Nothing in this contract can tell a real sale from a staged one (the operator is
+     *    whoever the seller approves), so the only sound rule is that NO recipient move,
+     *    by either path, happens while a dispute is open. The marketplace loses nothing:
+     *    OfferVault already refuses to sell a disputed escrow.
      *
      * ⚠️  TRUST NOTE: This intentionally relaxes the "seller is immutable" property.
-     *    The BUYER's counterparty for a dispute can change to whoever the seller
-     *    assigns. Callers integrating this contract should account for that.
+     *    Before a dispute, the BUYER's counterparty can change to whoever the seller
+     *    assigns. Once a dispute is raised it cannot change until the dispute resolves.
      *
      * @param newSeller The address that will receive seller funds going forward.
      */
@@ -835,7 +835,9 @@ contract EscrowContract is ReentrancyGuard {
      */
     function approveRecipientTransfer(address operator, address newRecipient) external initialized {
         if (msg.sender != SELLER) revert OnlySeller();
-        if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
+        // No approval while disputed: it could never be executed (see _transferRecipient).
+        if (_state == 2) revert CannotChangeRecipientDuringDispute();
+        if (_state != 1) revert NotFundedOrAlreadyProcessed();
 
         if (operator == address(0)) {
             // Revoke any outstanding approval
@@ -900,11 +902,15 @@ contract EscrowContract is ReentrancyGuard {
 
     /**
      * Shared recipient-transfer logic for changeRecipient (seller-direct) and
-     * transferRecipientFrom (operator-executed). See changeRecipient NatSpec for the
-     * mid-dispute safety argument.
+     * transferRecipientFrom (operator-executed). See changeRecipient NatSpec for why
+     * neither may run during a dispute.
      */
     function _transferRecipient(address newSeller) internal {
-        if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
+        // ⚠️ THE GUARD THAT MATTERS. It is here, at execution, and not only in
+        //    approveRecipientTransfer: an approval granted moments before a dispute is
+        //    raised is still live for RECIPIENT_APPROVAL_TTL and must not be usable.
+        if (_state == 2) revert CannotChangeRecipientDuringDispute();
+        if (_state != 1) revert NotFundedOrAlreadyProcessed();
         if (newSeller == address(0)) revert InvalidSellerAddress();
         if (newSeller == BUYER) revert BuyerSellerMustBeDifferent();
         // Prevent collapsing the seller and arbiter into one address, which would
@@ -938,10 +944,8 @@ contract EscrowContract is ReentrancyGuard {
 
         // Mark the new seller as "not voted" (255). A default mapping entry reads as
         // 0, which _checkAndExecuteConsensus would treat as a valid 0%-to-buyer vote
-        // (like initialize does for the original parties). This also matters mid-dispute:
-        // the old seller's slot may hold a real vote, but it is never read again (the
-        // address is no longer a voting role), and the new seller starts clean. Setting
-        // 255 cannot create consensus, so no re-check is needed here.
+        // (like initialize does for the original parties). No vote exists yet - this only
+        // runs before any dispute - so setting 255 cannot create or disturb consensus.
         resolutionVotes[newSeller].buyerPercentage = 255;
 
         // §3.3A1a: a nomination made by a PREVIOUS recipient must never bind the new one.
@@ -966,13 +970,10 @@ contract EscrowContract is ReentrancyGuard {
         nominatedByBuyer = address(0);
         nominatedByRecipient = address(0);
 
-        // Covers a sale executed MID-DISPUTE: the transfer is permitted in funded or
-        // disputed state, and the new recipient must get a full window from the moment
-        // they hold the role. For the ordinary funded-state sale the deadline is instead
-        // set later, by raiseDispute, if and when a dispute is actually raised.
-        if (_state == 2) {
-            nominationDeadline = _nominationDeadlineFromNow();
-        }
+        // No nomination deadline is set here. A sale can only happen before a dispute
+        // (_transferRecipient refuses a disputed escrow), and the window opens once, in
+        // raiseDispute, if and when a dispute is raised on the empty seat. It must never
+        // be re-armable by the recipient: that was a way to postpone the fallback for ever.
 
         emit ArbiterUnseated(previous);
     }
@@ -1078,8 +1079,8 @@ contract EscrowContract is ReentrancyGuard {
      * "0% to buyer", i.e. 100% to the seller. Without the reset below, seating would
      * silently cast a full-to-seller vote on their behalf, and if the seller had already
      * voted 0 then consensus would fire in the very transaction that seats them. The reset
-     * also covers a re-confirmed incumbent who had already voted before the sale unseated
-     * them mid-dispute - they return to office with a clean slate.
+     * also covers a re-confirmed incumbent who had already voted before being evicted
+     * mid-dispute - they return to office with a clean slate.
      */
     function _seatArbiter(address a) internal {
         ARBITER = a;

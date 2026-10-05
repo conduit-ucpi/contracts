@@ -1056,6 +1056,11 @@
   },
   {
     "type": "error",
+    "name": "CannotChangeRecipientDuringDispute",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "CannotDisputeAfterExpiry",
     "inputs": []
   },

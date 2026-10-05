@@ -246,24 +246,96 @@ contract EscrowArbiterTest is Test {
         escrow.submitResolutionVote(100);
     }
 
-    /// A sale executed MID-DISPUTE gives the new recipient a full window from the moment
-    /// they hold the role.
-    function testUnseat_MidDisputeSaleRestartsFullWindow() public {
+    /// A sale is refused MID-DISPUTE, by approval and by execution alike, so nothing the
+    /// recipient does can unseat the arbiter or move the nomination deadline.
+    function testUnseat_SaleIsRefusedMidDispute() public {
         EscrowContract escrow = _createFunded();
 
         vm.prank(buyer);
         escrow.raiseDispute();
 
-        vm.warp(block.timestamp + 10 days); // long after any window would have lapsed
-        _sellTo(escrow, lp);
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
+        escrow.approveRecipientTransfer(marketplace, lp);
 
-        assertEq(escrow.nominationDeadline(), uint64(block.timestamp + escrow.NOMINATION_WINDOW()));
+        assertEq(escrow.ARBITER(), arbiter, "the seated arbiter stays seated");
+        assertEq(escrow.SELLER(), seller);
+        assertFalse(escrow.hasBeenSold());
+    }
 
-        // And the fallback is not seatable until that fresh window elapses.
-        vm.expectRevert(
-            abi.encodeWithSelector(EscrowContract.NominationWindowStillOpen.selector, escrow.nominationDeadline())
-        );
+    /// An approval granted just BEFORE the dispute is still live for its TTL. It must not
+    /// be executable once the dispute exists: the guard is at execution, not only at grant.
+    function testUnseat_ApprovalGrantedBeforeDisputeCannotBeExecutedAfter() public {
+        EscrowContract escrow = _createFunded();
+
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(marketplace, lp);
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        assertLe(block.timestamp, escrow.recipientApprovalExpiry(), "the approval has not expired");
+        vm.prank(marketplace);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
+        escrow.transferRecipientFrom(lp);
+
+        assertEq(escrow.ARBITER(), arbiter);
+        assertEq(escrow.SELLER(), seller);
+    }
+
+    /// THE REPORTED BUG. On a sold, disputed escrow the recipient used to repeat the
+    /// one-shot rotation inside every 72-hour window, re-arming the nomination deadline
+    /// each time so the fallback arbiter could never be seated: two voters, no third, and
+    /// the funds locked with no time bound. Every step of that loop must now fail, the
+    /// deadline must not move, and the fallback must seat when the window lapses.
+    function testAttack_RecipientCannotPostponeTheFallbackByRotating() public {
+        EscrowContract escrow = _createFunded();
+        _sellTo(escrow, lp); // sold before any dispute: seat empty, no deadline yet
+
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        uint64 deadline = escrow.nominationDeadline();
+        assertEq(deadline, uint64(block.timestamp + escrow.NOMINATION_WINDOW()));
+
+        address lp2 = makeAddr("lp2");
+        for (uint256 i = 0; i < 3; i++) {
+            vm.warp(block.timestamp + 20 hours); // always inside the window
+
+            // The rotation, to another wallet...
+            vm.prank(lp);
+            vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
+            escrow.approveRecipientTransfer(lp, lp2);
+            // ...or to itself (one wallet was enough)...
+            vm.prank(lp);
+            vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
+            escrow.approveRecipientTransfer(lp, lp);
+            // ...or by the direct path.
+            vm.prank(lp);
+            vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
+            escrow.changeRecipient(lp2);
+
+            assertEq(escrow.nominationDeadline(), deadline, "the deadline must never move");
+            assertEq(escrow.SELLER(), lp);
+        }
+
+        // 60 hours in: still inside the window. Past it, anyone seats the fallback.
+        vm.warp(uint256(deadline) + 1);
+        vm.prank(outsider);
         escrow.seatDefaultArbiter();
+        assertEq(escrow.ARBITER(), defaultArbiter);
+
+        // And once seated, the recipient cannot unseat it either.
+        vm.prank(lp);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
+        escrow.approveRecipientTransfer(lp, lp2);
+        assertEq(escrow.ARBITER(), defaultArbiter);
+
+        // The dispute can now be resolved by the buyer and the fallback.
+        vm.prank(buyer);
+        escrow.submitResolutionVote(100);
+        vm.prank(defaultArbiter);
+        escrow.submitResolutionVote(100);
+        assertTrue(escrow.consensusReached());
     }
 
     /// A recipient change while unseated must clear the previous recipient's nomination.
@@ -377,24 +449,28 @@ contract EscrowArbiterTest is Test {
         assertEq(escrow.ARBITER(), outsider);
     }
 
-    /// A re-confirmed incumbent who had voted before the sale returns with a clean slate.
+    /// A re-confirmed incumbent who had voted before losing the seat returns with a clean
+    /// slate. The seat can only empty mid-dispute by eviction: a sale is refused there.
     function testSeat_ReconfirmedIncumbentVoteIsReset() public {
         EscrowContract escrow = _createFunded();
 
         vm.prank(buyer);
         escrow.raiseDispute();
 
-        // Arbiter votes 100 while still seated, pre-sale.
+        // Arbiter votes 100 while seated, then goes silent long enough to be evicted.
         vm.prank(arbiter);
         escrow.submitResolutionVote(100);
         (uint8 voteBefore) = escrow.resolutionVotes(arbiter);
         assertEq(voteBefore, 100);
 
-        // Sell mid-dispute, then re-confirm the same arbiter.
-        _sellTo(escrow, lp);
+        vm.warp(block.timestamp + escrow.ARBITER_SILENCE_TIMEOUT() + 1);
+        vm.prank(seller);
+        escrow.evictArbiter();
+
+        // Both parties re-confirm the same arbiter.
         vm.prank(buyer);
         escrow.nominateArbiter(arbiter);
-        vm.prank(lp);
+        vm.prank(seller);
         escrow.nominateArbiter(arbiter);
 
         (uint8 voteAfter) = escrow.resolutionVotes(arbiter);
@@ -821,21 +897,24 @@ contract EscrowArbiterTest is Test {
         assertFalse(escrow.consensusReached());
     }
 
-    /// The LP's protection also holds if the attacker tries to sell into a live dispute:
-    /// the marketplace refuses such escrows outright, and the escrow-level guarantee is
-    /// that any arbiter present at sale time is unseated regardless.
-    function testAttack_MidDisputeSaleStillUnseats() public {
+    /// An attacker cannot sell into a live dispute at all: the marketplace refuses such
+    /// escrows, and the escrow itself refuses the transfer, so the seated arbiter keeps
+    /// its seat and its vote.
+    function testAttack_MidDisputeSaleIsRefused() public {
         EscrowContract escrow = _createFunded();
 
         vm.prank(buyer);
         escrow.raiseDispute();
         assertEq(escrow.ARBITER(), arbiter);
 
-        _sellTo(escrow, lp);
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.CannotChangeRecipientDuringDispute.selector);
+        escrow.approveRecipientTransfer(marketplace, lp);
 
-        assertEq(escrow.ARBITER(), address(0));
+        assertEq(escrow.ARBITER(), arbiter);
         vm.prank(arbiter);
-        vm.expectRevert(EscrowContract.NotAuthorizedToVote.selector);
-        escrow.submitResolutionVote(100);
+        escrow.submitResolutionVote(100); // still an authorised voter
+        (uint8 vote) = escrow.resolutionVotes(arbiter);
+        assertEq(vote, 100);
     }
 }
