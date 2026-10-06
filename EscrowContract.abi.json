@@ -824,6 +824,25 @@
   },
   {
     "type": "event",
+    "name": "ArbiterReplaced",
+    "inputs": [
+      {
+        "name": "previousArbiter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newArbiter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "ArbiterSeated",
     "inputs": [
       {

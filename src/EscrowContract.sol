@@ -303,9 +303,10 @@ contract EscrowContract is ReentrancyGuard {
     address public BUYER; // ONLY this address can deposit funds and raise disputes - immutable
     address public SELLER; // Receives funds after expiry or dispute - reassignable by the seller via changeRecipient()
     // ⚖️  Arbiter address - can ONLY vote on disputes, NOT take your money. Distinct from
-    //    buyer/seller. Set at initialize and fixed for the life of an UNSOLD escrow; a
-    //    marketplace sale (transferRecipientFrom) UNSEATS it to address(0), after which
-    //    buyer + current recipient re-seat by matching nomination, or the DEFAULT_ARBITER
+    //    buyer/seller. Set at initialize. Buyer + current recipient may REPLACE the
+    //    seated arbiter at any time by matching nomination (§3.3A1b) - sold or not. A
+    //    marketplace sale (transferRecipientFrom) additionally UNSEATS it to address(0),
+    //    after which the parties re-seat by matching nomination, or the DEFAULT_ARBITER
     //    fallback takes the seat once the nomination window lapses. See §3.3A.
     address public ARBITER;
     address public FEE_RECIPIENT; // Address that receives the platform fee - immutable
@@ -366,10 +367,11 @@ contract EscrowContract is ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════════════
     // ⚖️  §3.3 SALE-TRIGGERED ARBITER RESET
     // ═══════════════════════════════════════════════════════════════════════════════
-    // An escrow that is never sold behaves exactly as before: the creation arbiter holds
-    // office and the 2-of-3 runs unchanged, with none of the machinery below invoked.
-    // Everything here activates only at the moment a cashflow is SOLD through the
-    // marketplace, and it exists to close the corrupt-arbiter attack: an attacker who
+    // An escrow that is never sold behaves as before: the creation arbiter holds office
+    // and the 2-of-3 runs unchanged, unless buyer and seller JOINTLY replace them by a
+    // matching nomination (§3.3A1b) - the one piece of this machinery an unsold escrow
+    // can reach. Everything else here activates only at the moment a cashflow is SOLD
+    // through the marketplace, and exists to close the corrupt-arbiter attack: an attacker who
     // controls both the buyer and a pre-loaded arbiter could otherwise sell to an LP and
     // then vote themselves a full refund 2-of-3. Unseating at the sale makes that
     // majority unmanufacturable — every path back to a seat runs through the new
@@ -509,6 +511,10 @@ contract EscrowContract is ReentrancyGuard {
     event ArbiterNominated(address indexed nominator, address indexed candidate);
     event ArbiterSeated(address indexed arbiter, bool byAgreement);
     event ArbiterEvicted(address indexed previousArbiter);
+    /// @notice A seated arbiter was replaced by a matching pair of nominations (§3.3A1b).
+    ///         Emitted alongside ArbiterSeated. Deliberately NOT ArbiterUnseated, which
+    ///         indexers read as "this escrow has been sold" (§15.3).
+    event ArbiterReplaced(address indexed previousArbiter, address indexed newArbiter);
 
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
 
@@ -1059,11 +1065,22 @@ contract EscrowContract is ReentrancyGuard {
     }
 
     /**
-     * ⚖️  NOMINATE AN ARBITER FOR A SOLD ESCROW (§3.3A1a)
+     * ⚖️  NOMINATE AN ARBITER (§3.3A1a, §3.3A1b)
      *
-     * Only a sold, currently-unseated escrow accepts nominations. Either disputant may
-     * nominate; when both sides name the SAME address the candidate is seated immediately,
-     * in that same transaction.
+     * Either disputant may nominate, whether the seat is EMPTY (after a sale or an
+     * eviction) or OCCUPIED. When both sides name the SAME address the candidate is seated
+     * immediately, in that same transaction - replacing the incumbent if there is one
+     * (§3.3A1b). Replacement is how the parties leave an arbiter they no longer want,
+     * including the platform's DEFAULT_ARBITER, without waiting for a sale or 30 days of
+     * silence.
+     *
+     * 🔒 WHY REPLACING A SEATED ARBITER IS SAFE:
+     *    It needs BOTH parties, and a pair who agree could already settle the dispute
+     *    directly with two matching votes - so replacement grants them nothing they lack.
+     *    One party alone can never move the seat: a single nomination seats nobody, and
+     *    the incumbent cannot be nominated (see below), so there is no stale pair to
+     *    re-trigger. A party facing an adverse ruling cannot escape it alone, because the
+     *    counterparty about to win has no reason to agree.
      *
      * 🔒 WHY THE MATCH REQUIREMENT IS THE WHOLE PROTECTION:
      *    Seating requires agreement, so either party can veto any candidate by simply not
@@ -1076,23 +1093,29 @@ contract EscrowContract is ReentrancyGuard {
      * ⚠️ A candidate is NOT validated for competence. If both parties agree on a contract
      *    with no submitResolutionVote path, the third voter is seated and permanently
      *    dead. Buyer and recipient can still settle 2-of-3 between themselves, but the
-     *    tiebreaker is gone until evictArbiter clears it after 30 days of silence.
+     *    tiebreaker is gone until they agree a replacement (§3.3A1b) or evictArbiter
+     *    clears it after 30 days of silence.
      *    Warning users about unknown candidates is a UI responsibility.
      *
-     * @param candidate The address to nominate. Nominating the unseated incumbent to
-     *        re-confirm them is the expected common case.
+     * @param candidate The address to nominate. While the seat is empty, nominating the
+     *        unseated incumbent to re-confirm them is the expected common case. While it
+     *        is occupied, the incumbent is not a valid candidate: re-seating them would
+     *        only wipe their standing vote and restart the eviction clock.
      */
     function nominateArbiter(address candidate) external initialized {
-        if (ARBITER != address(0)) revert ArbiterAlreadySeated(ARBITER);
         // Agreement is allowed BEFORE any dispute (settle governance while relations are
         // good) as well as during one.
         if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
         if (msg.sender != BUYER && msg.sender != SELLER) revert NotDisputeParty(msg.sender);
         // An arbiter who is also a party would hold 2-of-3 alone - the precise failure
-        // initialize guards against. This is the ONLY constraint on a candidate.
+        // initialize guards against. Beyond that, the only other rejection is the seated
+        // incumbent (see @param). Candidates are otherwise free-form.
         if (candidate == address(0) || candidate == BUYER || candidate == SELLER) {
             revert InvalidArbiterCandidate(candidate);
         }
+        // ⚠️ §3.3A1b. ARBITER == address(0) here is the EMPTY seat, and candidate is
+        //    already known non-zero, so this never fires while unseated.
+        if (candidate == ARBITER) revert InvalidArbiterCandidate(candidate);
 
         // Nominations are mutable until seated: re-nominating overwrites.
         if (msg.sender == BUYER) {
@@ -1108,7 +1131,7 @@ contract EscrowContract is ReentrancyGuard {
         // actually executes. The deadline's only role is to ENABLE the fallback, never to
         // block agreement.
         if (nominatedByBuyer != address(0) && nominatedByBuyer == nominatedByRecipient) {
-            _seatArbiter(candidate);
+            _seatArbiter(candidate, true);
         }
     }
 
@@ -1127,7 +1150,7 @@ contract EscrowContract is ReentrancyGuard {
         if (ARBITER != address(0)) revert ArbiterAlreadySeated(ARBITER);
         if (block.timestamp <= nominationDeadline) revert NominationWindowStillOpen(nominationDeadline);
 
-        _seatArbiter(DEFAULT_ARBITER);
+        _seatArbiter(DEFAULT_ARBITER, false);
     }
 
     /**
@@ -1139,12 +1162,30 @@ contract EscrowContract is ReentrancyGuard {
      * voted 0 then consensus would fire in the very transaction that seats them. The reset
      * also covers a re-confirmed incumbent who had already voted before being evicted
      * mid-dispute - they return to office with a clean slate.
+     *
+     * ⚠️  §3.3A1b — SEATING MUST ALSO CONSUME THE NOMINATIONS.
+     *
+     * Now that a matching pair can replace a SEATED arbiter, a pair left standing after a
+     * seating would be a loaded gun: either party alone could re-submit the same address,
+     * "match" the stale counter-nomination and re-seat the incumbent - wiping their vote
+     * and restarting the 30-day eviction clock single-handedly. Clearing both slots here
+     * means every seating, by agreement or by fallback, starts the next round from zero.
+     *
+     * @param a           The arbiter to seat.
+     * @param byAgreement True when a matching pair of nominations seated them, false for
+     *                    the DEFAULT_ARBITER fallback. Passed explicitly rather than
+     *                    inferred from the address, because the parties may agree on the
+     *                    DEFAULT_ARBITER too, and that IS agreement.
      */
-    function _seatArbiter(address a) internal {
+    function _seatArbiter(address a, bool byAgreement) internal {
+        address previous = ARBITER;
         ARBITER = a;
         resolutionVotes[a].buyerPercentage = 255; // ⚠️ MANDATORY - see above
+        nominatedByBuyer = address(0);
+        nominatedByRecipient = address(0);
         lastArbiterActionAt = uint64(block.timestamp);
-        emit ArbiterSeated(a, a != DEFAULT_ARBITER);
+        if (previous != address(0)) emit ArbiterReplaced(previous, a);
+        emit ArbiterSeated(a, byAgreement);
     }
 
     /**

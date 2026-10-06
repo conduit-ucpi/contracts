@@ -359,11 +359,153 @@ contract EscrowArbiterTest is Test {
     // Nomination & seating (§3.3A1a)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    function testNominate_RejectedWhileArbiterSeated() public {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // §3.3A1b — replacing a SEATED arbiter by agreement. No sale, no eviction needed.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// The headline case: an unsold escrow, incumbent seated since creation, and the two
+    /// parties agree on somebody else. The match replaces them in that same transaction.
+    function testReplace_MatchingPairReplacesSeatedArbiter() public {
+        EscrowContract escrow = _createFunded();
+        assertEq(escrow.ARBITER(), arbiter, "precondition: creation arbiter seated");
+
+        vm.prank(buyer);
+        escrow.nominateArbiter(outsider);
+        assertEq(escrow.ARBITER(), arbiter, "one nomination must not move the seat");
+
+        vm.expectEmit(true, true, false, false);
+        emit EscrowContract.ArbiterReplaced(arbiter, outsider);
+        vm.expectEmit(true, false, false, true);
+        emit EscrowContract.ArbiterSeated(outsider, true); // byAgreement
+        vm.prank(seller);
+        escrow.nominateArbiter(outsider);
+
+        assertEq(escrow.ARBITER(), outsider);
+        // Seating consumes the pair, so nothing is left to re-match.
+        assertEq(escrow.nominatedByBuyer(), address(0));
+        assertEq(escrow.nominatedByRecipient(), address(0));
+    }
+
+    /// The incumbent is not a candidate while seated: re-seating them would only wipe
+    /// their vote and restart the eviction clock.
+    function testReplace_IncumbentIsNotACandidateWhileSeated() public {
         EscrowContract escrow = _createFunded();
 
         vm.prank(buyer);
-        vm.expectRevert(abi.encodeWithSelector(EscrowContract.ArbiterAlreadySeated.selector, arbiter));
+        vm.expectRevert(abi.encodeWithSelector(EscrowContract.InvalidArbiterCandidate.selector, arbiter));
+        escrow.nominateArbiter(arbiter);
+    }
+
+    /// One party must never be able to move the seat alone - not by nominating, and not by
+    /// re-matching a pair left over from the previous seating.
+    function testReplace_StalePairCannotBeReplayedByOneParty() public {
+        EscrowContract escrow = _createFunded();
+
+        vm.prank(buyer);
+        escrow.nominateArbiter(outsider);
+        vm.prank(seller);
+        escrow.nominateArbiter(outsider);
+        assertEq(escrow.ARBITER(), outsider);
+
+        // Mid-dispute, the new arbiter votes. The buyer dislikes the figure.
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        vm.prank(outsider);
+        escrow.submitResolutionVote(70);
+
+        // Re-submitting the already-matched address is rejected outright (incumbent)...
+        vm.prank(buyer);
+        vm.expectRevert(abi.encodeWithSelector(EscrowContract.InvalidArbiterCandidate.selector, outsider));
+        escrow.nominateArbiter(outsider);
+        // ...and a fresh single nomination seats nobody.
+        address other = makeAddr("other");
+        vm.prank(buyer);
+        escrow.nominateArbiter(other);
+        assertEq(escrow.ARBITER(), outsider, "the seat must not move on one party's say-so");
+        (uint8 standing) = escrow.resolutionVotes(outsider);
+        assertEq(standing, 70, "the incumbent's vote must survive a unilateral attempt");
+    }
+
+    /// §3.3D applies to the replacement path too: the incoming arbiter's slot is reset,
+    /// the outgoing one's vote stops counting, and the eviction clock restarts.
+    function testReplace_ResetsIncomingVoteAndDropsOutgoingVote() public {
+        EscrowContract escrow = _createFunded();
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        // The incumbent casts a standing vote. Nobody else has voted, so nothing executes.
+        vm.prank(arbiter);
+        escrow.submitResolutionVote(40);
+        // The incoming candidate's slot has never been written, so it reads 0 - a VALID
+        // "100% to the seller" vote. That is the §3.3D trap the reset must defuse.
+        vm.warp(block.timestamp + 5 days);
+
+        vm.prank(buyer);
+        escrow.nominateArbiter(outsider);
+        vm.prank(seller);
+        escrow.nominateArbiter(outsider);
+
+        (uint8 incoming) = escrow.resolutionVotes(outsider);
+        assertEq(incoming, 255, "incoming arbiter must start as not-voted");
+        assertEq(escrow.lastArbiterActionAt(), block.timestamp, "eviction clock restarts at seating");
+
+        // The seller voting 0 must NOT resolve: the fresh seat holds no vote.
+        vm.prank(seller);
+        escrow.submitResolutionVote(0);
+        assertFalse(escrow.consensusReached(), "a fresh seat must not read as a 0% vote");
+
+        // The outgoing arbiter is no longer an authorised voter.
+        vm.prank(arbiter);
+        vm.expectRevert(EscrowContract.NotAuthorizedToVote.selector);
+        escrow.submitResolutionVote(0);
+    }
+
+    /// The point of the feature: the parties can leave the platform's DEFAULT_ARBITER too,
+    /// once it has taken the fallback seat.
+    function testReplace_DefaultArbiterCanBeReplacedByAgreement() public {
+        EscrowContract escrow = _createFunded();
+        _sellTo(escrow, lp);
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        vm.warp(block.timestamp + escrow.NOMINATION_WINDOW() + 1);
+        escrow.seatDefaultArbiter();
+        assertEq(escrow.ARBITER(), defaultArbiter);
+
+        vm.prank(buyer);
+        escrow.nominateArbiter(outsider);
+        vm.expectEmit(true, true, false, false);
+        emit EscrowContract.ArbiterReplaced(defaultArbiter, outsider);
+        vm.prank(lp);
+        escrow.nominateArbiter(outsider);
+
+        assertEq(escrow.ARBITER(), outsider);
+        // And the fallback cannot take the seat back on its own.
+        vm.expectRevert(abi.encodeWithSelector(EscrowContract.ArbiterAlreadySeated.selector, outsider));
+        escrow.seatDefaultArbiter();
+    }
+
+    /// Agreeing on the DEFAULT_ARBITER is still agreement, and the event says so.
+    function testReplace_AgreeingOnDefaultArbiterFlagsAgreement() public {
+        EscrowContract escrow = _createFunded();
+
+        vm.prank(buyer);
+        escrow.nominateArbiter(defaultArbiter);
+        vm.expectEmit(true, false, false, true);
+        emit EscrowContract.ArbiterSeated(defaultArbiter, true);
+        vm.prank(seller);
+        escrow.nominateArbiter(defaultArbiter);
+        assertEq(escrow.ARBITER(), defaultArbiter);
+    }
+
+    /// Replacement is still gated on a live escrow: not before funding, not after payout.
+    function testReplace_RequiresFundedOrDisputed() public {
+        EscrowContract escrow = _createFunded();
+        vm.warp(expiry + 1);
+        vm.prank(seller);
+        escrow.claimFunds();
+
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
         escrow.nominateArbiter(outsider);
     }
 

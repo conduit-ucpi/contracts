@@ -101,4 +101,10 @@ We appreciate the security research community's efforts to keep our contracts se
 - Considered for bug bounties (if program is active)
 - Credited in release notes for fixed issues
 
+### Security Hall of Fame
+
+Researchers who have privately reported issues in these contracts, with our thanks:
+
+- **xbyteid** — recipient rotation during a dispute could re-arm the arbiter nomination window indefinitely and lock a disputed escrow (fixed in commit `83a3e77b2f`, contracts v0.9.4, October 2026)
+
 Thank you for helping keep Conduit UCPI secure!

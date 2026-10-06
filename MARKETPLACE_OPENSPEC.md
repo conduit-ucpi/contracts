@@ -1,7 +1,7 @@
 # Stabledrop Liquidity Marketplace — Contract OpenSpec
 
-**Version:** 0.9.4
-**Date:** 2026-10-05
+**Version:** 0.9.5
+**Date:** 2026-10-06
 **Status:** §3.2 (atomic swap) implemented ✅. **§3.3 (sale-triggered arbiter reset) implemented ✅.** **Marketplace implemented ✅ as per-offer vaults** (§5.0 — the pooled design was replaced to avoid commingling LP capital; §13.15). Full suite green: **282 tests, 0 failing**. **chainservice migrated onto the new contracts ✅ (§15.4, 263 tests green)** — the platform now holds no dispute power on any escrow it creates. Build log and deviations: **§0**. Remaining gates are external, not code: audit (§16 phase 3), counsel (§13.14), the Safe's outstanding test transaction (§13.8), and deploy-day parameters (§13.1/13.2). Test & audit plan: §14. UI & off-chain obligations: §15. Path to production: §16.
 **Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic. Serves `EscrowContract` clones only — see §3.0.
 
@@ -52,9 +52,9 @@ holdback payouts) and L-2 (`renounceOwnership`).
 - [x] `DEFAULT_NOMINATION_WINDOW = 72 hours`; `0` at initialize → default
 - [x] `resolvedBuyerPercentage` written to `255` in `initialize` (clone storage starts at 0)
 - [x] `_unseatArbiter()` — called by `transferRecipientFrom` **only**, after the role moves (§3.3A1a)
-- [x] `nominateArbiter(address)` — party-only, unseated-only, states 1|2, match seats immediately
+- [x] `nominateArbiter(address)` — party-only, states 1|2, match seats immediately; **seat may be occupied — a match replaces the incumbent (§3.3A1b, v0.9.5)**
 - [x] `seatDefaultArbiter()` — permissionless, disputed + unseated + deadline passed
-- [x] `_seatArbiter(address)` — sets `ARBITER`, **resets their vote to 255**, stamps clock (§3.3D)
+- [x] `_seatArbiter(address, bool)` — sets `ARBITER`, **resets their vote to 255**, **clears both nominations**, stamps clock, emits `ArbiterReplaced` when a seat was occupied (§3.3D, §3.3A1b)
 - [x] `evictArbiter()` — party-only, disputed, after `ARBITER_SILENCE_TIMEOUT` (30 days)
 - [x] `lastArbiterActionAt` stamped at: `raiseDispute` (arbiter seated), `_seatArbiter`, arbiter vote
 - [x] `raiseDispute` sets `nominationDeadline` when `ARBITER == address(0)` (§3.3A1a)
@@ -63,7 +63,7 @@ holdback payouts) and L-2 (`renounceOwnership`).
 - [x] `_transferRecipient` rejects `DEFAULT_ARBITER`, resets `nominatedByRecipient` (§3.3A1a)
 - [x] `_executeResolution` persists `resolvedBuyerPercentage` **before** transfers (§3.3C)
 - [x] `changeRecipient` does **NOT** unseat (§3.3A)
-- [x] §9 events + errors: `ArbiterUnseated/Nominated/Seated/Evicted`, `NotDisputeParty`, `ArbiterAlreadySeated`, `NoArbiterSeated`, `ArbiterNotSilent`, `NominationWindowStillOpen`, `InvalidArbiterCandidate`
+- [x] §9 events + errors: `ArbiterUnseated/Nominated/Seated/Evicted/Replaced`, `NotDisputeParty`, `ArbiterAlreadySeated`, `NoArbiterSeated`, `ArbiterNotSilent`, `NominationWindowStillOpen`, `InvalidArbiterCandidate`
 
 ### 0.3 Detailed checklist — Phase 2.1 (`MarketplaceEscrow`)
 
@@ -144,7 +144,7 @@ holdback payouts) and L-2 (`renounceOwnership`).
 |---|---|
 | 14.1 vote-trap trio | `EscrowArbiter.t.sol::testVoteTrap_*` (3 tests + zero-address sentinel) |
 | 14.1 unseating | `testUnseat_*` — incl. `changeRecipient` does NOT unseat; a sale is refused mid-dispute (v0.9.4) |
-| 14.1 nomination & seating | `testNominate_*` (6), `testSeat*` (6) — incl. late-match-still-wins |
+| 14.1 nomination & seating | `testNominate_*` (5), `testSeat*` (6) — incl. late-match-still-wins; `testReplace_*` (7) for replacing a seated arbiter (v0.9.5) |
 | 14.1 eviction | `testEvict_*` (8) — incl. rolling clock, unsold-escrow exit, fund-neutrality |
 | 14.1 window immutability | `testWindow_IsAConstantSharedByEveryClone` + `test_DirectCloneCannotForgeTheWindow` |
 | Fallback unforgeability on a direct clone | `test_DirectCloneCannotForgeDefaultArbiter`, `test_DirectCloneIsCodehashGenuine` |
@@ -344,9 +344,10 @@ no dispute power on any escrow.
 
 **A. Arbiter is chosen at creation — and unseated by a sale.**
 `initialize` **keeps** its arbiter parameter, and an escrow that is never sold behaves
-exactly as today: the creation arbiter holds office and the current 2-of-3 runs unchanged,
-with none of the machinery below ever invoked. The change is confined to the moment a
-cashflow is sold through the marketplace:
+as today: the creation arbiter holds office and the current 2-of-3 runs unchanged — unless
+buyer and seller jointly replace them by matching nomination (**A1b**, v0.9.5), which is the
+one piece of the machinery below an unsold escrow can reach. Everything else is confined to
+the moment a cashflow is sold through the marketplace:
 
 ```
 transferRecipientFrom(lp)              // the atomic sale, §3.2
@@ -359,7 +360,8 @@ transferRecipientFrom(lp)              // the atomic sale, §3.2
   → throughout, buyer + recipient matching votes still settle 2-of-3 —
     no arbiter is needed when the parties agree on the outcome
 
-Once seated, ordinary 2-of-3 resolution proceeds with NO deadline (see A2).
+Once seated, ordinary 2-of-3 resolution proceeds with NO deadline (see A2) — but the
+parties may still REPLACE the seated arbiter at any time by matching nomination (A1b).
 ```
 
 `changeRecipient` does **not** unseat: a seller rotating their own payout wallet should not
@@ -476,21 +478,53 @@ funded state and the deadline is set once, by `raiseDispute()`:
 block.timestamp + NOMINATION_WINDOW`.**
 
 **`nominateArbiter(candidate)`**
-1. Require `ARBITER == address(0)` (revert `ArbiterAlreadySeated`) — only a sold, unseated
-   escrow accepts nominations. Require `_state == 1 || _state == 2`: agreement is allowed
-   **before** any dispute (settle governance while relations are good) as well as during
-   one.
+1. Require `_state == 1 || _state == 2`: agreement is allowed **before** any dispute
+   (settle governance while relations are good) as well as during one. **The seat may be
+   empty or occupied** (v0.9.5; see A1b) — the earlier `ARBITER == address(0)` requirement
+   and its `ArbiterAlreadySeated` revert on this path are gone.
 2. Require `msg.sender == BUYER || msg.sender == SELLER` (revert `NotDisputeParty`).
 3. Require `candidate != address(0) && candidate != BUYER && candidate != SELLER`
    (revert `InvalidArbiterCandidate`) — an arbiter who is also a party would hold 2-of-3
-   alone, the precise failure `initialize` guards against today. This is the **only**
-   constraint on a candidate; nominations are otherwise free-form (§3.3B), and nominating
-   the unseated incumbent to re-confirm them is the expected common case.
+   alone, the precise failure `initialize` guards against today. Also require
+   `candidate != ARBITER` (same revert): while the seat is occupied, the incumbent is not a
+   candidate — re-seating them would only wipe their standing vote and restart the eviction
+   clock (A1b). Those are the **only** constraints on a candidate; nominations are otherwise
+   free-form (§3.3B), and while the seat is *empty* nominating the unseated incumbent to
+   re-confirm them is the expected common case.
 4. Record the nomination for the caller's side. Nominations are **mutable** until seated:
    re-nominating overwrites.
-5. If both sides have nominated and the two addresses are equal → `_seatArbiter(candidate)`
-   **immediately**, in this same transaction.
+5. If both sides have nominated and the two addresses are equal →
+   `_seatArbiter(candidate, true)` **immediately**, in this same transaction — replacing the
+   incumbent if there is one.
 6. Emit `ArbiterNominated(msg.sender, candidate)`.
+
+**A1b. Replacing a SEATED arbiter by agreement (v0.9.5).**
+
+Until v0.9.5 the seat had to be empty before anyone could nominate, and it only emptied by
+a sale or by eviction after 30 days of silence. So once any arbiter was seated — the
+`DEFAULT_ARBITER` included — there was no way out by agreement. Now a matching pair of
+nominations replaces whoever holds the seat, on any live escrow, sold or not.
+
+*Why it is safe.* It needs **both** parties, and two parties who agree could already settle
+the dispute directly with two matching votes — so replacement grants them nothing they
+lack. One party alone can never move the seat: a single nomination seats nobody, and the
+incumbent is not a valid candidate, so there is no stale pair for one side to re-trigger.
+A party facing an adverse ruling cannot escape it alone, because the counterparty about to
+win has no reason to agree. And the arbiter is only ever a voter: replacement moves no
+funds and closes nothing.
+
+*What seating must now also do.* Because a match can land on an occupied seat,
+`_seatArbiter` **clears both nominations**. Without that, the pair left standing after a
+seating would let either party alone re-submit the same address, "match" the stale
+counter-nomination and re-seat the incumbent — wiping their vote and restarting the
+eviction clock single-handedly. Every seating, by agreement or by fallback, now starts the
+next round from zero. `_seatArbiter` also emits `ArbiterReplaced(previous, new)` when the
+seat was occupied — a **distinct event**, because indexers read `ArbiterUnseated` as "this
+escrow has been sold" (§15.3).
+
+*Consequences for the platform.* The default arbiter can be replaced mid-case. The
+disputeservice already treats "seated and not us" as a departure and closes its case
+without voting (ARBITRATION_POLICY §3c).
 
 There is deliberately **no deadline check on nominations**: a match is always better than
 the fallback, so a late agreement still seats right up until `seatDefaultArbiter` actually
@@ -506,11 +540,16 @@ do the one thing the elapsed window already determined. Note it never forecloses
 nominations carry no deadline check, so a matching pair still seats right up until this
 actually executes.
 
-**`_seatArbiter(address a)` (internal)**
+**`_seatArbiter(address a, bool byAgreement)` (internal)**
 ```solidity
+address previous = ARBITER;
 ARBITER = a;
 resolutionVotes[a].buyerPercentage = 255;   // ⚠️ MANDATORY — see §3.3D
-emit ArbiterSeated(a, /* byAgreement */ a != DEFAULT_ARBITER);
+nominatedByBuyer = address(0);              // ⚠️ MANDATORY — see A1b
+nominatedByRecipient = address(0);
+lastArbiterActionAt = uint64(block.timestamp);
+if (previous != address(0)) emit ArbiterReplaced(previous, a);
+emit ArbiterSeated(a, byAgreement);         // explicit: agreeing on DEFAULT_ARBITER is still agreement
 ```
 
 The vote reset also covers a re-confirmed incumbent who had already voted before being
@@ -1381,6 +1420,7 @@ event ArbiterUnseated(address indexed previousArbiter);
 event ArbiterNominated(address indexed nominator, address indexed candidate);
 event ArbiterSeated(address indexed arbiter, bool byAgreement);
 event ArbiterEvicted(address indexed previousArbiter);
+event ArbiterReplaced(address indexed previousArbiter, address indexed newArbiter); // v0.9.5, §3.3A1b — alongside ArbiterSeated; NOT ArbiterUnseated
 
 error NotDisputeParty(address caller);
 error ArbiterAlreadySeated(address arbiter);
@@ -1753,13 +1793,14 @@ those actions. Cheapest checks, either works:
 |---|---|
 | `resolvedBuyerPercentage()` | how a dispute resolved; 255 = never disputed (§3.3C) |
 | `nominationDeadline()` | when `seatDefaultArbiter` becomes callable |
-| `nominatedByBuyer()` / `nominatedByRecipient()` | pending nominations; equal ⇒ seated |
+| `nominatedByBuyer()` / `nominatedByRecipient()` | pending nominations; a match seats (and clears both) in the nominating transaction, so they are only ever equal momentarily |
 | `lastArbiterActionAt()` | eviction clock; +30 days ⇒ `evictArbiter` available |
 | `NOMINATION_WINDOW()` | 72h constant; doubles as a cohort probe |
 
 New events to index: `ArbiterUnseated`, `ArbiterNominated`, `ArbiterSeated`,
-`ArbiterEvicted`. **`ArbiterUnseated` is the "this escrow has been sold" marker** where
-dispute flows branch.
+`ArbiterEvicted`, `ArbiterReplaced` (v0.9.5). **`ArbiterUnseated` is the "this escrow has
+been sold" marker** where dispute flows branch; a replacement by agreement emits
+`ArbiterReplaced`, never `ArbiterUnseated`.
 
 New user-callable actions the UI must expose on sold escrows: `nominateArbiter(candidate)`,
 the permissionless `seatDefaultArbiter()` once the window lapses, and `evictArbiter()` after
@@ -2037,7 +2078,7 @@ which is precisely the transaction that moves the money.
 - Treat the chain as the source of truth for "has this settled" — read state or the
   `DisputeResolved` / `VoteSubmitted` events. Do not infer it from your own records.
 
-#### 15.6c Arbiter seat screens — sold escrows only
+#### 15.6c Arbiter seat screens
 
 **The same fund-then-send shape covers the rest of the dispute surface** (§15.2), so build it
 once: `nominateArbiter(candidate)` and `evictArbiter()` are encoded and sent exactly like the
@@ -2047,12 +2088,13 @@ vote, with no chainservice endpoint involved beyond `fund-wallet`.
 does send a transaction: the call is permissionless on-chain, so the platform fires it from its
 own relayer. **No signature and no user wallet** — just the escrow address.
 
-These screens exist because a marketplace sale empties the arbiter seat (§3.3A). Three actions,
-each gated by a flag from the state read below:
+These screens exist because a marketplace sale empties the arbiter seat (§3.3A), and because
+the parties may jointly replace a seated arbiter on any live escrow (§3.3A1b, v0.9.5). Three
+actions, each gated by a flag from the state read below:
 
 | Action | When it appears | What it does |
 |---|---|---|
-| **Nominate** an arbiter | seat empty, escrow funded or disputed | buyer and current recipient each name a candidate; **matching names seat that candidate instantly** |
+| **Nominate** an arbiter | escrow funded or disputed — seat empty **or occupied** (v0.9.5) | buyer and current recipient each name a candidate; **matching names seat that candidate instantly**, replacing the incumbent if there is one. The incumbent is the one address that cannot be nominated |
 | **Seat the default arbiter** | seat empty, disputed, 72h nomination window lapsed | anyone may fire it; seats the `DEFAULT_ARBITER` Safe |
 | **Request a new arbiter** (`evictArbiter`) | seat filled, disputed, arbiter silent 30 days | clears the seat and reopens nominations; **moves no funds** |
 
@@ -2362,7 +2404,8 @@ before mainnet**.
 
 ## 17. Changelog
 
-- **v0.9.4 (2026-10-05):** **The recipient is fixed for the life of a dispute.** Reported bug: on a disputed escrow the recipient could repeat the one-shot `approveRecipientTransfer` → `transferRecipientFrom` rotation (to another wallet, or to itself) inside every 72-hour window. Each call unseated the arbiter and re-armed `nominationDeadline`, so `seatDefaultArbiter` never became callable: two voters, no way to add a third, escrow and any vault holdback locked with no time bound. This is the same end state v0.7's saturating-deadline finding named as the vulnerability, reached by a different path, and it also let the recipient unseat an already-seated arbiter, the default included. **Fix:** `_transferRecipient` (so both `changeRecipient` and `transferRecipientFrom`) and `approveRecipientTransfer` revert `CannotChangeRecipientDuringDispute` in state 2; the `_state == 2` re-arm in `_unseatArbiter` is removed. The marketplace is unaffected (`acceptOffer` already refuses a disputed escrow). **Behaviour removed on purpose:** `changeRecipient` mid-dispute (v0.3), so whoever holds the recipient role when a dispute is raised holds it, and votes, until it resolves. **ABI:** one new error. **Not fixed:** escrows already deployed.
+- **v0.9.5 (2026-10-06): The parties may replace a SEATED arbiter by agreement (§3.3A1b).** `nominateArbiter` no longer requires an empty seat: a matching pair of nominations replaces whoever holds it, the `DEFAULT_ARBITER` included, on any funded or disputed escrow, sold or not. Previously the seat emptied only by a sale or by 30 days of silence, so once the default arbiter was seated there was no way out by agreement — ARBITRATION_POLICY §3c had this down as planned. Safety unchanged: both parties are still required, a pair who agree could already settle 2-of-3 between themselves, and the arbiter is only ever a voter. Two guards came with it: the incumbent is not a valid candidate while seated (`InvalidArbiterCandidate`), and `_seatArbiter` now clears both nominations, so one party can never re-match a stale pair to wipe the incumbent's vote or restart the eviction clock alone. `_seatArbiter` takes `byAgreement` explicitly (agreeing on the default arbiter is agreement). **ABI:** one new event, `ArbiterReplaced(previous, new)`, emitted alongside `ArbiterSeated` and deliberately distinct from `ArbiterUnseated`, which indexers read as a sale. `ArbiterAlreadySeated` survives on `seatDefaultArbiter`. chainservice `canNominate` no longer requires an empty seat and indexes the new event. **Not fixed:** escrows already deployed.
+- **v0.9.4 (2026-10-05):** **The recipient is fixed for the life of a dispute.** Reported bug (privately, by **xbyteid** — thank you): on a disputed escrow the recipient could repeat the one-shot `approveRecipientTransfer` → `transferRecipientFrom` rotation (to another wallet, or to itself) inside every 72-hour window. Each call unseated the arbiter and re-armed `nominationDeadline`, so `seatDefaultArbiter` never became callable: two voters, no way to add a third, escrow and any vault holdback locked with no time bound. This is the same end state v0.7's saturating-deadline finding named as the vulnerability, reached by a different path, and it also let the recipient unseat an already-seated arbiter, the default included. **Fix:** `_transferRecipient` (so both `changeRecipient` and `transferRecipientFrom`) and `approveRecipientTransfer` revert `CannotChangeRecipientDuringDispute` in state 2; the `_state == 2` re-arm in `_unseatArbiter` is removed. The marketplace is unaffected (`acceptOffer` already refuses a disputed escrow). **Behaviour removed on purpose:** `changeRecipient` mid-dispute (v0.3), so whoever holds the recipient role when a dispute is raised holds it, and votes, until it resolves. **ABI:** one new error. **Not fixed:** escrows already deployed.
 - **v0.9.3 (2026-08-23): full audit of `src/*.sol` — four fixes, all in the escrow contracts.** The marketplace came out clean; the findings were next door.
   **A. The completion escrow let the arbiter be a party.** `CompletionEscrowContract.initialize` never required the arbiter to differ from the buyer or the lead supplier, though its sibling has always carried that check. The consequence is sharper than a doubled role: `_checkAndExecuteConsensus` reads both votes from the SAME storage slot, so one `submitResolutionVote` from a party who is also the arbiter satisfies a 2-of-3 branch outright and pays out at whatever split they name, in that transaction. Reachable only as an ops mistake (the factory always passes its OWNER as arbiter), so it needed the platform to be a party to its own project — now rejected at both layers.
   **B. A silent buyer could freeze the supplier's money forever.** Payout needs the VERIFIER (the buyer or their delegate); voting needs a dispute; and only the buyer could open one. Those three composed into a permanent lock with no deadline, no arbiter recourse and no supplier lever — a missing TRIGGER, not a missing clock, which is why §the header's no-deadline reasoning did not cover it. `raiseDispute` is now `onlyBuyerOrArbiter`. The supplier deliberately still cannot fire it directly: routing through the arbiter keeps a neutral party between a supplier and the buyer's funds, and raising a dispute still moves no money — settlement needs two of three either way.
