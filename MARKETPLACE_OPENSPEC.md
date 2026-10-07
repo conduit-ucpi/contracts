@@ -1,6 +1,6 @@
 # Stabledrop Liquidity Marketplace — Contract OpenSpec
 
-**Version:** 0.9.5
+**Version:** 0.9.6
 **Date:** 2026-10-06
 **Status:** §3.2 (atomic swap) implemented ✅. **§3.3 (sale-triggered arbiter reset) implemented ✅.** **Marketplace implemented ✅ as per-offer vaults** (§5.0 — the pooled design was replaced to avoid commingling LP capital; §13.15). Full suite green: **282 tests, 0 failing**. **chainservice migrated onto the new contracts ✅ (§15.4, 263 tests green)** — the platform now holds no dispute power on any escrow it creates. Build log and deviations: **§0**. Remaining gates are external, not code: audit (§16 phase 3), counsel (§13.14), the Safe's outstanding test transaction (§13.8), and deploy-day parameters (§13.1/13.2). Test & audit plan: §14. UI & off-chain obligations: §15. Path to production: §16.
 **Scope:** MarketplaceEscrow smart contract, plus two small additions to `EscrowContract` that make the swap atomic. Serves `EscrowContract` clones only — see §3.0.
@@ -144,7 +144,7 @@ holdback payouts) and L-2 (`renounceOwnership`).
 |---|---|
 | 14.1 vote-trap trio | `EscrowArbiter.t.sol::testVoteTrap_*` (3 tests + zero-address sentinel) |
 | 14.1 unseating | `testUnseat_*` — incl. `changeRecipient` does NOT unseat; a sale is refused mid-dispute (v0.9.4) |
-| 14.1 nomination & seating | `testNominate_*` (5), `testSeat*` (6) — incl. late-match-still-wins; `testReplace_*` (7) for replacing a seated arbiter (v0.9.5) |
+| 14.1 nomination & seating | `testNominate_*` (5), `testSeat*` (6) — incl. late-match-still-wins; `testReplace_*` (7) for replacing a seated arbiter (v0.9.5); `testResign_*` (5) for the arbiter stepping down (v0.9.6) |
 | 14.1 eviction | `testEvict_*` (8) — incl. rolling clock, unsold-escrow exit, fund-neutrality |
 | 14.1 window immutability | `testWindow_IsAConstantSharedByEveryClone` + `test_DirectCloneCannotForgeTheWindow` |
 | Fallback unforgeability on a direct clone | `test_DirectCloneCannotForgeDefaultArbiter`, `test_DirectCloneIsCodehashGenuine` |
@@ -578,6 +578,16 @@ an unsold escrow's Safe may sit quietly for months before any dispute exists); i
 4. Clear the seat and nominations exactly as `_unseatArbiter` does, restart
    `nominationDeadline = block.timestamp + NOMINATION_WINDOW`, emit
    `ArbiterEvicted(previous)`.
+
+**`resignArbiter()` — the seated arbiter steps down (§3.3A1c, v0.9.6).** `onlyArbiter`, funded or
+disputed. Clears the seat and both nominations and arms `nominationDeadline`, exactly as eviction
+does, and emits `ArbiterResigned(previous)`. Strictly less power than the arbiter already holds —
+a voter who can stop being a voter can misuse nothing — and the §3.3D guard drops their standing
+vote at once. A hostile arbiter could already stall 30 days by silence; resignation caps that at
+the 72-hour window. Before a dispute the armed deadline is inert: `seatDefaultArbiter` is
+disputed-only and `raiseDispute` re-arms the window from the dispute. The `DEFAULT_ARBITER`
+resigning mid-dispute is re-seatable by anyone after the window, so for the fallback it means
+"please choose someone else", not an exit.
 
 Eviction **only swaps the third voter** — it moves no funds and closes nothing, so it cannot
 become a forced-resolution backdoor (§3.3A2). After eviction the ordinary path resumes:
@@ -1421,6 +1431,7 @@ event ArbiterNominated(address indexed nominator, address indexed candidate);
 event ArbiterSeated(address indexed arbiter, bool byAgreement);
 event ArbiterEvicted(address indexed previousArbiter);
 event ArbiterReplaced(address indexed previousArbiter, address indexed newArbiter); // v0.9.5, §3.3A1b — alongside ArbiterSeated; NOT ArbiterUnseated
+event ArbiterResigned(address indexed previousArbiter);                              // v0.9.6, §3.3A1c — seat empty afterwards, as after ArbiterEvicted
 
 error NotDisputeParty(address caller);
 error ArbiterAlreadySeated(address arbiter);
@@ -2404,6 +2415,7 @@ before mainnet**.
 
 ## 17. Changelog
 
+- **v0.9.6 (2026-10-06): The seated arbiter may resign (§3.3A1c).** `resignArbiter()`, `onlyArbiter`, funded or disputed: clears the seat and nominations and arms the window exactly as `evictArbiter` does, emitting `ArbiterResigned(previous)`. Needed by the arbiter's own /disputes screen in the webapp, where a privately nominated tiebreaker can vote or step down. Safety: strictly less power than voting, standing vote dropped by the §3.3D guard, worst-case stall shortened from 30 days to 72 hours. **ABI:** one new event. chainservice indexes it. **Not fixed:** escrows already deployed.
 - **v0.9.5 (2026-10-06): The parties may replace a SEATED arbiter by agreement (§3.3A1b).** `nominateArbiter` no longer requires an empty seat: a matching pair of nominations replaces whoever holds it, the `DEFAULT_ARBITER` included, on any funded or disputed escrow, sold or not. Previously the seat emptied only by a sale or by 30 days of silence, so once the default arbiter was seated there was no way out by agreement — ARBITRATION_POLICY §3c had this down as planned. Safety unchanged: both parties are still required, a pair who agree could already settle 2-of-3 between themselves, and the arbiter is only ever a voter. Two guards came with it: the incumbent is not a valid candidate while seated (`InvalidArbiterCandidate`), and `_seatArbiter` now clears both nominations, so one party can never re-match a stale pair to wipe the incumbent's vote or restart the eviction clock alone. `_seatArbiter` takes `byAgreement` explicitly (agreeing on the default arbiter is agreement). **ABI:** one new event, `ArbiterReplaced(previous, new)`, emitted alongside `ArbiterSeated` and deliberately distinct from `ArbiterUnseated`, which indexers read as a sale. `ArbiterAlreadySeated` survives on `seatDefaultArbiter`. chainservice `canNominate` no longer requires an empty seat and indexes the new event. **Not fixed:** escrows already deployed.
 - **v0.9.4 (2026-10-05):** **The recipient is fixed for the life of a dispute.** Reported bug (privately, by **xbyteid** — thank you): on a disputed escrow the recipient could repeat the one-shot `approveRecipientTransfer` → `transferRecipientFrom` rotation (to another wallet, or to itself) inside every 72-hour window. Each call unseated the arbiter and re-armed `nominationDeadline`, so `seatDefaultArbiter` never became callable: two voters, no way to add a third, escrow and any vault holdback locked with no time bound. This is the same end state v0.7's saturating-deadline finding named as the vulnerability, reached by a different path, and it also let the recipient unseat an already-seated arbiter, the default included. **Fix:** `_transferRecipient` (so both `changeRecipient` and `transferRecipientFrom`) and `approveRecipientTransfer` revert `CannotChangeRecipientDuringDispute` in state 2; the `_state == 2` re-arm in `_unseatArbiter` is removed. The marketplace is unaffected (`acceptOffer` already refuses a disputed escrow). **Behaviour removed on purpose:** `changeRecipient` mid-dispute (v0.3), so whoever holds the recipient role when a dispute is raised holds it, and votes, until it resolves. **ABI:** one new error. **Not fixed:** escrows already deployed.
 - **v0.9.3 (2026-08-23): full audit of `src/*.sol` — four fixes, all in the escrow contracts.** The marketplace came out clean; the findings were next door.

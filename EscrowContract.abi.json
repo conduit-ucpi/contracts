@@ -688,6 +688,13 @@
   },
   {
     "type": "function",
+    "name": "resignArbiter",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "resolutionVotes",
     "inputs": [
       {
@@ -834,6 +841,19 @@
       },
       {
         "name": "newArbiter",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ArbiterResigned",
+    "inputs": [
+      {
+        "name": "previousArbiter",
         "type": "address",
         "indexed": true,
         "internalType": "address"

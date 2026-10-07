@@ -515,6 +515,10 @@ contract EscrowContract is ReentrancyGuard {
     ///         Emitted alongside ArbiterSeated. Deliberately NOT ArbiterUnseated, which
     ///         indexers read as "this escrow has been sold" (§15.3).
     event ArbiterReplaced(address indexed previousArbiter, address indexed newArbiter);
+    /// @notice The seated arbiter stepped down of their own accord (§3.3A1c). The seat is
+    ///         empty afterwards exactly as after an eviction: match-nominate or, once a
+    ///         dispute's window lapses, seat the DEFAULT_ARBITER.
+    event ArbiterResigned(address indexed previousArbiter);
 
     // 🛡️ SECURITY MODIFIERS: These ensure ONLY authorized people can call functions
 
@@ -1223,6 +1227,42 @@ contract EscrowContract is ReentrancyGuard {
         nominationDeadline = _nominationDeadlineFromNow();
 
         emit ArbiterEvicted(previous);
+    }
+
+    /**
+     * ⚖️  RESIGN THE SEAT (§3.3A1c)
+     *
+     * The seated arbiter steps down. Strictly less power than they already hold - an arbiter
+     * can vote, so being able to stop being a voter adds nothing they could misuse - and the
+     * contract already handles an empty seat, because sales and evictions produce one. This
+     * is evictArbiter with the 30-day silence test swapped for "it is the arbiter asking".
+     *
+     * Why allow it:
+     * ✅ A hostile arbiter can already stall for 30 days by going silent. Resignation caps
+     *    the stall at the 72-hour nomination window, so it shortens the worst case.
+     * ✅ A private arbiter who finds they cannot or should not decide (conflict, absence)
+     *    has an honest exit, instead of leaving the parties to wait out the eviction clock.
+     *
+     * Allowed while funded or disputed, like nominateArbiter, so an arbiter can step down
+     * before any dispute exists. Mirrors evictArbiter exactly afterwards: seat cleared, both
+     * nominations cleared, nomination deadline armed (raiseDispute re-arms it if the dispute
+     * comes later; seatDefaultArbiter is disputed-only, so a pre-dispute deadline is inert).
+     * Their standing vote stops counting at once (§3.3D guard on ARBITER == address(0)).
+     *
+     * Known oddity, not a bug: the DEFAULT_ARBITER resigning from a dispute is re-seatable
+     * by anyone after the window unless the parties agree on someone else. Resignation by
+     * the fallback therefore means "please pick someone else", not a true exit.
+     */
+    function resignArbiter() external onlyArbiter initialized {
+        if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
+
+        address previous = ARBITER;
+        ARBITER = address(0);
+        nominatedByBuyer = address(0);
+        nominatedByRecipient = address(0);
+        nominationDeadline = _nominationDeadlineFromNow();
+
+        emit ArbiterResigned(previous);
     }
 
     /**

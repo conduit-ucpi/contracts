@@ -356,6 +356,85 @@ contract EscrowArbiterTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // §3.3A1c — the arbiter resigns the seat
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function testResign_ClearsSeatAndNominations() public {
+        EscrowContract escrow = _createFunded();
+        // A stale nomination must not survive the resignation (same rule as eviction).
+        vm.prank(buyer);
+        escrow.nominateArbiter(outsider);
+
+        vm.expectEmit(true, false, false, false);
+        emit EscrowContract.ArbiterResigned(arbiter);
+        vm.prank(arbiter);
+        escrow.resignArbiter();
+
+        assertEq(escrow.ARBITER(), address(0));
+        assertEq(escrow.nominatedByBuyer(), address(0));
+        assertEq(escrow.nominatedByRecipient(), address(0));
+    }
+
+    function testResign_OnlyTheSeatedArbiter() public {
+        EscrowContract escrow = _createFunded();
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.OnlyArbiter.selector);
+        escrow.resignArbiter();
+        vm.prank(outsider);
+        vm.expectRevert(EscrowContract.OnlyArbiter.selector);
+        escrow.resignArbiter();
+    }
+
+    /// Mid-dispute: their vote stops counting at once, the window is armed, and the
+    /// fallback becomes seatable after it - no 30-day wait.
+    function testResign_MidDisputeArmsTheWindowAndDropsTheVote() public {
+        EscrowContract escrow = _createFunded();
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        vm.prank(arbiter);
+        escrow.submitResolutionVote(0);
+
+        vm.prank(arbiter);
+        escrow.resignArbiter();
+        assertEq(escrow.nominationDeadline(), block.timestamp + escrow.NOMINATION_WINDOW());
+
+        // The seller voting 0 must NOT settle against the resigned arbiter's stale 0.
+        vm.prank(seller);
+        escrow.submitResolutionVote(0);
+        assertFalse(escrow.consensusReached(), "a resigned arbiter's vote must not count");
+
+        vm.warp(block.timestamp + escrow.NOMINATION_WINDOW() + 1);
+        escrow.seatDefaultArbiter();
+        assertEq(escrow.ARBITER(), defaultArbiter);
+    }
+
+    /// Before any dispute the deadline set here is inert: raiseDispute re-arms it from the
+    /// moment of the dispute, so the parties get a full window from then.
+    function testResign_PreDisputeWindowRunsFromTheDispute() public {
+        EscrowContract escrow = _createFunded();
+        vm.prank(arbiter);
+        escrow.resignArbiter();
+
+        vm.warp(block.timestamp + 10 days);
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        assertEq(escrow.nominationDeadline(), block.timestamp + escrow.NOMINATION_WINDOW());
+
+        vm.expectRevert(abi.encodeWithSelector(EscrowContract.NominationWindowStillOpen.selector, escrow.nominationDeadline()));
+        escrow.seatDefaultArbiter();
+    }
+
+    function testResign_RequiresLiveEscrow() public {
+        EscrowContract escrow = _createFunded();
+        vm.warp(expiry + 1);
+        vm.prank(seller);
+        escrow.claimFunds();
+        vm.prank(arbiter);
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.resignArbiter();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Nomination & seating (§3.3A1a)
     // ═══════════════════════════════════════════════════════════════════════════
 
