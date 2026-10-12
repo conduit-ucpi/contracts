@@ -125,9 +125,41 @@ contract FeeSplitTest is Test {
     }
 
     function sign(EscrowContractFactory f, T memory t, uint256 key) internal view returns (bytes memory) {
-        bytes32 digest = f.feeSplitDigest(t.token, t.buyer, t.seller, t.amount, t.expiry, t.arbiter, t.id, split(t));
+        return signAtFee(f, t, 0, key);
+    }
+
+    /// A signature over the terms at a chosen fee (0 = the factory's own).
+    function signAtFee(EscrowContractFactory f, T memory t, uint256 fee, uint256 key)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest =
+            f.feeSplitDigest(t.token, t.buyer, t.seller, t.amount, t.expiry, t.arbiter, t.id, split(t), fee);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    function createAndActivateAtFee(T memory t, uint256 fee, bytes memory sig) internal returns (EscrowContract) {
+        return EscrowContract(
+            factory.createAndActivateWithSplitAndFee(
+                t.token, t.buyer, t.seller, t.amount, t.expiry, "deal", t.arbiter, t.id, split(t), fee, sig
+            )
+        );
+    }
+
+    function predictAtFee(T memory t, uint256 fee) internal view returns (address) {
+        return factory.getContractAddressWithSplitAndFee(
+            t.token, t.buyer, t.seller, t.amount, t.expiry, t.arbiter, t.id, split(t), fee
+        );
+    }
+
+    function createAtFee(T memory t, uint256 fee, bytes memory sig) internal returns (EscrowContract) {
+        return EscrowContract(
+            factory.createEscrowContractWithSplitAndFee(
+                t.token, t.buyer, t.seller, t.amount, t.expiry, "deal", t.arbiter, t.id, split(t), fee, sig
+            )
+        );
     }
 
     function predict(T memory t) internal view returns (address) {
@@ -469,5 +501,138 @@ contract FeeSplitTest is Test {
             factory.createEscrowContract(address(usdc), buyer, seller, AMOUNT, expiry, "deal", arbiter, ID)
         );
         assertEq(e.GIT_COMMIT(), IMPL_COMMIT);
+    }
+
+    // ── a split at a chosen fee ──────────────────────────────────────────────
+
+    uint256 internal constant CHOSEN = 50e6; // 5% of AMOUNT
+
+    function test_SplitAtAChosenFeePaysThePartnerItsShareOfThatFee() public {
+        T memory t = terms(5000);
+        EscrowContract e = createAtFee(t, CHOSEN, signAtFee(factory, t, CHOSEN, SIGNER_KEY));
+        assertEq(e.CREATOR_FEE(), CHOSEN);
+        assertEq(e.PARTNER_FEE(), CHOSEN / 2, "half of the chosen fee, not of the default one");
+
+        uint256 partnerBefore = usdc.balanceOf(partner);
+        uint256 platformBefore = usdc.balanceOf(feeRecipient);
+        deposit(e);
+        assertEq(usdc.balanceOf(partner) - partnerBefore, CHOSEN / 2);
+        assertEq(usdc.balanceOf(feeRecipient) - platformBefore, CHOSEN - CHOSEN / 2);
+    }
+
+    /// The re-pricing the fee in the signature exists to stop.
+    function test_ASignatureForOneFeeDoesNotWorkAtAnother() public {
+        T memory t = terms(5000);
+        bytes memory atDefault = sign(factory, t, SIGNER_KEY);
+        bytes memory atFive = signAtFee(factory, t, CHOSEN, SIGNER_KEY);
+
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        createAtFee(t, CHOSEN, atDefault); // signed at the default fee, used at 5%
+
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        createAtFee(t, 60e6, atFive); // signed at 5%, used at 6%
+
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        create(t, atFive); // signed at 5%, used at the default fee
+    }
+
+    function test_SplitAtAChosenFeeIsStillBoundedByTheFloorAndTheAmount() public {
+        T memory t = terms(5000);
+        // Signed first: the signing helper calls the factory, and expectRevert takes the next call.
+        bytes memory belowFloor = signAtFee(factory, t, FEE - 1, SIGNER_KEY);
+        vm.expectRevert(
+            abi.encodeWithSelector(EscrowContractFactory.CreatorFeeBelowMinimum.selector, FEE - 1, FEE)
+        );
+        createAtFee(t, FEE - 1, belowFloor);
+
+        bytes memory wholeAmount = signAtFee(factory, t, AMOUNT, SIGNER_KEY);
+        vm.expectRevert(EscrowContractFactory.CreatorFeeMustBeLessThanAmount.selector);
+        createAtFee(t, AMOUNT, wholeAmount);
+    }
+
+    function test_SplitAtAChosenFeeHasItsOwnAddress() public {
+        T memory t = terms(5000);
+        address atDefault = predict(t);
+        address atFive = predictAtFee(t, CHOSEN);
+        address unsplitAtFive = factory.getContractAddressWithFee(
+            t.token, t.buyer, t.seller, t.amount, t.expiry, t.arbiter, t.id, CHOSEN
+        );
+        assertTrue(atFive != atDefault, "the fee is committed to");
+        assertTrue(atFive != unsplitAtFive, "the split is committed to");
+        assertTrue(atFive != predictAtFee(t, 60e6));
+        assertEq(address(createAtFee(t, CHOSEN, signAtFee(factory, t, CHOSEN, SIGNER_KEY))), atFive);
+    }
+
+    function test_SplitAtTheDefaultFeeKeepsItsAddress() public view {
+        // createEscrowContractWithSplit is "a split at fee 0": same salt as before fees could be chosen.
+        T memory t = terms(5000);
+        assertEq(predictAtFee(t, 0), predict(t));
+    }
+
+    function test_LateFundingASplitAtAChosenFee() public {
+        T memory t = terms(10_000);
+        address at = predictAtFee(t, CHOSEN);
+        usdc.mint(at, AMOUNT);
+        uint256 partnerBefore = usdc.balanceOf(partner);
+
+        address deployed = address(createAndActivateAtFee(t, CHOSEN, signAtFee(factory, t, CHOSEN, SIGNER_KEY)));
+
+        assertEq(deployed, at);
+        assertEq(usdc.balanceOf(partner) - partnerBefore, CHOSEN, "the whole chosen fee, at 10,000 bps");
+        assertEq(usdc.balanceOf(deployed), AMOUNT - CHOSEN);
+    }
+
+    // ── only FEE_SPLIT_SIGNER can put a split on an escrow, on every path ────────
+
+    function test_SplitAndFeePathsRejectAnyoneButTheSigner() public {
+        T memory t = terms(5000);
+        bytes memory rogue = signAtFee(factory, t, CHOSEN, ROGUE_KEY);
+
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        createAtFee(t, CHOSEN, rogue);
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        createAtFee(t, CHOSEN, "");
+
+        usdc.mint(predictAtFee(t, CHOSEN), AMOUNT);
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        createAndActivateAtFee(t, CHOSEN, rogue);
+    }
+
+    function test_SplitAndFeePathsRejectAPartnerWithoutAShare() public {
+        T memory t = terms(0); // partner set, 0 bps: a split nobody signed must not half-apply
+        vm.expectRevert(EscrowContractFactory.InvalidPartnerBps.selector);
+        createAtFee(t, CHOSEN, "");
+    }
+
+    /// A signed split can be SUBMITTED by anyone — that is what lets a stranger rescue a
+    /// late-funded escrow — but only on exactly the terms, split and fee the signer signed.
+    function test_AnyoneMaySubmitASignedSplitButNotChangeIt() public {
+        T memory t = terms(5000);
+        bytes memory sig = signAtFee(factory, t, CHOSEN, SIGNER_KEY);
+
+        T memory otherPartner = terms(5000);
+        otherPartner.partner = stranger;
+        vm.prank(stranger);
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        createAtFee(otherPartner, CHOSEN, sig);
+
+        T memory biggerShare = terms(10_000);
+        vm.prank(stranger);
+        vm.expectRevert(EscrowContractFactory.InvalidFeeSplitSignature.selector);
+        createAtFee(biggerShare, CHOSEN, sig);
+
+        vm.prank(stranger);
+        EscrowContract e = createAtFee(t, CHOSEN, sig);
+        assertEq(e.PARTNER_FEE_RECIPIENT(), partner);
+        assertEq(e.PARTNER_FEE(), CHOSEN / 2);
+    }
+
+    /// The paths with no split argument cannot carry one at all.
+    function test_ChosenFeeWithoutASplitNeverPaysAPartner() public {
+        EscrowContract e = EscrowContract(
+            factory.createEscrowContractWithFee(address(usdc), buyer, seller, AMOUNT, expiry, "deal", arbiter, ID, CHOSEN)
+        );
+        assertEq(e.PARTNER_FEE_RECIPIENT(), address(0));
+        assertEq(e.PARTNER_FEE(), 0);
     }
 }

@@ -13,8 +13,6 @@ evm_version = "cancun"
 # before); pinned because the gas ceilings in GasOptimisationSafetyNet.t.sol are measured under it.
 isolate = true
 verbosity = 3
-# PredictVectorTest writes the vector every off-chain address predictor is pinned to.
-fs_permissions = [{ access = "read-write", path = "./counterfactual-vectors.json" }]
 
 [rpc_endpoints]
 default = "${NETWORK_RPC_URL}"
