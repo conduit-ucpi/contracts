@@ -3,9 +3,8 @@
 This file tracks all deployed contract addresses across different networks.
 
 > **Before reporting an issue:** check the address against the tables below. Each
-> section says which commit is live and which known issues it does or does not include.
-> Reports against a superseded address, or about an issue listed as "fixed in source,
-> redeploy pending", are already known and need no report. Anything else goes to
+> section says which commit is live. Reports against a superseded address describe
+> code that is no longer current and need no report. Anything else goes to
 > [SECURITY.md](SECURITY.md).
 
 ## Base Mainnet (Production)
@@ -61,37 +60,38 @@ behaviour at these addresses as current.
 | EscrowContract (Implementation) | `0xCbfD53842f0ACc885a55b7A0eDb18eF5ac9237f9` | pre-marketplace, superseded 2026-08-06 |
 | EscrowContractFactory | `0x00b1D1A005022D1f140062Ba5aB0A44788089F88` | pre-marketplace, superseded 2026-08-06 |
 
-### Completion (fan-out) pair — CURRENT, ⚠️ REDEPLOY PENDING
+### Completion (fan-out) pair — CURRENT
 
 Used by **fanOutChainService**; powers the Projects feature. This pair has **no
 expiry**: the buyer may dispute until payout, and funds move only on dual-verify
 or dispute resolution. Roles are BUYER / LEAD_SUPPLIER / VERIFIER / ARBITER with
 a 1–10 way `payees[]` split.
 
-The live pair was deployed on 2026-08-06 from source no later than `4d89c7d`
-(2026-07-27). It predates `GIT_COMMIT` stamping, so it has no `GIT_COMMIT()` getter.
-
-**Known issues: fixed in source, NOT in the live pair.** These were found in the
-2026-08-23 audit (`b6c8931`) and are fixed on `main`. They go live with the next
-completion deploy (`completion-v*` tag). They need no further report:
-
-| Issue | Fix on `main` |
-|---|---|
-| Arbiter may share an address with the buyer or supplier, so one `submitResolutionVote` meets the two-party consensus alone | `initialize` reverts with `ArbiterMustBeDistinct` |
-| Fee-on-transfer, deflationary or rebasing tokens leave the last payee's transfer reverting and the escrow stuck | Deposit reverts with `TransferAmountMismatch` on any short transfer |
-| Only the buyer can raise a dispute, so a buyer who stops responding freezes the supplier's funds permanently | The arbiter may also raise a dispute |
-| Tokens sent to an escrow by mistake cannot be recovered | `sweepToken` returns them to the buyer (the escrow token itself only once the escrow is closed) |
+Built from commit `810fc2a`. It includes every fix from the 2026-08-23 audit
+(`b6c8931`): the arbiter must be distinct from buyer and supplier
+(`ArbiterMustBeDistinct`), short (fee-on-transfer) deposits revert
+(`TransferAmountMismatch`), the arbiter may raise a dispute, and stray tokens can be
+recovered with `sweepToken`. Every issue fixed up to that commit is live in this
+deployment. Anything reported against `0x9d0a65a…` or older addresses describes a
+superseded deployment.
 
 | Contract | Address | BaseScan Link | Deployment Date |
 |----------|---------|---------------|-----------------|
-| CompletionEscrowContract (Implementation) | `0x9d0a65a1540b435a549b438b6b99E8bA7aB48E44` | [View on BaseScan](https://basescan.org/address/0x9d0a65a1540b435a549b438b6b99E8bA7aB48E44) | 2026-08-06 |
-| CompletionEscrowContractFactory | `0xFF4625e772e9031EF94D98253d6dDe6e7b7eEcFa` | [View on BaseScan](https://basescan.org/address/0xFF4625e772e9031EF94D98253d6dDe6e7b7eEcFa) | 2026-08-06 |
+| CompletionEscrowContract (Implementation) | `0x99Df2f361EBB0C6305FB00592c82Cba9b017F3d9` | [View on BaseScan](https://basescan.org/address/0x99Df2f361EBB0C6305FB00592c82Cba9b017F3d9) | 2026-10-16 |
+| CompletionEscrowContractFactory | `0x67a219e3A3a570bBC58f839CE4FD4eF51748572c` | [View on BaseScan](https://basescan.org/address/0x67a219e3A3a570bBC58f839CE4FD4eF51748572c) | 2026-10-16 |
+
+**Immutable parameters baked into this deployment:**
+
+| Parameter | Value |
+|---|---|
+| `GIT_COMMIT` (implementation and factory) | `0x810fc2aaf2c2c0a52ae8d48c6a246e027bcd7c62` |
+| `PLATFORM_FEE_WALLET` | `0xC9125aCda217A4c79453Fa33955ebf141Bae7349` |
 
 Set on fanOutChainService:
 
 ```bash
-FANOUT_ESCROW_IMPLEMENTATION_ADDRESS=0x9d0a65a1540b435a549b438b6b99E8bA7aB48E44
-FANOUT_CONTRACT_FACTORY_ADDRESS=0xFF4625e772e9031EF94D98253d6dDe6e7b7eEcFa
+FANOUT_ESCROW_IMPLEMENTATION_ADDRESS=0x99Df2f361EBB0C6305FB00592c82Cba9b017F3d9
+FANOUT_CONTRACT_FACTORY_ADDRESS=0x67a219e3A3a570bBC58f839CE4FD4eF51748572c
 ```
 
 Both MUST be set explicitly. `application.yml` falls back to
@@ -100,14 +100,20 @@ when they are absent, which points the completion ABI at the legacy factory.
 
 ### Superseded completion pairs
 
-Escrows created by any earlier completion factory are **not readable** by the
-current ABI (`getRecipients()` was renamed `getPayees()`; `getContractInfo()`
-lost a field). They remain on-chain and their parties can still call them
-directly, but the app will not list them. Do **not** treat code behaviour at these
+These are older deployments. Their escrows remain live on their own terms and their
+parties can still call them directly. Do **not** treat code behaviour at these
 addresses as current.
+
+The 2026-08-06 pair lacks the 2026-08-23 audit fixes listed above. Its escrows are
+still readable by the current ABI apart from the new `GIT_COMMIT()` getter. Escrows
+from the 2026-07-27 pair are **not readable** by the current ABI (`getRecipients()`
+was renamed `getPayees()`; `getContractInfo()` lost a field), so the app will not
+list them.
 
 | Contract | Address | Status |
 |----------|---------|--------|
+| CompletionEscrowContract (Implementation) | `0x9d0a65a1540b435a549b438b6b99E8bA7aB48E44` | deployed 2026-08-06, superseded 2026-10-16 |
+| CompletionEscrowContractFactory | `0xFF4625e772e9031EF94D98253d6dDe6e7b7eEcFa` | deployed 2026-08-06, superseded 2026-10-16 |
 | CompletionEscrowContract (Implementation) | `0x86f1959b235573b1daa4cecf96214c500c7a1160` | deployed 2026-07-27, superseded 2026-08-06 |
 | CompletionEscrowContractFactory | `0x821575b2311635e54a662fdcfb92fe8df17f36b7` | deployed 2026-07-27, superseded 2026-08-06 |
 
