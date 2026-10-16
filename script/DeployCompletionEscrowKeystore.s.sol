@@ -17,6 +17,7 @@ import {DeployCompletionEscrow} from "./DeployCompletionEscrow.s.sol";
  *   CHAIN_ID          must match the connected chain
  *   NETWORK           label only (e.g. base, base-sepolia)
  *   FEE_RECIPIENT_ADDRESS  optional; defaults to OWNER when unset
+ *   GIT_COMMIT        REQUIRED; set from a clean tree by deploy-completion-keystore.sh
  *
  * Because the signer is supplied by `--account`, we open an unkeyed broadcast
  * (`vm.startBroadcast()`), which uses the CLI-provided sender.
@@ -27,6 +28,7 @@ contract DeployCompletionEscrowKeystore is DeployCompletionEscrow {
         uint256 chainId = vm.envUint("CHAIN_ID");
         string memory network = vm.envString("NETWORK");
         address feeRecipient = _readFeeRecipient();
+        bytes20 gitCommit = _readGitCommit();
 
         console.log("Deploying COMPLETION (fan-out) escrow only (keystore):");
         console.log("Network:", network);
@@ -35,7 +37,7 @@ contract DeployCompletionEscrowKeystore is DeployCompletionEscrow {
         require(block.chainid == chainId, "Chain ID mismatch");
 
         vm.startBroadcast();
-        deployCompletion(relayerAddress, feeRecipient);
+        deployCompletion(relayerAddress, feeRecipient, gitCommit);
         vm.stopBroadcast();
 
         console.log("Completion deployment completed successfully!");

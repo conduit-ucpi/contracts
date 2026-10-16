@@ -1,0 +1,139 @@
+name: Deploy Completion Escrow
+run-name: Deploy completion ${{ github.ref_name }}
+
+# The completion (fan-out) pair - CompletionEscrowContract + its factory - is
+# deployed SEPARATELY from the legacy pair, on its own tag. It is independent of
+# build.yml's legacy factory, and fanOutChainService has to be repointed by hand
+# every time it moves, so it should only move when someone means it to.
+#
+#   completion-vX.Y.Z     -> production
+#   completion-testX.Y.Z  -> test
+#
+# Neither pattern matches build.yml's 'v*' / 'test*' or deploy-marketplace.yml's
+# 'offervault-*' globs, so tagging one never triggers another.
+on:
+  push:
+    tags:
+      - 'completion-v*'
+      - 'completion-test*'
+
+# Queue rather than cancel, so a half-broadcast run is not killed.
+concurrency:
+  group: deploy-completion-${{ startsWith(github.ref, 'refs/tags/completion-v') && 'production' || 'test' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(github.ref, 'refs/tags/completion-v') && 'production' || 'test' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # ⚠️ AN EXACT VERSION, NOT `stable` AND NOT `nightly`. See build.yml for why.
+          # To upgrade, change this pin in EVERY workflow in the same commit.
+          version: v1.8.4
+
+      # Exported into the job environment rather than a project .env file: recent
+      # Foundry refuses to auto-load an unapproved .env from the project directory.
+      - name: Export deploy configuration
+        run: |
+          echo "RELAYER_WALLET_PRIVATE_KEY=${{ secrets.RELAYER_WALLET_PRIVATE_KEY }}" >> "$GITHUB_ENV"
+          echo "NETWORK=${{ vars.NETWORK }}" >> "$GITHUB_ENV"
+          echo "CHAIN_ID=${{ vars.CHAIN_ID }}" >> "$GITHUB_ENV"
+          echo "NETWORK_RPC_URL=${{ vars.NETWORK_RPC_URL }}" >> "$GITHUB_ENV"
+          echo "VERIFIER_API_KEY=${{ secrets.VERIFIER_API_KEY }}" >> "$GITHUB_ENV"
+          echo "VERIFIER_URL=${{ vars.VERIFIER_URL }}" >> "$GITHUB_ENV"
+          # Becomes the factory's immutable PLATFORM_FEE_WALLET. Only written when set;
+          # the deploy script defaults it to the factory OWNER (relayer) otherwise.
+          if [ -n "${{ vars.FEE_RECIPIENT_ADDRESS }}" ]; then
+            echo "FEE_RECIPIENT_ADDRESS=${{ vars.FEE_RECIPIENT_ADDRESS }}" >> "$GITHUB_ENV"
+          fi
+          # Stamped into the implementation and factory bytecode as GIT_COMMIT().
+          echo "GIT_COMMIT=0x${{ github.sha }}" >> "$GITHUB_ENV"
+
+      # ⚠️ NO `forge install` HERE, DELIBERATELY - see build.yml. The recursive checkout
+      #    provides OpenZeppelin at the locked revision; this step proves it.
+      - name: Verify pinned dependencies
+        run: |
+          if [ ! -f lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol ]; then
+            echo "::error::lib/openzeppelin-contracts is not populated - the recursive submodule checkout did not run"
+            exit 1
+          fi
+
+          LOCKED=$(jq -r '."lib/openzeppelin-contracts".rev' foundry.lock)
+          ACTUAL=$(git -C lib/openzeppelin-contracts rev-parse HEAD)
+          echo "OpenZeppelin locked: $LOCKED"
+          echo "OpenZeppelin actual: $ACTUAL"
+          if [ "$LOCKED" != "$ACTUAL" ]; then
+            echo "::error::OpenZeppelin is at $ACTUAL but foundry.lock pins $LOCKED - refusing to deploy bytecode built against an unpinned dependency"
+            exit 1
+          fi
+
+      - name: Build contracts
+        run: forge build
+
+      - name: Run tests
+        run: forge test -vvv
+
+      - name: Deploy completion pair
+        id: deploy
+        run: |
+          # --retries/--delay give blockscout's verification queue time to settle.
+          forge script script/DeployCompletionEscrow.s.sol:DeployCompletionEscrow \
+            --rpc-url $NETWORK_RPC_URL \
+            --broadcast \
+            --verify --verifier blockscout --verifier-url $VERIFIER_URL \
+            --retries 10 --delay 15 \
+            -vvvv 2>&1 | tee completion_output.txt
+
+          IMPLEMENTATION_ADDRESS=$(grep "Completion implementation deployed at:" completion_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          FACTORY_ADDRESS=$(grep "Completion factory deployed at:" completion_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+          FEE_WALLET=$(grep "Platform fee wallet:" completion_output.txt | grep -o "0x[a-fA-F0-9]\{40\}" | head -1)
+
+          # A blank field in the summary silently breaks downstream config, so fail here.
+          for pair in "completion implementation:$IMPLEMENTATION_ADDRESS" \
+                      "completion factory:$FACTORY_ADDRESS" \
+                      "platform fee wallet:$FEE_WALLET"; do
+            if [ -z "${pair#*:}" ]; then
+              echo "ERROR: could not parse the ${pair%%:*} address from the deployment output" >&2
+              exit 1
+            fi
+          done
+
+          echo "==================================================="
+          echo "🔀 COMPLETION (FAN-OUT) DEPLOYMENT COMPLETE"
+          echo "==================================================="
+          echo "Completion implementation: $IMPLEMENTATION_ADDRESS"
+          echo "Completion factory:        $FACTORY_ADDRESS"
+          echo "Platform fee wallet:       $FEE_WALLET  (IMMUTABLE)"
+          echo "Git commit:                0x${{ github.sha }}"
+          echo "==================================================="
+          echo "Set these on fanOutChainService (BOTH, explicitly - it falls back to"
+          echo "the legacy pair when they are absent):"
+          echo "  FANOUT_CONTRACT_FACTORY_ADDRESS=$FACTORY_ADDRESS"
+          echo "  FANOUT_ESCROW_IMPLEMENTATION_ADDRESS=$IMPLEMENTATION_ADDRESS"
+          echo "==================================================="
+
+          {
+            echo "### 🔀 Completion pair deployed (\`${{ github.ref_name }}\`)"
+            echo ""
+            echo "| Contract | Address |"
+            echo "| --- | --- |"
+            echo "| CompletionEscrowContract (implementation) | \`$IMPLEMENTATION_ADDRESS\` |"
+            echo "| CompletionEscrowContractFactory | \`$FACTORY_ADDRESS\` |"
+            echo "| Platform fee wallet (immutable) | \`$FEE_WALLET\` |"
+            echo ""
+            echo "Git commit: \`0x${{ github.sha }}\`"
+            echo ""
+            echo "Set on **fanOutChainService** (both, explicitly):"
+            echo ""
+            echo "\`\`\`"
+            echo "FANOUT_CONTRACT_FACTORY_ADDRESS=$FACTORY_ADDRESS"
+            echo "FANOUT_ESCROW_IMPLEMENTATION_ADDRESS=$IMPLEMENTATION_ADDRESS"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

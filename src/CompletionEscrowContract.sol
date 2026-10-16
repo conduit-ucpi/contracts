@@ -138,6 +138,12 @@ contract CompletionEscrowContract is ReentrancyGuard {
     uint256 public CREATOR_FEE;      // Platform fee (deducted from AMOUNT at deposit)
     uint256 public createdAt;        // Timestamp when the contract was created
 
+    /// @notice The git commit this implementation was built from, stamped at deploy.
+    /// @dev    Immutable, so it lives in the implementation's runtime bytecode and every
+    ///         clone reports the same value through its delegatecall - no per-escrow
+    ///         storage. It cannot be a source constant: committing a SHA changes the SHA.
+    bytes20 public immutable GIT_COMMIT;
+
     // 🔐 INTERNAL STATE
     // 0=unfunded, 1=funded, 2=disputed, 3=completePendingVerify, 4=claimed, 255=disabled
     uint8 private _state;
@@ -189,7 +195,9 @@ contract CompletionEscrowContract is ReentrancyGuard {
         _;
     }
 
-    constructor() {
+    /// @param _gitCommit The commit the deployed bytecode was built from (see GIT_COMMIT).
+    constructor(bytes20 _gitCommit) {
+        GIT_COMMIT = _gitCommit;
         // Implementation contract - disable initialization
         _state = 255;
     }

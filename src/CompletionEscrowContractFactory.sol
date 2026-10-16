@@ -36,6 +36,7 @@ contract CompletionEscrowContractFactory {
     address public immutable OWNER;          // Platform/arbiter - creates contracts, cannot take money
     address public immutable IMPLEMENTATION; // Template contract (all escrows share its security)
     address public immutable PLATFORM_FEE_WALLET;  // Receives platform fees (defaults to OWNER if unset)
+    bytes20 public immutable GIT_COMMIT;     // Commit this factory was built from, stamped at deploy
 
     // 📢 PUBLIC EVENT: Records every escrow creation
     event ContractCreated(
@@ -49,13 +50,15 @@ contract CompletionEscrowContractFactory {
         string description
     );
 
-    constructor(address _owner, address _implementation, address _platformFeeWallet) {
+    /// @param _gitCommit The commit the deployed bytecode was built from.
+    constructor(address _owner, address _implementation, address _platformFeeWallet, bytes20 _gitCommit) {
         if (_owner == address(0)) revert InvalidOwnerAddress();
         if (_implementation == address(0)) revert InvalidImplementationAddress();
 
         OWNER = _owner;
         IMPLEMENTATION = _implementation;
         PLATFORM_FEE_WALLET = _platformFeeWallet == address(0) ? _owner : _platformFeeWallet;
+        GIT_COMMIT = _gitCommit;
     }
 
     /**

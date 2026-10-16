@@ -30,7 +30,7 @@ jobs:
           #
           # To upgrade: install the new version locally, run `forge test`, re-measure the gas
           # ceilings in test/GasOptimisationSafetyNet.t.sol if they moved, then change this
-          # pin (in BOTH workflows) in the same commit.
+          # pin (in EVERY workflow) in the same commit.
           version: v1.8.4
 
       # Exported into the job environment rather than a project .env file: recent
@@ -144,7 +144,8 @@ jobs:
         run: |
           # Deploy with verification. DeployEscrow deploys ONLY the legacy
           # EscrowContract + EscrowContractFactory; the completion pair and the
-          # marketplace are deployed separately, by hand. --retries/--delay
+          # marketplace have their own workflows and tags (deploy-completion.yml,
+          # deploy-marketplace.yml). --retries/--delay
           # give blockscout's verification queue time to settle (it can sit in
           # "Pending in queue" longer than the default 5x5s budget).
           forge script script/DeployEscrow.s.sol:DeployEscrow --rpc-url $NETWORK_RPC_URL --broadcast --verify --verifier blockscout --verifier-url $VERIFIER_URL --retries 10 --delay 15 -vvvv 2>&1 | tee deployment_output.txt

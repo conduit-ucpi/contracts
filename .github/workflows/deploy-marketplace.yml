@@ -48,7 +48,7 @@ jobs:
           #
           # To upgrade: install the new version locally, run `forge test`, re-measure the gas
           # ceilings in test/GasOptimisationSafetyNet.t.sol if they moved, then change this
-          # pin (in BOTH workflows) in the same commit.
+          # pin (in EVERY workflow) in the same commit.
           version: v1.8.4
 
       # Everything the marketplace needs is checked BEFORE the chain is touched.

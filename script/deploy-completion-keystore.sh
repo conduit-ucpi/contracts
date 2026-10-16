@@ -3,6 +3,9 @@
 # Deploy the COMPLETION (fan-out) escrow pair — implementation + factory —
 # signing with a named Foundry keystore instead of a raw private key.
 #
+# Stamps the deployed bytecode with the current commit (GIT_COMMIT), and so
+# refuses to run from a dirty tree: the recorded SHA must be the code deployed.
+#
 # One-time keystore setup (if not done already):
 #   cast wallet import relayer --interactive
 #
@@ -23,6 +26,15 @@ if [ -f .env ]; then
   . ./.env
   set +a
 fi
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Refusing to deploy: working tree is dirty. GIT_COMMIT must match the deployed code." >&2
+  git status --short >&2
+  exit 1
+fi
+GIT_COMMIT="0x$(git rev-parse HEAD)"
+export GIT_COMMIT
+echo "Deploying commit: $GIT_COMMIT"
 
 ACCOUNT="${ACCOUNT:-relayer}"
 VERIFY="${VERIFY:-1}"

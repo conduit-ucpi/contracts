@@ -26,19 +26,23 @@ contract DeployCompletionEscrow is Script {
      * Deploys the completion implementation + factory. Assumes the caller has
      * already opened a broadcast. Logs the env vars fanOutChainService needs.
      */
-    function deployCompletion(address owner, address feeRecipient)
+    function deployCompletion(address owner, address feeRecipient, bytes20 gitCommit)
         internal
         returns (CompletionEscrowContractFactory factory, CompletionEscrowContract implementation)
     {
-        implementation = new CompletionEscrowContract();
+        implementation = new CompletionEscrowContract(gitCommit);
         console.log("Completion implementation deployed at:", address(implementation));
 
-        factory = new CompletionEscrowContractFactory(owner, address(implementation), feeRecipient);
+        factory = new CompletionEscrowContractFactory(owner, address(implementation), feeRecipient, gitCommit);
 
         console.log("=================================================");
         console.log("Completion factory deployed at:", address(factory));
         console.log("Factory owner:", factory.OWNER());
         console.log("Platform fee wallet:", factory.PLATFORM_FEE_WALLET());
+        console.log("Factory git commit:");
+        console.logBytes20(factory.GIT_COMMIT());
+        console.log("Implementation git commit:");
+        console.logBytes20(implementation.GIT_COMMIT());
         console.log("Set these env vars on fanOutChainService:");
         console.log("  FANOUT_CONTRACT_FACTORY_ADDRESS =", address(factory));
         console.log("  FANOUT_ESCROW_IMPLEMENTATION_ADDRESS =", address(implementation));
@@ -53,6 +57,7 @@ contract DeployCompletionEscrow is Script {
      *   CHAIN_ID                    must match the connected chain
      *   NETWORK                     label only (e.g. base, base-sepolia)
      *   FEE_RECIPIENT_ADDRESS       optional; defaults to OWNER when unset
+     *   GIT_COMMIT                  REQUIRED; 0x-prefixed 40-hex commit being deployed
      */
     function run() external virtual {
         uint256 deployerPrivateKey = vm.envUint("RELAYER_WALLET_PRIVATE_KEY");
@@ -60,6 +65,7 @@ contract DeployCompletionEscrow is Script {
         uint256 chainId = vm.envUint("CHAIN_ID");
         string memory network = vm.envString("NETWORK");
         address feeRecipient = _readFeeRecipient();
+        bytes20 gitCommit = _readGitCommit();
 
         console.log("Deploying COMPLETION (fan-out) escrow only:");
         console.log("Network:", network);
@@ -68,10 +74,21 @@ contract DeployCompletionEscrow is Script {
         require(block.chainid == chainId, "Chain ID mismatch");
 
         vm.startBroadcast(deployerPrivateKey);
-        deployCompletion(relayerAddress, feeRecipient);
+        deployCompletion(relayerAddress, feeRecipient, gitCommit);
         vm.stopBroadcast();
 
         console.log("Completion deployment completed successfully!");
+    }
+
+    /**
+     * Reads the REQUIRED GIT_COMMIT. No default: a contract cannot carry its own commit
+     * as a source constant, so a deploy that cannot say what it deployed must not run.
+     */
+    function _readGitCommit() internal view returns (bytes20 gitCommit) {
+        bytes memory commit = vm.envBytes("GIT_COMMIT");
+        require(commit.length == 20, "GIT_COMMIT must be a 0x-prefixed 40-hex-char commit SHA");
+        gitCommit = bytes20(commit);
+        require(gitCommit != bytes20(0), "GIT_COMMIT must not be zero");
     }
 
     /** Reads the optional FEE_RECIPIENT_ADDRESS, defaulting to address(0) (= owner). */

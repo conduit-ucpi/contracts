@@ -114,12 +114,23 @@ The legacy escrow pair deploys on its own, stamped with the commit it was built 
 
 - CI: the deploy job runs `script/DeployEscrow.s.sol:DeployEscrow` with
   `GIT_COMMIT=0x${{ github.sha }}`. It deploys **only** EscrowContract +
-  EscrowContractFactory — the completion pair and marketplace are separate.
+  EscrowContractFactory — the completion pair and marketplace are separate
+  (see below).
 - Locally: `./script/deploy-escrow-keystore.sh` (refuses a dirty tree, sets
   `GIT_COMMIT` from `HEAD`). `DeploymentScript` still deploys legacy + completion
   together when that is wanted.
 
-Env: `DEFAULT_ARBITER_ADDRESS` and `GIT_COMMIT` are required;
+The completion (fan-out) pair deploys from `.github/workflows/deploy-completion.yml`
+on its own tags — `completion-vX.Y.Z` (production) or `completion-testX.Y.Z`
+(test) — running `DeployCompletionEscrow`. Locally:
+`./script/deploy-completion-keystore.sh` (refuses a dirty tree). Both stamp the
+implementation and factory with `GIT_COMMIT`, which is required. Either way, copy
+the two printed `FANOUT_*` values onto fanOutChainService.
+
+The marketplace deploys from `deploy-marketplace.yml` on `offervault-v*` /
+`offervault-test*` tags.
+
+Legacy env: `DEFAULT_ARBITER_ADDRESS` and `GIT_COMMIT` are required;
 `FEE_RECIPIENT_ADDRESS` and `FEE_SPLIT_SIGNER_ADDRESS` default to the owner
 (relayer) when unset — set the signer explicitly, since it is immutable and every
 signature it issues stays valid for the factory's lifetime.

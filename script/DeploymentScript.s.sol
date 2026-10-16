@@ -23,7 +23,7 @@ contract DeploymentScript is DeployEscrow, DeployCompletionEscrow {
 
         vm.startBroadcast(deployerPrivateKey);
         deployEscrow(relayerAddress, defaultArbiter, feeRecipient, feeSplitSigner, gitCommit);
-        deployCompletion(relayerAddress, feeRecipient);
+        deployCompletion(relayerAddress, feeRecipient, gitCommit);
         vm.stopBroadcast();
 
         console.log("Deployment completed successfully!");

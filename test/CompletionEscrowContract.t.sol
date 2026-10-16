@@ -91,11 +91,13 @@ contract CompletionEscrowContractTest is Test {
     uint256 public CREATOR_FEE; // 1% of AMOUNT
     uint256 public ESCROW; // AMOUNT - CREATOR_FEE
     string public description = "Test completion escrow";
+    bytes20 internal constant IMPL_COMMIT = bytes20(0x1111111111111111111111111111111111111111);
+    bytes20 internal constant FACTORY_COMMIT = bytes20(0x2222222222222222222222222222222222222222);
 
     function setUp() public {
         usdc = new MockERC20();
-        CompletionEscrowContract implementation = new CompletionEscrowContract();
-        factory = new CompletionEscrowContractFactory(arbiter, address(implementation), address(0));
+        CompletionEscrowContract implementation = new CompletionEscrowContract(IMPL_COMMIT);
+        factory = new CompletionEscrowContractFactory(arbiter, address(implementation), address(0), FACTORY_COMMIT);
 
         CREATOR_FEE = AMOUNT / 100; // 10 USDC
         ESCROW = AMOUNT - CREATOR_FEE;
@@ -257,8 +259,14 @@ contract CompletionEscrowContractTest is Test {
         factory.createEscrowContract(address(usdc), buyer, leadSupplier, AMOUNT, r, b, address(0), description);
     }
 
+    function testGitCommitIsStampedAndClonesReportTheImplementations() public {
+        assertEq(factory.GIT_COMMIT(), FACTORY_COMMIT);
+        assertEq(CompletionEscrowContract(factory.IMPLEMENTATION()).GIT_COMMIT(), IMPL_COMMIT);
+        assertEq(_createSingle().GIT_COMMIT(), IMPL_COMMIT);
+    }
+
     function testImplementationCannotBeInitialized() public {
-        CompletionEscrowContract impl = new CompletionEscrowContract();
+        CompletionEscrowContract impl = new CompletionEscrowContract(IMPL_COMMIT);
         vm.expectRevert(CompletionEscrowContract.NotInitialized.selector);
         impl.isFunded();
     }
@@ -774,7 +782,7 @@ contract CompletionEscrowContractTest is Test {
     /// The contract enforces it itself — a clone initialized directly, bypassing the
     /// factory, must answer to the same rule.
     function testInitializeRejectsAnArbiterWhoIsAParty() public {
-        CompletionEscrowContract impl = new CompletionEscrowContract();
+        CompletionEscrowContract impl = new CompletionEscrowContract(IMPL_COMMIT);
         address clone = Clones.clone(address(impl));
         (address[] memory r, uint256[] memory b) = _single();
 

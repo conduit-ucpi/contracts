@@ -117,6 +117,7 @@ forge script script/DeploymentScript.s.sol:DeploymentScript \
   --verifier-url $VERIFIER_URL
 
 # Deploy ONLY the completion (fan-out) family (legacy already deployed)
+# (GIT_COMMIT is required: export GIT_COMMIT=0x$(git rev-parse HEAD) from a clean tree)
 forge script script/DeployCompletionEscrow.s.sol:DeployCompletionEscrow \
   --rpc-url $NETWORK_RPC_URL \
   --broadcast \
