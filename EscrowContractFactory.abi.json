@@ -1,5 +1,44 @@
 [
   {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "_owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_implementation",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_feeSweeper",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_gitCommit",
+        "type": "bytes20",
+        "internalType": "bytes20"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "FEE_SWEEPER",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
     "type": "function",
     "name": "GIT_COMMIT",
     "inputs": [],
@@ -535,44 +574,5 @@
     "type": "error",
     "name": "OnlyOwner",
     "inputs": []
-  },
-  {
-    "type": "constructor",
-    "inputs": [
-      {
-        "name": "_owner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_implementation",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_feeSweeper",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_gitCommit",
-        "type": "bytes20",
-        "internalType": "bytes20"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "FEE_SWEEPER",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
   }
 ]
