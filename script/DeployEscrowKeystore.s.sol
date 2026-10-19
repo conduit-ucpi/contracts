@@ -15,11 +15,10 @@ import {DeployEscrow} from "./DeployEscrow.s.sol";
 contract DeployEscrowKeystore is DeployEscrow {
     function run() external override {
         address relayerAddress = vm.envAddress("RELAYER_ADDRESS");
-        (address defaultArbiter, address feeRecipient, address feeSplitSigner, bytes20 gitCommit) =
-            _readEscrowConfig(relayerAddress);
+        (address defaultArbiter, address feeSweeper, bytes20 gitCommit) = _readEscrowConfig(relayerAddress);
 
         vm.startBroadcast();
-        deployEscrow(relayerAddress, defaultArbiter, feeRecipient, feeSplitSigner, gitCommit);
+        deployEscrow(relayerAddress, defaultArbiter, feeSweeper, gitCommit);
         vm.stopBroadcast();
 
         console.log("Escrow deployment completed successfully!");

@@ -81,7 +81,7 @@ contract OfferVaultTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         implementation = new EscrowContract(defaultArbiter, bytes20(0));
-        escrowFactory = new EscrowContractFactory(platform, address(implementation), platform, address(0), bytes20(0));
+        escrowFactory = new EscrowContractFactory(platform, address(implementation), platform, bytes20(0));
         vaultImpl = new OfferVault();
         market = new OfferVaultFactory(
             address(vaultImpl), address(implementation), FEE_BPS, MIN_OFFER_BPS, DEFAULT_DURATION, feeRecipient, owner
@@ -103,9 +103,8 @@ contract OfferVaultTest is Test {
 
         usdc.mint(buyer, AMOUNT);
         vm.prank(buyer);
-        usdc.approve(addr, AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(addr, AMOUNT);
+        escrow.checkAndActivate();
     }
 
     /// The platform deploys the vault; the LP funds it. Mirrors create-then-deposit.

@@ -74,7 +74,7 @@ contract EscrowArbiterTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         implementation = new EscrowContract(defaultArbiter, bytes20(0));
-        factory = new EscrowContractFactory(platform, address(implementation), platform, address(0), bytes20(0));
+        factory = new EscrowContractFactory(platform, address(implementation), platform, bytes20(0));
         expiry = block.timestamp + 30 days;
     }
 
@@ -96,9 +96,8 @@ contract EscrowArbiterTest is Test {
 
         usdc.mint(buyer, AMOUNT);
         vm.prank(buyer);
-        usdc.approve(addr, AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(addr, AMOUNT);
+        escrow.checkAndActivate();
     }
 
     /// The marketplace's atomic swap: seller approves, operator pulls.
@@ -420,7 +419,9 @@ contract EscrowArbiterTest is Test {
         escrow.raiseDispute();
         assertEq(escrow.nominationDeadline(), block.timestamp + escrow.NOMINATION_WINDOW());
 
-        vm.expectRevert(abi.encodeWithSelector(EscrowContract.NominationWindowStillOpen.selector, escrow.nominationDeadline()));
+        vm.expectRevert(
+            abi.encodeWithSelector(EscrowContract.NominationWindowStillOpen.selector, escrow.nominationDeadline())
+        );
         escrow.seatDefaultArbiter();
     }
 
@@ -1004,11 +1005,11 @@ contract EscrowArbiterTest is Test {
         address clone = Clones.clone(address(implementation));
 
         vm.expectRevert(EscrowContract.PartyCannotBeDefaultArbiter.selector);
-        EscrowContract(clone).initialize(address(usdc), defaultArbiter, seller, arbiter, AMOUNT, expiry, 0, platform, address(0), 0);
+        EscrowContract(clone).initialize(address(usdc), defaultArbiter, seller, arbiter, AMOUNT, expiry, 0, platform);
 
         address clone2 = Clones.clone(address(implementation));
         vm.expectRevert(EscrowContract.PartyCannotBeDefaultArbiter.selector);
-        EscrowContract(clone2).initialize(address(usdc), buyer, defaultArbiter, arbiter, AMOUNT, expiry, 0, platform, address(0), 0);
+        EscrowContract(clone2).initialize(address(usdc), buyer, defaultArbiter, arbiter, AMOUNT, expiry, 0, platform);
     }
 
     /// §3.3A1's load-bearing property: no code path may change the window after initialize.
@@ -1068,14 +1069,13 @@ contract EscrowArbiterTest is Test {
         // 1. Direct clone — no factory involved. The codehash is nonetheless genuine.
         address clone = Clones.clone(address(implementation));
         EscrowContract escrow = EscrowContract(clone);
-        escrow.initialize(address(usdc), attackerBuyer, attacker, attackerArbiter, AMOUNT, expiry, 0, platform, address(0), 0);
+        escrow.initialize(address(usdc), attackerBuyer, attacker, attackerArbiter, AMOUNT, expiry, 0, platform);
 
         // 2. Fund it with real tokens so it passes funded/undisputed/unclaimed.
         usdc.mint(attackerBuyer, AMOUNT);
         vm.prank(attackerBuyer);
-        usdc.approve(clone, AMOUNT);
-        vm.prank(attackerBuyer);
-        escrow.depositFunds();
+        usdc.transfer(clone, AMOUNT);
+        escrow.checkAndActivate();
 
         assertTrue(escrow.isFunded());
         assertEq(escrow.ARBITER(), attackerArbiter, "attacker's arbiter is seated pre-sale");

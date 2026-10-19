@@ -84,7 +84,7 @@ contract NoDecimalsSafetyNetToken {
  * by `initialize`. The planned savings are:
  *
  *   1. Drop the five "not voted" sentinels (255) written at init         ~110k
- *   2. Move FEE_RECIPIENT off the clone and onto the implementation        ~22k
+ *   2. Move FEE_SWEEPER off the clone and onto the implementation          ~22k
  *   3. Stop writing createdAt                                              ~22k  ⚠️ see below
  *   4. Pack AMOUNT / CREATOR_FEE / EXPIRY_TIMESTAMP into fewer slots     ~60-90k
  *
@@ -96,7 +96,8 @@ contract NoDecimalsSafetyNetToken {
  *     or returning 0, misclassifies every escrow. So lever 3 is only allowed if the getter
  *     still answers the creation timestamp — from an event, from a packed slot, from wherever.
  *   • chainservice reads `resolvedBuyerPercentage` and treats 255 as "never disputed"
- *     (MarketplaceReader.NEVER_DISPUTED). It reads `resolutionVotes` and `FEE_RECIPIENT` and
+ *     (MarketplaceReader.NEVER_DISPUTED). It reads `resolutionVotes` and `FEE_SWEEPER` (which
+ *     replaced `FEE_RECIPIENT` when the fee stopped being paid out at funding) and
  *     `FACTORY` too. Whatever the storage becomes, those getters keep their meaning.
  *   • The webapp derives the CREATE2 address from the terms. Packing must not touch the salt.
  *
@@ -113,7 +114,7 @@ contract GasOptimisationSafetyNetTest is Test {
 
     address internal constant DEFAULT_ARBITER = address(0xDEFA17);
     address internal owner = address(0xA11CE);
-    address internal feeRecipient = address(0xFEE);
+    address internal feeSweeper = address(0xFEE); // the factory's FEE_SWEEPER, and where it sends the fee
     address internal buyer = address(0xB0B);
     address internal seller = address(0x5E11E2);
     address internal arbiter = address(0xA3B1);
@@ -135,7 +136,8 @@ contract GasOptimisationSafetyNetTest is Test {
         string description
     );
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
-    event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
+    event FeeRetained(uint256 feeAmount, uint256 timestamp);
+    event FeesSwept(address indexed target, uint16 bps, uint256 amount, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
     event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
 
@@ -143,7 +145,7 @@ contract GasOptimisationSafetyNetTest is Test {
         vm.warp(CREATION_TIME);
         usdc = new SafetyNetToken(6);
         implementation = new EscrowContract(DEFAULT_ARBITER, bytes20(0));
-        factory = new EscrowContractFactory(owner, address(implementation), feeRecipient, address(0), bytes20(0));
+        factory = new EscrowContractFactory(owner, address(implementation), feeSweeper, bytes20(0));
         usdc.mint(buyer, AMOUNT * 1_000);
     }
 
@@ -200,8 +202,8 @@ contract GasOptimisationSafetyNetTest is Test {
         EscrowContract escrow = funded();
 
         assertEq(escrow.FACTORY(), address(factory), "FACTORY: the factory that created it");
-        assertEq(escrow.FEE_RECIPIENT(), feeRecipient, "FEE_RECIPIENT: where the fee went");
-        assertEq(escrow.FEE_RECIPIENT(), factory.FEE_RECIPIENT(), "and it is the factory's recipient");
+        assertEq(escrow.FEE_SWEEPER(), feeSweeper, "FEE_SWEEPER: who may release the fee");
+        assertEq(escrow.FEE_SWEEPER(), factory.FEE_SWEEPER(), "and it is the factory's sweeper");
         assertEq(address(escrow.tokenAddress()), address(usdc));
         assertEq(escrow.BUYER(), buyer);
         assertEq(escrow.SELLER(), seller);
@@ -289,8 +291,8 @@ contract GasOptimisationSafetyNetTest is Test {
 
         vm.warp(CREATION_TIME + 2 days);
         vm.startPrank(buyer);
-        usdc.approve(at, AMOUNT);
-        escrow.depositFunds();
+        usdc.transfer(at, AMOUNT);
+        escrow.checkAndActivate();
         vm.stopPrank();
 
         assertTrue(escrow.isFunded());
@@ -378,7 +380,8 @@ contract GasOptimisationSafetyNetTest is Test {
         assertEq(escrow.resolvedBuyerPercentage(), 100);
         assertEq(usdc.balanceOf(buyer), buyerBefore + escrowed);
         assertEq(usdc.balanceOf(seller), 0);
-        assertEq(usdc.balanceOf(feeRecipient), expectedFee6(AMOUNT), "the fee was taken at activation and stays taken");
+        assertEq(escrow.retainedFee(), expectedFee6(AMOUNT), "the fee was set aside at activation and stays set aside");
+        assertEq(usdc.balanceOf(address(escrow)), expectedFee6(AMOUNT), "it is all that is left in the escrow");
     }
 
     function test_RevotingOverwritesAndTheLatestVoteCounts() public {
@@ -527,22 +530,23 @@ contract GasOptimisationSafetyNetTest is Test {
         uint256 buyerShare = (escrowed * pct) / 100;
         assertEq(usdc.balanceOf(buyer), buyerBefore + buyerShare);
         assertEq(usdc.balanceOf(seller), escrowed - buyerShare);
-        assertEq(usdc.balanceOf(address(escrow)), 0, "nothing stranded");
+        assertEq(usdc.balanceOf(address(escrow)), expectedFee6(AMOUNT), "nothing stranded but the retained fee");
         assertEq(escrow.resolvedBuyerPercentage(), pct);
         assertTrue(escrow.isClaimed());
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // C. The fee. Where it goes and how much, pinned from outside. If FEE_RECIPIENT moves
-    //    onto the implementation, the factory's answer and the escrow's answer must still agree
-    //    and the money must still land there.
+    // C. The fee. How much, that it is set aside at activation rather than paid, and that only
+    //    the factory's FEE_SWEEPER can release it. If FEE_SWEEPER moves onto the implementation,
+    //    the factory's answer and the escrow's answer must still agree and the sweep must still
+    //    answer to that address.
     //
-    //    ⚠️ Two factories sharing one implementation but wanting different recipients is NOT a
+    //    ⚠️ Two factories sharing one implementation but wanting different sweepers is NOT a
     //       supported deployment: CI ships a fresh implementation + factory pair every release.
     //       These tests do not pin that shape, deliberately.
     // ═════════════════════════════════════════════════════════════════════════
 
-    function test_TheFeeLandsAtTheFactoryRecipientOnActivation() public {
+    function test_TheFeeIsSetAsideOnActivation() public {
         uint256 fee = expectedFee6(AMOUNT);
         bytes32 id = keccak256("fee");
         address at = predicted(AMOUNT, expiry, id);
@@ -550,17 +554,18 @@ contract GasOptimisationSafetyNetTest is Test {
         usdc.transfer(at, AMOUNT);
 
         vm.expectEmit(true, true, true, true, at);
-        emit FundsDeposited(buyer, AMOUNT - fee, block.timestamp);
+        emit FeeRetained(fee, block.timestamp);
         vm.expectEmit(true, true, true, true, at);
-        emit PlatformFeeCollected(feeRecipient, fee, block.timestamp);
+        emit FundsDeposited(buyer, AMOUNT - fee, block.timestamp);
         vm.prank(relayer);
         factory.createAndActivate(address(usdc), buyer, seller, AMOUNT, expiry, description, arbiter, id);
 
-        assertEq(usdc.balanceOf(feeRecipient), fee);
-        assertEq(usdc.balanceOf(at), AMOUNT - fee, "the escrow holds the rest");
+        assertEq(usdc.balanceOf(feeSweeper), 0, "nothing is paid out at activation");
+        assertEq(EscrowContract(at).retainedFee(), fee, "the fee is earmarked");
+        assertEq(usdc.balanceOf(at), AMOUNT, "and the escrow holds all of it");
     }
 
-    function test_TheFeeIsPaidExactlyOnceAcrossTheLifecycle() public {
+    function test_TheFeeIsReleasedExactlyOnceAcrossTheLifecycle() public {
         EscrowContract escrow = funded();
         uint256 fee = expectedFee6(AMOUNT);
 
@@ -570,15 +575,24 @@ contract GasOptimisationSafetyNetTest is Test {
         vm.prank(relayer);
         escrow.claimFunds();
 
-        assertEq(usdc.balanceOf(feeRecipient), fee, "once, at activation");
         assertEq(usdc.balanceOf(seller), AMOUNT - fee, "the seller gets the rest at maturity");
+        assertEq(usdc.balanceOf(address(escrow)), fee, "the fee waits for the sweeper");
+
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit FeesSwept(feeSweeper, 10_000, fee, block.timestamp);
+        vm.prank(feeSweeper);
+        escrow.sweepFees(feeSweeper, 10_000, address(0), 0);
+
+        assertEq(usdc.balanceOf(feeSweeper), fee, "once, when swept");
         assertEq(usdc.balanceOf(address(escrow)), 0);
-        assertEq(
-            usdc.balanceOf(seller) + usdc.balanceOf(feeRecipient), AMOUNT, "what the buyer paid, all accounted for"
-        );
+        assertEq(usdc.balanceOf(seller) + usdc.balanceOf(feeSweeper), AMOUNT, "what the buyer paid, all accounted for");
+
+        vm.prank(feeSweeper);
+        vm.expectRevert(EscrowContract.NoFeesToSweep.selector);
+        escrow.sweepFees(feeSweeper, 10_000, address(0), 0);
     }
 
-    function test_AnInstantTransferPaysFeeAndSellerInTheSameTransaction() public {
+    function test_AnInstantTransferPaysTheSellerAndRetainsTheFeeInTheSameTransaction() public {
         uint256 fee = expectedFee6(AMOUNT);
         bytes32 id = keccak256("instant");
         address at = factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, 0, arbiter, id);
@@ -588,9 +602,10 @@ contract GasOptimisationSafetyNetTest is Test {
         vm.prank(relayer);
         factory.createAndActivate(address(usdc), buyer, seller, AMOUNT, 0, description, arbiter, id);
 
-        assertEq(usdc.balanceOf(feeRecipient), fee);
         assertEq(usdc.balanceOf(seller), AMOUNT - fee);
-        assertEq(usdc.balanceOf(at), 0);
+        assertEq(usdc.balanceOf(at), fee, "the fee stays behind, earmarked");
+        assertEq(EscrowContract(at).retainedFee(), fee);
+        assertEq(usdc.balanceOf(feeSweeper), 0);
         assertTrue(EscrowContract(at).isClaimed());
         assertFalse(EscrowContract(at).canDispute());
     }
@@ -637,7 +652,7 @@ contract GasOptimisationSafetyNetTest is Test {
         factory.createAndActivate(address(dai), buyer, seller, 1_000e18, expiry, description, arbiter, id);
 
         assertEq(EscrowContract(at).CREATOR_FEE(), 10e18, "1% in the token's own decimals");
-        assertEq(dai.balanceOf(feeRecipient), 10e18);
+        assertEq(EscrowContract(at).retainedFee(), 10e18);
 
         bytes32 id2 = keccak256("dai-min");
         address at2 = factory.getContractAddress(address(dai), buyer, seller, 25e18, expiry, arbiter, id2);
@@ -661,11 +676,11 @@ contract GasOptimisationSafetyNetTest is Test {
         assertEq(EscrowContract(at).CREATOR_FEE(), 10e18);
     }
 
-    function test_AnEscrowPaysTheRecipientOfTheFactoryThatMadeIt() public {
-        address otherRecipient = address(0xFEE2);
+    function test_AnEscrowAnswersToTheSweeperOfTheFactoryThatMadeIt() public {
+        address otherSweeper = address(0xFEE2);
         EscrowContract otherImplementation = new EscrowContract(DEFAULT_ARBITER, bytes20(0));
         EscrowContractFactory otherFactory =
-            new EscrowContractFactory(owner, address(otherImplementation), otherRecipient, address(0), bytes20(0));
+            new EscrowContractFactory(owner, address(otherImplementation), otherSweeper, bytes20(0));
 
         bytes32 id = keccak256("other");
         address at = otherFactory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiry, arbiter, id);
@@ -674,9 +689,16 @@ contract GasOptimisationSafetyNetTest is Test {
         vm.prank(relayer);
         otherFactory.createAndActivate(address(usdc), buyer, seller, AMOUNT, expiry, description, arbiter, id);
 
-        assertEq(EscrowContract(at).FEE_RECIPIENT(), otherRecipient);
-        assertEq(usdc.balanceOf(otherRecipient), expectedFee6(AMOUNT));
-        assertEq(usdc.balanceOf(feeRecipient), 0, "the first factory's recipient got nothing");
+        assertEq(EscrowContract(at).FEE_SWEEPER(), otherSweeper);
+
+        vm.prank(feeSweeper);
+        vm.expectRevert(EscrowContract.OnlyFeeSweeper.selector);
+        EscrowContract(at).sweepFees(feeSweeper, 10_000, address(0), 0);
+
+        vm.prank(otherSweeper);
+        EscrowContract(at).sweepFees(otherSweeper, 10_000, address(0), 0);
+        assertEq(usdc.balanceOf(otherSweeper), expectedFee6(AMOUNT));
+        assertEq(usdc.balanceOf(feeSweeper), 0, "the first factory's sweeper got nothing");
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -710,7 +732,7 @@ contract GasOptimisationSafetyNetTest is Test {
         assertEq(escrow.AMOUNT(), amount);
         assertEq(escrow.CREATOR_FEE(), fee);
         assertEq(escrow.payoutAmount(), amount - fee);
-        assertEq(usdc.balanceOf(feeRecipient), fee);
+        assertEq(escrow.retainedFee(), fee);
 
         vm.prank(buyer);
         escrow.raiseDispute();
@@ -762,8 +784,10 @@ contract GasOptimisationSafetyNetTest is Test {
         vm.warp(expiryAt);
         vm.prank(relayer);
         escrow.claimFunds();
+        vm.prank(feeSweeper);
+        escrow.sweepFees(feeSweeper, 10_000, address(0), 0);
 
-        assertEq(usdc.balanceOf(seller) + usdc.balanceOf(feeRecipient), amount);
+        assertEq(usdc.balanceOf(seller) + usdc.balanceOf(feeSweeper), amount);
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
 
@@ -809,14 +833,14 @@ contract GasOptimisationSafetyNetTest is Test {
         // The constructor marks the implementation as already initialised; that guard fires first.
         // Whichever guard a rewrite keeps, the implementation must refuse — pinned by the revert.
         vm.expectRevert(EscrowContract.AlreadyInitialized.selector);
-        implementation.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient, address(0), 0);
+        implementation.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeSweeper);
     }
 
     function test_ACloneCanBeInitialisedOnlyOnce() public {
         EscrowContract escrow = funded();
         vm.prank(address(factory));
         vm.expectRevert(EscrowContract.AlreadyInitialized.selector);
-        escrow.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient, address(0), 0);
+        escrow.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeSweeper);
     }
 
     function test_ACloneRecordsWhoeverInitialisedItAsItsFactory() public {
@@ -824,7 +848,7 @@ contract GasOptimisationSafetyNetTest is Test {
         // factory is the only thing that should. Pinned so a slot removal does not lose the getter.
         address raw = Clones.clone(address(implementation));
         vm.prank(stranger);
-        EscrowContract(raw).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeRecipient, address(0), 0);
+        EscrowContract(raw).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeSweeper);
         assertEq(EscrowContract(raw).FACTORY(), stranger);
     }
 
@@ -848,16 +872,17 @@ contract GasOptimisationSafetyNetTest is Test {
         factory.createAndActivate(address(usdc), buyer, seller, AMOUNT, expiry, description, arbiter, id);
 
         uint256 fee = expectedFee6(AMOUNT);
-        assertEq(usdc.balanceOf(at), AMOUNT + 5e6 - fee);
+        assertEq(usdc.balanceOf(at), AMOUNT + 5e6, "nothing leaves at activation");
 
         vm.warp(expiry);
         vm.prank(relayer);
         EscrowContract(at).claimFunds();
         // Pinned as observed today: the claim pays exactly the escrowed amount and the
-        // overpayment is left in the contract. If the gas work changes this, it is a
-        // behaviour change to decide on its own, not a side effect to discover.
+        // overpayment is left in the contract, beside the retained fee. If the gas work
+        // changes this, it is a behaviour change to decide on its own, not a side effect
+        // to discover.
         assertEq(usdc.balanceOf(seller), AMOUNT - fee);
-        assertEq(usdc.balanceOf(at), 5e6);
+        assertEq(usdc.balanceOf(at), 5e6 + fee);
     }
 
     // ═════════════════════════════════════════════════════════════════════════

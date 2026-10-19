@@ -145,9 +145,9 @@ The marketplace deploys from `deploy-marketplace.yml` on `offervault-v*` /
 `offervault-test*` tags.
 
 Legacy env: `DEFAULT_ARBITER_ADDRESS` and `GIT_COMMIT` are required;
-`FEE_RECIPIENT_ADDRESS` and `FEE_SPLIT_SIGNER_ADDRESS` default to the owner
-(relayer) when unset — set the signer explicitly, since it is immutable and every
-signature it issues stays valid for the factory's lifetime.
+`FEE_SWEEPER_ADDRESS` defaults to the owner (relayer) when unset — set it explicitly,
+since it is immutable, stamped into every escrow the factory creates, and is the only
+key that can release escrow fees (`sweepFees`) to targets of its own choosing.
 
 Read the commit back from any escrow, factory or implementation with
 `cast call <address> "GIT_COMMIT()(bytes20)"`.

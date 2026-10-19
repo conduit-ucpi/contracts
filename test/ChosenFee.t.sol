@@ -30,7 +30,7 @@ contract ChosenFeeTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
-        factory = new EscrowContractFactory(owner, address(implementation), address(0), address(0), bytes20(0));
+        factory = new EscrowContractFactory(owner, address(implementation), address(0), bytes20(0));
         expiry = block.timestamp + 7 days;
     }
 
@@ -150,7 +150,10 @@ contract ChosenFeeTest is Test {
         );
 
         assertEq(deployed, predicted);
-        assertEq(usdc.balanceOf(owner) - before, 50 * 10 ** 6, "the chosen fee reached FEE_RECIPIENT");
+        assertEq(EscrowContract(deployed).retainedFee(), 50 * 10 ** 6, "the chosen fee is set aside");
+        vm.prank(owner); // the factory's FEE_SWEEPER, by default
+        EscrowContract(deployed).sweepFees(owner, 10_000, address(0), 0);
+        assertEq(usdc.balanceOf(owner) - before, 50 * 10 ** 6, "and the sweeper releases it in full");
         assertEq(usdc.balanceOf(deployed), AMOUNT - 50 * 10 ** 6, "the rest is escrowed");
     }
 }

@@ -4,8 +4,6 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
-import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {EscrowContract} from "./EscrowContract.sol";
 
 /**
@@ -31,24 +29,24 @@ import {EscrowContract} from "./EscrowContract.sol";
  *
  * The factory simply creates secure escrow contracts - it has no power over them afterward.
  *
- * 🤝 PARTNER FEE SPLITS:
- * An escrow may route a share of the platform fee to a revenue-share partner. The share
- * comes OUT OF the fee - the buyer pays and the seller nets exactly what they would
- * without it. Creation is permissionless, so the split cannot simply be a parameter:
- * anyone could name themselves partner on an escrow from THIS factory and skim the
- * platform's fee. Every split therefore needs a signature from FEE_SPLIT_SIGNER over the
- * complete terms (see _validateSplit).
- *
  * 💳 THE FEE:
  * The factory's rule - max(1% of amount, 0.30 of one token unit), nothing on dust - is
  * public as quoteCreatorFee, so nobody off-chain keeps a copy of it. Every create function
  * charges exactly that, except the ...WithFee variants, where the caller names a fee at or
  * above the rule (and below the amount itself). A chosen fee is committed
- * to in the salt, so an escrow quoted at one fee cannot be occupied at another. It combines
- * with a partner split (...WithSplitAndFee), where the signer's signature covers it too.
+ * to in the salt, so an escrow quoted at one fee cannot be occupied at another.
+ *
+ * 💰 WHERE THE FEE GOES:
+ * Nowhere, at first. The escrow SETS IT ASIDE when it is funded and holds it, untouched by
+ * every payout, until FEE_SWEEPER releases it with EscrowContract.sweepFees - one call per
+ * escrow, naming up to two targets and a basis-point split between them. FEE_SWEEPER is
+ * fixed here, once, and stamped into every clone at creation: the factory decides WHO may
+ * release fees, and the sweeper decides WHERE each fee goes when it does. Any revenue
+ * share with a partner is therefore expressed at sweep time, in the sweeper's call, not
+ * baked into the escrow.
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
-contract EscrowContractFactory is EIP712 {
+contract EscrowContractFactory {
     // Custom errors (saves gas compared to require strings)
     error InvalidOwnerAddress();
     error InvalidImplementationAddress();
@@ -63,36 +61,13 @@ contract EscrowContractFactory is EIP712 {
     error InvalidExpiryTimestamp();
     error AmountTooSmallForMinFee();
     error CreatorFeeMustBeLessThanAmount();
-    error InvalidPartnerAddress();
-    error InvalidPartnerBps();
-    error InvalidFeeSplitSignature();
     error CreatorFeeBelowMinimum(uint256 chosen, uint256 minimum);
 
     // 🔒 IMMUTABLE FACTORY SETTINGS: These CANNOT be changed after deployment
     address public immutable OWNER; // Platform address - can create contracts but NOT access money
     address public immutable IMPLEMENTATION; // Template contract - ensures all escrows have same security
-    address public immutable FEE_RECIPIENT; // Address that receives platform fees (defaults to OWNER if not set)
-    address public immutable FEE_SPLIT_SIGNER; // Sole authority for partner fee splits (defaults to OWNER if not set)
+    address public immutable FEE_SWEEPER; // The only address that may release escrows' fees via sweepFees (defaults to OWNER if not set)
     bytes20 public immutable GIT_COMMIT; // Commit this factory was built from, stamped at deploy
-
-    /// @notice Partner shares are in basis points OF THE FEE, not of the amount:
-    ///         5_000 = half the platform fee. 10_000 hands the partner the whole fee.
-    uint16 public constant MAX_PARTNER_BPS = 10_000;
-
-    /// @notice The EIP-712 struct FEE_SPLIT_SIGNER signs. It covers EVERY term, not just
-    ///         the split, so a signature cannot be lifted onto a different escrow - the fee
-    ///         included (0 = the factory's own, quoteCreatorFee). The partner's share is a
-    ///         fraction of the fee, so a signature that did not fix the fee would let anyone
-    ///         re-price a signed split, and with it the partner's payout.
-    bytes32 public constant FEE_SPLIT_TYPEHASH = keccak256(
-        "FeeSplitTerms(address tokenAddress,address buyer,address seller,uint256 amount,uint256 expiryTimestamp,address arbiter,bytes32 externalId,address partner,uint16 partnerBps,uint256 creatorFee)"
-    );
-
-    /// @notice A partner's share of the platform fee. partnerBps == 0 means no split.
-    struct FeeSplit {
-        address partner;
-        uint16 partnerBps;
-    }
 
     // 📢 PUBLIC EVENT: Records every escrow contract creation (permanent blockchain record)
     // Description stored here instead of contract storage to save ~20k gas per deployment
@@ -105,32 +80,23 @@ contract EscrowContractFactory is EIP712 {
         string description
     );
 
-    event FeeSplitApplied(
-        address indexed contractAddress, address indexed partner, uint16 partnerBps, uint256 partnerFee
-    );
-
     /**
-     * @param _feeSplitSigner Signs partner fee splits. Zero defaults to OWNER, but OWNER is
-     *        the relayer's hot key - a dedicated key (or an ERC-1271 multisig) keeps a relayer
-     *        compromise from also being a fee-diversion compromise. It is immutable: every
-     *        signature it has ever issued stays valid, so rotating it means a new factory.
+     * @param _feeSweeper The one address every escrow from this factory lets call sweepFees.
+     *        Zero defaults to OWNER, but OWNER is the relayer's hot key - a dedicated key (or
+     *        a multisig) keeps a relayer compromise from also being a fee-diversion
+     *        compromise. It can direct fees anywhere, so treat it as a treasury key. It is
+     *        immutable and stamped into every clone: rotating it means a new factory, and
+     *        escrows already created keep the sweeper they were born with.
      * @param _gitCommit The commit the deployed bytecode was built from.
      */
-    constructor(
-        address _owner,
-        address _implementation,
-        address _feeRecipient,
-        address _feeSplitSigner,
-        bytes20 _gitCommit
-    ) EIP712("EscrowContractFactory", "1") {
+    constructor(address _owner, address _implementation, address _feeSweeper, bytes20 _gitCommit) {
         if (_owner == address(0)) revert InvalidOwnerAddress();
         if (_implementation == address(0)) revert InvalidImplementationAddress();
 
         OWNER = _owner;
         IMPLEMENTATION = _implementation;
-        // Default to OWNER if feeRecipient not specified
-        FEE_RECIPIENT = _feeRecipient == address(0) ? _owner : _feeRecipient;
-        FEE_SPLIT_SIGNER = _feeSplitSigner == address(0) ? _owner : _feeSplitSigner;
+        // Default to OWNER if feeSweeper not specified
+        FEE_SWEEPER = _feeSweeper == address(0) ? _owner : _feeSweeper;
         GIT_COMMIT = _gitCommit;
     }
 
@@ -176,10 +142,7 @@ contract EscrowContractFactory is EIP712 {
         bytes32 externalId
     ) external returns (address) {
         return _create(
-            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, address(0), 0, 0),
-            description,
-            true,
-            ""
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, 0), description, true
         );
     }
 
@@ -188,8 +151,8 @@ contract EscrowContractFactory is EIP712 {
      *
      * As createEscrowContract, but charging `creatorFee` rather than the factory's rule.
      * Open to anyone: the fee can only be RAISED (it must be at least quoteCreatorFee, and
-     * less than the amount), and every unit of it goes to FEE_RECIPIENT exactly as the
-     * default fee does. There is no cap beyond that: the buyer sees the fee before funding.
+     * less than the amount), and every unit of it is set aside for FEE_SWEEPER exactly as
+     * the default fee is. There is no cap beyond that: the buyer sees the fee before funding.
      * The fee is in the salt, so this lands at a different address from the same terms at
      * the default fee - see getContractAddressWithFee.
      */
@@ -205,77 +168,9 @@ contract EscrowContractFactory is EIP712 {
         uint256 creatorFee
     ) external returns (address) {
         return _create(
-            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, address(0), 0, creatorFee),
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, creatorFee),
             description,
-            true,
-            ""
-        );
-    }
-
-    /**
-     * 🏭 CREATE AN ESCROW WHOSE FEE IS SHARED WITH A PARTNER
-     *
-     * As createEscrowContract, plus a split of the platform fee authorised by
-     * FEE_SPLIT_SIGNER. `signature` is the signer's EIP-712 signature over FeeSplitTerms:
-     * every argument here except `description`. Anyone may submit it; nobody but the signer
-     * can produce it.
-     */
-    function createEscrowContractWithSplit(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        string memory description,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split,
-        bytes calldata signature
-    ) external returns (address) {
-        return _create(
-            Terms(
-                tokenAddress,
-                buyer,
-                seller,
-                amount,
-                expiryTimestamp,
-                arbiter,
-                externalId,
-                split.partner,
-                split.partnerBps,
-                0
-            ),
-            description,
-            true,
-            signature
-        );
-    }
-
-    /**
-     * 🏭 CREATE A SPLIT ESCROW AT A CHOSEN FEE
-     *
-     * createEscrowContractWithSplit and createEscrowContractWithFee together. The signature
-     * must cover `creatorFee` too (feeSplitDigest takes it), so a split signed at one fee
-     * cannot be used at another. The partner's share is partnerBps of the chosen fee.
-     */
-    function createEscrowContractWithSplitAndFee(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        string memory description,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split,
-        uint256 creatorFee,
-        bytes calldata signature
-    ) external returns (address) {
-        return _create(
-            _splitTerms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, split, creatorFee),
-            description,
-            true,
-            signature
+            true
         );
     }
 
@@ -324,34 +219,7 @@ contract EscrowContractFactory is EIP712 {
         bytes32 externalId
     ) external returns (address clone) {
         clone = _create(
-            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, address(0), 0, 0),
-            description,
-            false,
-            ""
-        );
-        EscrowContract(clone).checkAndActivate();
-    }
-
-    /// 🏭 CREATE AND ACTIVATE, WITH A PARTNER SPLIT AT A CHOSEN FEE — the late-funding path for
-    /// createEscrowContractWithSplitAndFee. Permissionless; the signature authorises split and fee.
-    function createAndActivateWithSplitAndFee(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        string memory description,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split,
-        uint256 creatorFee,
-        bytes calldata signature
-    ) external returns (address clone) {
-        clone = _create(
-            _splitTerms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, split, creatorFee),
-            description,
-            false,
-            signature
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, 0), description, false
         );
         EscrowContract(clone).checkAndActivate();
     }
@@ -369,49 +237,9 @@ contract EscrowContractFactory is EIP712 {
         uint256 creatorFee
     ) external returns (address clone) {
         clone = _create(
-            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, address(0), 0, creatorFee),
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, creatorFee),
             description,
-            false,
-            ""
-        );
-        EscrowContract(clone).checkAndActivate();
-    }
-
-    /**
-     * 🏭 CREATE AND ACTIVATE, WITH A PARTNER SPLIT — the late-funding path for split escrows.
-     *
-     * Still permissionless: the signature authorises the split, not the caller. Whoever
-     * rescues a late-funded split escrow needs the signature the address was quoted with,
-     * so it must be kept alongside the pending contract for as long as funds could arrive.
-     */
-    function createAndActivateWithSplit(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        string memory description,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split,
-        bytes calldata signature
-    ) external returns (address clone) {
-        clone = _create(
-            Terms(
-                tokenAddress,
-                buyer,
-                seller,
-                amount,
-                expiryTimestamp,
-                arbiter,
-                externalId,
-                split.partner,
-                split.partnerBps,
-                0
-            ),
-            description,
-            false,
-            signature
+            false
         );
         EscrowContract(clone).checkAndActivate();
     }
@@ -433,7 +261,7 @@ contract EscrowContractFactory is EIP712 {
     ) external view returns (address) {
         return Clones.predictDeterministicAddress(
             IMPLEMENTATION,
-            _salt(Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, address(0), 0, 0)),
+            _salt(Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, 0)),
             address(this)
         );
     }
@@ -451,7 +279,7 @@ contract EscrowContractFactory is EIP712 {
     ) external view returns (address) {
         return Clones.predictDeterministicAddress(
             IMPLEMENTATION,
-            _salt(Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, address(0), 0, creatorFee)),
+            _salt(Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, creatorFee)),
             address(this)
         );
     }
@@ -464,107 +292,6 @@ contract EscrowContractFactory is EIP712 {
      */
     function quoteCreatorFee(address tokenAddress, uint256 amount) external view returns (uint256) {
         return _calculateCreatorFee(tokenAddress, amount);
-    }
-
-    /// The address of a split escrow at the factory's own fee. With partnerBps == 0 this
-    /// equals getContractAddress.
-    function getContractAddressWithSplit(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split
-    ) external view returns (address) {
-        return Clones.predictDeterministicAddress(
-            IMPLEMENTATION,
-            _salt(
-                Terms(
-                    tokenAddress,
-                    buyer,
-                    seller,
-                    amount,
-                    expiryTimestamp,
-                    arbiter,
-                    externalId,
-                    split.partner,
-                    split.partnerBps,
-                    0
-                )
-            ),
-            address(this)
-        );
-    }
-
-    /// The address of a split escrow at a chosen fee (createEscrowContractWithSplitAndFee).
-    function getContractAddressWithSplitAndFee(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split,
-        uint256 creatorFee
-    ) external view returns (address) {
-        return Clones.predictDeterministicAddress(
-            IMPLEMENTATION,
-            _salt(_splitTerms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, split, creatorFee)),
-            address(this)
-        );
-    }
-
-    /**
-     * The EIP-712 digest FEE_SPLIT_SIGNER signs for these terms. Exposed so signing code
-     * can check its encoding against the chain before it hands out an address.
-     *
-     * `creatorFee` is 0 for a split at the factory's own fee (createEscrowContractWithSplit
-     * and createAndActivateWithSplit), or the chosen fee for the ...WithSplitAndFee variants.
-     */
-    function feeSplitDigest(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split,
-        uint256 creatorFee
-    ) external view returns (bytes32) {
-        return _feeSplitDigest(
-            _splitTerms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, split, creatorFee)
-        );
-    }
-
-    /// Terms for a split escrow: built in one place for every split entry point, which also
-    /// keeps their stacks shallow.
-    function _splitTerms(
-        address tokenAddress,
-        address buyer,
-        address seller,
-        uint256 amount,
-        uint256 expiryTimestamp,
-        address arbiter,
-        bytes32 externalId,
-        FeeSplit calldata split,
-        uint256 creatorFee
-    ) internal pure returns (Terms memory) {
-        return Terms(
-            tokenAddress,
-            buyer,
-            seller,
-            amount,
-            expiryTimestamp,
-            arbiter,
-            externalId,
-            split.partner,
-            split.partnerBps,
-            creatorFee
-        );
     }
 
     /**
@@ -583,20 +310,13 @@ contract EscrowContractFactory is EIP712 {
      *
      * ⚠️ If a parameter is ever added to initialize(), it MUST be added here too.
      *
-     * The partner split is: partner and partnerBps are appended when partnerBps > 0, so a
-     * split lands at a different address from the same terms without one, and nobody can
-     * strip (or swap) the split off an address that has been quoted and funded. With no
-     * split the encoding is byte-for-byte the pre-split one - every existing address, the
-     * committed vector and every off-chain predictor stay correct unchanged.
-     *
-     * A chosen fee is too (createEscrowContractWithFee): appended when non-zero, so the same
+     * A chosen fee is (createEscrowContractWithFee): appended when non-zero, so the same
      * terms at a chosen fee land at a different address from the default, and nobody can
      * pre-deploy a quoted address at a different fee. At the default fee the encoding is
      * unchanged, so every existing address stays where it was.
      *
-     * The signature is NOT in the salt. It authorises the split; the salt commits to it.
-     * FEE_RECIPIENT is not in it either: it is a factory immutable, already pinned by the
-     * factory address that CREATE2 hashes in.
+     * FEE_SWEEPER is NOT in it: it is a factory immutable, already pinned by the factory
+     * address that CREATE2 hashes in.
      *
      * `description` is deliberately absent: it is advisory metadata, emitted in the event and
      * never stored, and it feeds no permission or fund-flow decision. Keeping it out also
@@ -609,24 +329,8 @@ contract EscrowContractFactory is EIP712 {
      * terms occupy different addresses.
      */
     function _salt(Terms memory t) internal pure returns (bytes32) {
-        // A chosen fee is appended (32 bytes), as a split is (22 bytes), and both together
-        // (54 bytes), so the four encodings never share a length and cannot collide.
-        if (t.creatorFee != 0 && t.partnerBps != 0) {
-            return keccak256(
-                abi.encodePacked(
-                    t.tokenAddress,
-                    t.buyer,
-                    t.seller,
-                    t.amount,
-                    t.expiryTimestamp,
-                    t.arbiter,
-                    t.externalId,
-                    t.partner,
-                    t.partnerBps,
-                    t.creatorFee
-                )
-            );
-        }
+        // A chosen fee is appended (32 bytes), so the two encodings never share a length
+        // and cannot collide.
         if (t.creatorFee != 0) {
             return keccak256(
                 abi.encodePacked(
@@ -641,76 +345,9 @@ contract EscrowContractFactory is EIP712 {
                 )
             );
         }
-        if (t.partnerBps == 0) {
-            return keccak256(
-                abi.encodePacked(
-                    t.tokenAddress, t.buyer, t.seller, t.amount, t.expiryTimestamp, t.arbiter, t.externalId
-                )
-            );
-        }
         return keccak256(
-            abi.encodePacked(
-                t.tokenAddress,
-                t.buyer,
-                t.seller,
-                t.amount,
-                t.expiryTimestamp,
-                t.arbiter,
-                t.externalId,
-                t.partner,
-                t.partnerBps
-            )
+            abi.encodePacked(t.tokenAddress, t.buyer, t.seller, t.amount, t.expiryTimestamp, t.arbiter, t.externalId)
         );
-    }
-
-    function _feeSplitDigest(Terms memory t) internal view returns (bytes32) {
-        return _hashTypedDataV4(
-            keccak256(
-                abi.encode(
-                    FEE_SPLIT_TYPEHASH,
-                    t.tokenAddress,
-                    t.buyer,
-                    t.seller,
-                    t.amount,
-                    t.expiryTimestamp,
-                    t.arbiter,
-                    t.externalId,
-                    t.partner,
-                    t.partnerBps,
-                    t.creatorFee
-                )
-            )
-        );
-    }
-
-    /**
-     * 🔐 THE SPLIT GATE.
-     *
-     * Creation is permissionless and addresses are counterfactual, so the question is never
-     * "who is calling" - a late-funded escrow must be deployable by anyone. It is "did the
-     * signer approve exactly these terms". The EIP-712 domain binds the chain and this
-     * factory, and the struct covers every term, so a signature is good for one address
-     * only. Replaying it just rebuilds that address, which CREATE2 allows once.
-     *
-     * No expiry and no nonce, deliberately: funds may reach a quoted address at any time,
-     * and the escrow must stay deployable on top of them. The price is that a signature
-     * cannot be revoked. A leaked signer key can divert platform FEES on escrows its holder
-     * gets buyers to fund - never escrowed funds, which only ever reach buyer or seller.
-     */
-    function _validateSplit(Terms memory t, bytes memory signature) internal view {
-        if (t.partnerBps == 0) {
-            // No split. A partner without a share would be ignored by the salt, so reject it
-            // rather than let a caller believe it took effect.
-            if (t.partner != address(0)) revert InvalidPartnerBps();
-            return;
-        }
-        if (t.partnerBps > MAX_PARTNER_BPS) revert InvalidPartnerBps();
-        if (t.partner == address(0) || t.partner == t.buyer || t.partner == t.seller || t.partner == FEE_RECIPIENT) {
-            revert InvalidPartnerAddress();
-        }
-        if (!SignatureChecker.isValidSignatureNow(FEE_SPLIT_SIGNER, _feeSplitDigest(t), signature)) {
-            revert InvalidFeeSplitSignature();
-        }
     }
 
     function _validate(Terms memory t, bool requireFutureExpiry) internal view {
@@ -746,8 +383,6 @@ contract EscrowContractFactory is EIP712 {
         uint256 expiryTimestamp;
         address arbiter;
         bytes32 externalId;
-        address partner;
-        uint16 partnerBps;
         /// 0 = the factory's rule (quoteCreatorFee); otherwise the fee the caller chose.
         uint256 creatorFee;
     }
@@ -755,8 +390,7 @@ contract EscrowContractFactory is EIP712 {
     /**
      * A chosen fee: never below the factory's rule, and less than the amount (the escrow
      * refuses one that would leave nothing to escrow; said here, before anything is cloned).
-     * No upper cap otherwise. On a split it is also covered by the signer's signature
-     * (_feeSplitDigest), so a signed split cannot be re-priced.
+     * No upper cap otherwise.
      */
     function _validateFee(Terms memory t) internal view {
         if (t.creatorFee == 0) return;
@@ -765,34 +399,17 @@ contract EscrowContractFactory is EIP712 {
         if (t.creatorFee >= t.amount) revert CreatorFeeMustBeLessThanAmount();
     }
 
-    function _create(Terms memory t, string memory description, bool requireFutureExpiry, bytes memory signature)
+    function _create(Terms memory t, string memory description, bool requireFutureExpiry)
         internal
         returns (address clone)
     {
         _validate(t, requireFutureExpiry);
-        _validateSplit(t, signature);
         _validateFee(t);
 
         // 🏭 Create from the secure template, at the address the salt determines
         clone = Clones.cloneDeterministic(IMPLEMENTATION, _salt(t));
 
-        uint256 partnerFee = _initialize(clone, t);
-
-        // 📝 Record this contract creation permanently on blockchain
-        emit ContractCreated(clone, t.buyer, t.seller, t.amount, t.expiryTimestamp, description);
-        if (t.partnerBps > 0) {
-            emit FeeSplitApplied(clone, t.partner, t.partnerBps, partnerFee);
-        }
-
-        // ✅ SECURITY CONFIRMATION: The new contract now has all the security guarantees
-        //    described in EscrowContract.sol. Factory has no further control over it.
-    }
-
-    /// Split out of _create only because ten initialize arguments overflow its stack.
-    function _initialize(address clone, Terms memory t) internal returns (uint256 partnerFee) {
         uint256 creatorFee = t.creatorFee != 0 ? t.creatorFee : _calculateCreatorFee(t.tokenAddress, t.amount);
-        // Rounds down: any dust stays with the platform.
-        partnerFee = (creatorFee * t.partnerBps) / MAX_PARTNER_BPS;
 
         // 🔒 Initialize with IMMUTABLE security settings
         // Note: description is NOT passed to initialize - only emitted in event
@@ -804,11 +421,15 @@ contract EscrowContractFactory is EIP712 {
                 t.arbiter, // Arbiter - can vote on disputes but NOT take money
                 t.amount,
                 t.expiryTimestamp,
-                creatorFee, // Platform fee (transparent and upfront)
-                FEE_RECIPIENT, // Address that receives the platform fee
-                t.partner, // Partner sharing the fee (address(0) = none)
-                partnerFee // Partner's portion, carved out of creatorFee
+                creatorFee, // Platform fee (transparent and upfront); set aside at funding
+                FEE_SWEEPER // The only address that can release that fee (sweepFees)
             );
+
+        // 📝 Record this contract creation permanently on blockchain
+        emit ContractCreated(clone, t.buyer, t.seller, t.amount, t.expiryTimestamp, description);
+
+        // ✅ SECURITY CONFIRMATION: The new contract now has all the security guarantees
+        //    described in EscrowContract.sol. Factory has no further control over it.
     }
 
     /**

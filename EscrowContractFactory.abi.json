@@ -1,75 +1,5 @@
 [
   {
-    "type": "constructor",
-    "inputs": [
-      {
-        "name": "_owner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_implementation",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_feeRecipient",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_feeSplitSigner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_gitCommit",
-        "type": "bytes20",
-        "internalType": "bytes20"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "FEE_RECIPIENT",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "FEE_SPLIT_SIGNER",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "FEE_SPLIT_TYPEHASH",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
     "type": "function",
     "name": "GIT_COMMIT",
     "inputs": [],
@@ -91,19 +21,6 @@
         "name": "",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "MAX_PARTNER_BPS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint16",
-        "internalType": "uint16"
       }
     ],
     "stateMutability": "view"
@@ -236,163 +153,6 @@
   },
   {
     "type": "function",
-    "name": "createAndActivateWithSplit",
-    "inputs": [
-      {
-        "name": "tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "description",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "externalId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "split",
-        "type": "tuple",
-        "internalType": "struct EscrowContractFactory.FeeSplit",
-        "components": [
-          {
-            "name": "partner",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "partnerBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          }
-        ]
-      },
-      {
-        "name": "signature",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "clone",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "createAndActivateWithSplitAndFee",
-    "inputs": [
-      {
-        "name": "tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "description",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "externalId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "split",
-        "type": "tuple",
-        "internalType": "struct EscrowContractFactory.FeeSplit",
-        "components": [
-          {
-            "name": "partner",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "partnerBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          }
-        ]
-      },
-      {
-        "name": "creatorFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "signature",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "clone",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "createEscrowContract",
     "inputs": [
       {
@@ -506,277 +266,6 @@
   },
   {
     "type": "function",
-    "name": "createEscrowContractWithSplit",
-    "inputs": [
-      {
-        "name": "tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "description",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "externalId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "split",
-        "type": "tuple",
-        "internalType": "struct EscrowContractFactory.FeeSplit",
-        "components": [
-          {
-            "name": "partner",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "partnerBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          }
-        ]
-      },
-      {
-        "name": "signature",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "createEscrowContractWithSplitAndFee",
-    "inputs": [
-      {
-        "name": "tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "description",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "externalId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "split",
-        "type": "tuple",
-        "internalType": "struct EscrowContractFactory.FeeSplit",
-        "components": [
-          {
-            "name": "partner",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "partnerBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          }
-        ]
-      },
-      {
-        "name": "creatorFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "signature",
-        "type": "bytes",
-        "internalType": "bytes"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "eip712Domain",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "fields",
-        "type": "bytes1",
-        "internalType": "bytes1"
-      },
-      {
-        "name": "name",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "version",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "chainId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "verifyingContract",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "salt",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "extensions",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "feeSplitDigest",
-    "inputs": [
-      {
-        "name": "tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "externalId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "split",
-        "type": "tuple",
-        "internalType": "struct EscrowContractFactory.FeeSplit",
-        "components": [
-          {
-            "name": "partner",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "partnerBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          }
-        ]
-      },
-      {
-        "name": "creatorFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "getContractAddress",
     "inputs": [
       {
@@ -880,143 +369,6 @@
   },
   {
     "type": "function",
-    "name": "getContractAddressWithSplit",
-    "inputs": [
-      {
-        "name": "tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "externalId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "split",
-        "type": "tuple",
-        "internalType": "struct EscrowContractFactory.FeeSplit",
-        "components": [
-          {
-            "name": "partner",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "partnerBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          }
-        ]
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getContractAddressWithSplitAndFee",
-    "inputs": [
-      {
-        "name": "tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "externalId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "split",
-        "type": "tuple",
-        "internalType": "struct EscrowContractFactory.FeeSplit",
-        "components": [
-          {
-            "name": "partner",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "partnerBps",
-            "type": "uint16",
-            "internalType": "uint16"
-          }
-        ]
-      },
-      {
-        "name": "creatorFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "quoteCreatorFee",
     "inputs": [
       {
@@ -1078,43 +430,6 @@
         "type": "string",
         "indexed": false,
         "internalType": "string"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "EIP712DomainChanged",
-    "inputs": [],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "FeeSplitApplied",
-    "inputs": [
-      {
-        "name": "contractAddress",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "partner",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "partnerBps",
-        "type": "uint16",
-        "indexed": false,
-        "internalType": "uint16"
-      },
-      {
-        "name": "partnerFee",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -1198,11 +513,6 @@
   },
   {
     "type": "error",
-    "name": "InvalidFeeSplitSignature",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "InvalidImplementationAddress",
     "inputs": []
   },
@@ -1213,22 +523,7 @@
   },
   {
     "type": "error",
-    "name": "InvalidPartnerAddress",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InvalidPartnerBps",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "InvalidSellerAddress",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InvalidShortString",
     "inputs": []
   },
   {
@@ -1242,14 +537,42 @@
     "inputs": []
   },
   {
-    "type": "error",
-    "name": "StringTooLong",
+    "type": "constructor",
     "inputs": [
       {
-        "name": "str",
-        "type": "string",
-        "internalType": "string"
+        "name": "_owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_implementation",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_feeSweeper",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_gitCommit",
+        "type": "bytes20",
+        "internalType": "bytes20"
       }
-    ]
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "FEE_SWEEPER",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   }
 ]

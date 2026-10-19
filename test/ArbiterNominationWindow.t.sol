@@ -88,7 +88,7 @@ contract ArbiterNominationWindowTest is Test {
 
     function _init(EscrowContract e) internal {
         e.initialize(
-            address(usdc), BUYER, SELLER, ARBITER, AMOUNT, block.timestamp + 365 days, CREATOR_FEE, FEE_RECIPIENT, address(0), 0
+            address(usdc), BUYER, SELLER, ARBITER, AMOUNT, block.timestamp + 365 days, CREATOR_FEE, FEE_RECIPIENT
         );
     }
 
@@ -101,8 +101,8 @@ contract ArbiterNominationWindowTest is Test {
     /// Fund, then sell the recipient role to the LP through an approved operator.
     function _fundAndSell(EscrowContract e) internal {
         vm.startPrank(BUYER);
-        usdc.approve(address(e), AMOUNT);
-        e.depositFunds();
+        usdc.transfer(address(e), AMOUNT);
+        e.checkAndActivate();
         vm.stopPrank();
 
         vm.prank(SELLER);

@@ -19,8 +19,7 @@ import {EscrowContract} from "../src/EscrowContract.sol";
  *   NETWORK                     label only (e.g. base, base-sepolia)
  *   DEFAULT_ARBITER_ADDRESS     REQUIRED; fallback-arbitrator Safe, baked into bytecode
  *   GIT_COMMIT                  REQUIRED; 0x-prefixed 40-hex commit being deployed
- *   FEE_RECIPIENT_ADDRESS       optional; defaults to OWNER when unset
- *   FEE_SPLIT_SIGNER_ADDRESS    optional; defaults to OWNER when unset (see below)
+ *   FEE_SWEEPER_ADDRESS         optional; defaults to OWNER when unset (see below)
  */
 contract DeployEscrow is Script {
     /**
@@ -28,24 +27,20 @@ contract DeployEscrow is Script {
      * a broadcast. Logs the values READ BACK from the deployed contracts, so the log proves
      * what was baked in rather than echoing the inputs.
      */
-    function deployEscrow(
-        address owner,
-        address defaultArbiter,
-        address feeRecipient,
-        address feeSplitSigner,
-        bytes20 gitCommit
-    ) internal returns (EscrowContractFactory factory, EscrowContract implementation) {
+    function deployEscrow(address owner, address defaultArbiter, address feeSweeper, bytes20 gitCommit)
+        internal
+        returns (EscrowContractFactory factory, EscrowContract implementation)
+    {
         implementation = new EscrowContract(defaultArbiter, gitCommit);
         console.log("Implementation deployed at:", address(implementation));
 
-        factory = new EscrowContractFactory(owner, address(implementation), feeRecipient, feeSplitSigner, gitCommit);
+        factory = new EscrowContractFactory(owner, address(implementation), feeSweeper, gitCommit);
 
         console.log("=================================================");
         console.log("Legacy factory deployed at:", address(factory));
         console.log("=================================================");
         console.log("Factory owner:", factory.OWNER());
-        console.log("Fee recipient:", factory.FEE_RECIPIENT());
-        console.log("Fee split signer:", factory.FEE_SPLIT_SIGNER());
+        console.log("Fee sweeper:", factory.FEE_SWEEPER());
         console.log("Factory git commit:");
         console.logBytes20(factory.GIT_COMMIT());
         console.log("Implementation git commit:");
@@ -65,11 +60,10 @@ contract DeployEscrow is Script {
     function run() external virtual {
         uint256 deployerPrivateKey = vm.envUint("RELAYER_WALLET_PRIVATE_KEY");
         address relayerAddress = vm.addr(deployerPrivateKey);
-        (address defaultArbiter, address feeRecipient, address feeSplitSigner, bytes20 gitCommit) =
-            _readEscrowConfig(relayerAddress);
+        (address defaultArbiter, address feeSweeper, bytes20 gitCommit) = _readEscrowConfig(relayerAddress);
 
         vm.startBroadcast(deployerPrivateKey);
-        deployEscrow(relayerAddress, defaultArbiter, feeRecipient, feeSplitSigner, gitCommit);
+        deployEscrow(relayerAddress, defaultArbiter, feeSweeper, gitCommit);
         vm.stopBroadcast();
 
         console.log("Escrow deployment completed successfully!");
@@ -82,7 +76,7 @@ contract DeployEscrow is Script {
     function _readEscrowConfig(address relayerAddress)
         internal
         view
-        returns (address defaultArbiter, address feeRecipient, address feeSplitSigner, bytes20 gitCommit)
+        returns (address defaultArbiter, address feeSweeper, bytes20 gitCommit)
     {
         uint256 chainId = vm.envUint("CHAIN_ID");
         string memory network = vm.envString("NETWORK");
@@ -122,13 +116,13 @@ contract DeployEscrow is Script {
         gitCommit = bytes20(commit);
         require(gitCommit != bytes20(0), "GIT_COMMIT must not be zero");
 
-        feeRecipient = _envAddressOr("FEE_RECIPIENT_ADDRESS", address(0));
-
-        // Optional, defaulting to OWNER - but OWNER is this relayer's hot key, and the signer
-        // is immutable: every signature it issues stays valid for the factory's lifetime.
-        feeSplitSigner = _envAddressOr("FEE_SPLIT_SIGNER_ADDRESS", address(0));
-        if (feeSplitSigner == address(0)) {
-            console.log("WARNING: FEE_SPLIT_SIGNER_ADDRESS unset - partner splits will be signed by the relayer key");
+        // Optional, defaulting to OWNER - but OWNER is this relayer's hot key, and the sweeper
+        // is the only key that can release escrow fees, to targets it names itself. It is
+        // immutable and stamped into every escrow the factory creates, so it is a treasury
+        // key: defaulting it to the relayer makes a relayer compromise a fee-diversion one.
+        feeSweeper = _envAddressOr("FEE_SWEEPER_ADDRESS", address(0));
+        if (feeSweeper == address(0)) {
+            console.log("WARNING: FEE_SWEEPER_ADDRESS unset - escrow fees will be sweepable only by the relayer key");
         }
     }
 

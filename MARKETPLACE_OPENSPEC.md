@@ -1819,8 +1819,10 @@ the permissionless `seatDefaultArbiter()` once the window lapses, and `evictArbi
 
 #### Unchanged — no work required
 
-`depositFunds`, `checkAndActivate`, `claimFunds`, `raiseDispute`, `submitResolutionVote`,
-`changeRecipient`, and every view chainservice already consumes.
+`checkAndActivate`, `claimFunds`, `raiseDispute`, `submitResolutionVote`, `changeRecipient`,
+and every view chainservice already consumes. (`depositFunds`, the approve-and-pull funding
+path, has since been removed from the escrow: direct transfer plus `checkAndActivate` is the
+only way to fund one.)
 
 #### Sequencing
 

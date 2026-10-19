@@ -73,7 +73,7 @@ contract EscrowContractFactoryTest is Test {
         usdc = new MockERC20();
         dai = new MockERC20();
         EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
-        factory = new EscrowContractFactory(owner, address(implementation), address(0), address(0), bytes20(0)); // feeRecipient defaults to owner
+        factory = new EscrowContractFactory(owner, address(implementation), address(0), bytes20(0)); // feeSweeper defaults to owner
 
         expiryTimestamp = block.timestamp + 7 days;
 
@@ -98,16 +98,16 @@ contract EscrowContractFactoryTest is Test {
     function testConstructorValidation() public {
         // Constructor should accept valid addresses without reverting
         EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
-        EscrowContractFactory testFactory = new EscrowContractFactory(owner, address(impl), address(0), address(0), bytes20(0));
+        EscrowContractFactory testFactory = new EscrowContractFactory(owner, address(impl), address(0), bytes20(0));
         assertEq(testFactory.OWNER(), owner);
         assertEq(testFactory.IMPLEMENTATION(), address(impl));
-        assertEq(testFactory.FEE_RECIPIENT(), owner); // Should default to owner
+        assertEq(testFactory.FEE_SWEEPER(), owner); // Should default to owner
     }
 
     function testSuccessfulDeployment() public view {
         assertEq(factory.OWNER(), owner);
         assertTrue(factory.IMPLEMENTATION() != address(0));
-        assertEq(factory.FEE_RECIPIENT(), owner); // Should default to owner
+        assertEq(factory.FEE_SWEEPER(), owner); // Should default to owner
     }
 
     function testCreateEscrowContract() public {
@@ -123,7 +123,7 @@ contract EscrowContractFactoryTest is Test {
         assertEq(escrow.BUYER(), buyer); // buyer is the actual buyer
         assertEq(escrow.SELLER(), seller);
         assertEq(escrow.ARBITER(), owner); // owner (factory caller) is the arbiter
-        assertEq(escrow.FEE_RECIPIENT(), owner); // owner is the fee recipient (default)
+        assertEq(escrow.FEE_SWEEPER(), owner); // owner is the fee sweeper (default)
         assertEq(escrow.AMOUNT(), AMOUNT);
         assertEq(escrow.EXPIRY_TIMESTAMP(), expiryTimestamp);
         // Description no longer stored in contract (emitted in events only to save gas)
@@ -365,7 +365,7 @@ contract EscrowContractFactoryTest is Test {
 
         EscrowContract escrow = EscrowContract(deployed);
         assertGt(usdc.balanceOf(seller) - sellerBefore, 0, "seller paid immediately");
-        assertEq(usdc.balanceOf(deployed), 0, "nothing retained");
+        assertEq(usdc.balanceOf(deployed), escrow.CREATOR_FEE(), "nothing retained but the fee");
         assertFalse(escrow.canDispute(), "an instant transfer has no dispute window");
     }
 
@@ -713,57 +713,32 @@ contract EscrowContractFactoryTest is Test {
         assertTrue(escrowAddress != address(0));
     }
 
-    function testInsufficientBalance() public {
-        // Create a new buyer with no USDC balance
+    function testAPoorBuyerCanBeNamedButCannotActivate() public {
+        // Creation moves no money, so naming a buyer with no balance succeeds ...
         address poorBuyer = address(0x5);
-
-        // Factory no longer transfers funds, so this should succeed
         vm.prank(owner);
         address escrowAddress = factory.createEscrowContract(
             address(usdc), poorBuyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(41))
         );
-
         assertTrue(escrowAddress != address(0));
 
-        // But depositFunds should fail for poor buyer
-        EscrowContract escrow = EscrowContract(escrowAddress);
-        vm.prank(poorBuyer);
-        vm.expectRevert("Insufficient balance");
-        escrow.depositFunds();
+        // ... and the escrow simply waits, unfunded, until the full amount arrives.
+        vm.expectRevert(EscrowContract.InsufficientDirectPayment.selector);
+        EscrowContract(escrowAddress).checkAndActivate();
     }
 
-    function testInsufficientAllowance() public {
-        // Factory no longer transfers funds, so creation should succeed
-        vm.prank(owner);
-        address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, bytes32(uint256(40))
-        );
-
-        assertTrue(escrowAddress != address(0));
-
-        // But depositFunds should fail with insufficient allowance
-        EscrowContract escrow = EscrowContract(escrowAddress);
-
-        // Reduce buyer's allowance to escrow contract
-        vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT - 1);
-
-        vm.prank(buyer);
-        vm.expectRevert("Insufficient allowance");
-        escrow.depositFunds();
-    }
-
-    function testCustomFeeRecipientInFactory() public {
-        // Test factory with custom fee recipient address
-        address customFeeRecipient = address(0x999);
+    function testCustomFeeSweeperInFactory() public {
+        // Test factory with custom fee sweeper address
+        address customFeeSweeper = address(0x999);
 
         EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
-        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient, address(0), bytes20(0));
+        EscrowContractFactory customFactory =
+            new EscrowContractFactory(owner, address(impl), customFeeSweeper, bytes20(0));
 
         assertEq(customFactory.OWNER(), owner);
-        assertEq(customFactory.FEE_RECIPIENT(), customFeeRecipient); // Should use custom fee recipient
+        assertEq(customFactory.FEE_SWEEPER(), customFeeSweeper); // Should use custom fee sweeper
 
-        // Create escrow contract and verify it inherits custom fee recipient
+        // Create escrow contract and verify it inherits custom fee sweeper
         vm.prank(owner);
         address escrowAddress = customFactory.createEscrowContract(
             address(usdc),
@@ -771,26 +746,26 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            "Custom fee recipient test",
+            "Custom fee sweeper test",
             owner,
             bytes32(uint256(39))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
-        assertEq(escrow.FEE_RECIPIENT(), customFeeRecipient); // Escrow should inherit custom fee recipient
+        assertEq(escrow.FEE_SWEEPER(), customFeeSweeper); // Escrow should inherit custom fee sweeper
         assertEq(escrow.BUYER(), buyer);
         assertEq(escrow.SELLER(), seller);
         assertEq(escrow.ARBITER(), owner); // ARBITER is the factory caller (owner)
     }
 
-    function testDefaultFeeRecipientWhenAddressZero() public {
+    function testDefaultFeeSweeperWhenAddressZero() public {
         // Test that address(0) defaults to OWNER
         EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
-        EscrowContractFactory defaultFactory = new EscrowContractFactory(owner, address(impl), address(0), address(0), bytes20(0));
+        EscrowContractFactory defaultFactory = new EscrowContractFactory(owner, address(impl), address(0), bytes20(0));
 
-        assertEq(defaultFactory.FEE_RECIPIENT(), owner); // Should default to owner
+        assertEq(defaultFactory.FEE_SWEEPER(), owner); // Should default to owner
 
-        // Create escrow contract and verify it uses owner as fee recipient
+        // Create escrow contract and verify it uses owner as fee sweeper
         vm.prank(owner);
         address escrowAddress = defaultFactory.createEscrowContract(
             address(usdc),
@@ -798,21 +773,22 @@ contract EscrowContractFactoryTest is Test {
             seller,
             AMOUNT,
             expiryTimestamp,
-            "Default fee recipient test",
+            "Default fee sweeper test",
             owner,
             bytes32(uint256(38))
         );
 
         EscrowContract escrow = EscrowContract(escrowAddress);
-        assertEq(escrow.FEE_RECIPIENT(), owner); // Escrow should use owner as fee recipient
+        assertEq(escrow.FEE_SWEEPER(), owner); // Escrow should use owner as fee sweeper
     }
 
-    function testAllEscrowsInheritSameFeeRecipient() public {
-        // Test that all escrows from same factory inherit same fee recipient
-        address customFeeRecipient = address(0x888);
+    function testAllEscrowsInheritSameFeeSweeper() public {
+        // Test that all escrows from same factory inherit same fee sweeper
+        address customFeeSweeper = address(0x888);
 
         EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
-        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient, address(0), bytes20(0));
+        EscrowContractFactory customFactory =
+            new EscrowContractFactory(owner, address(impl), customFeeSweeper, bytes20(0));
 
         vm.startPrank(owner);
 
@@ -834,17 +810,18 @@ contract EscrowContractFactoryTest is Test {
 
         vm.stopPrank();
 
-        // Both should have same fee recipient
-        assertEq(EscrowContract(escrow1).FEE_RECIPIENT(), customFeeRecipient);
-        assertEq(EscrowContract(escrow2).FEE_RECIPIENT(), customFeeRecipient);
+        // Both should have same fee sweeper
+        assertEq(EscrowContract(escrow1).FEE_SWEEPER(), customFeeSweeper);
+        assertEq(EscrowContract(escrow2).FEE_SWEEPER(), customFeeSweeper);
     }
 
-    function testFeeRecipientReceivesFee() public {
-        // Test that custom fee recipient actually receives the fee
-        address customFeeRecipient = address(0x777);
+    function testFeeSweeperReleasesTheFee() public {
+        // The fee is set aside at deposit; only the factory's sweeper can release it, to a target it names
+        address customFeeSweeper = address(0x777);
 
         EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
-        EscrowContractFactory customFactory = new EscrowContractFactory(owner, address(impl), customFeeRecipient, address(0), bytes20(0));
+        EscrowContractFactory customFactory =
+            new EscrowContractFactory(owner, address(impl), customFeeSweeper, bytes20(0));
 
         vm.prank(owner);
         address escrowAddress = customFactory.createEscrowContract(
@@ -854,19 +831,27 @@ contract EscrowContractFactoryTest is Test {
         EscrowContract escrow = EscrowContract(escrowAddress);
         uint256 expectedFee = escrow.CREATOR_FEE();
 
-        // Approve escrow to spend buyer's tokens
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(customFeeSweeper);
+
+        // Buyer funds by direct transfer
         vm.prank(buyer);
-        usdc.approve(escrowAddress, AMOUNT);
+        usdc.transfer(escrowAddress, AMOUNT);
+        escrow.checkAndActivate();
 
-        uint256 feeRecipientBalanceBefore = usdc.balanceOf(customFeeRecipient);
+        // Nothing is paid out at deposit: the fee is retained in the escrow
+        assertEq(usdc.balanceOf(customFeeSweeper), feeRecipientBalanceBefore);
+        assertEq(escrow.retainedFee(), expectedFee);
 
-        // Deposit funds as buyer
+        // Nobody else can release it
         vm.prank(buyer);
-        escrow.depositFunds();
+        vm.expectRevert(EscrowContract.OnlyFeeSweeper.selector);
+        escrow.sweepFees(buyer, 10_000, address(0), 0);
 
-        uint256 feeRecipientBalanceAfter = usdc.balanceOf(customFeeRecipient);
-
-        // Verify fee recipient received the fee
-        assertEq(feeRecipientBalanceAfter - feeRecipientBalanceBefore, expectedFee);
+        // The sweeper can, to whatever target it names
+        address treasury = address(0x7777);
+        vm.prank(customFeeSweeper);
+        escrow.sweepFees(treasury, 10_000, address(0), 0);
+        assertEq(usdc.balanceOf(treasury), expectedFee);
+        assertEq(escrow.retainedFee(), 0);
     }
 }

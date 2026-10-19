@@ -52,16 +52,13 @@ jobs:
           # marketplace. There is deliberately no default: an unset value must fail the
           # deploy, not silently pick something.
           echo "DEFAULT_ARBITER_ADDRESS=${{ vars.DEFAULT_ARBITER_ADDRESS }}" >> "$GITHUB_ENV"
-          # Fee recipient comes from the environment's FEE_RECIPIENT_ADDRESS
-          # variable. Only written when set; the deploy script defaults the
-          # recipient to the factory OWNER (relayer) when the variable is absent.
-          if [ -n "${{ vars.FEE_RECIPIENT_ADDRESS }}" ]; then
-            echo "FEE_RECIPIENT_ADDRESS=${{ vars.FEE_RECIPIENT_ADDRESS }}" >> "$GITHUB_ENV"
-          fi
-          # Sole authority for partner fee splits. Immutable on the factory; only written
-          # when set, and the deploy script defaults it to OWNER (the relayer) otherwise.
-          if [ -n "${{ vars.FEE_SPLIT_SIGNER_ADDRESS }}" ]; then
-            echo "FEE_SPLIT_SIGNER_ADDRESS=${{ vars.FEE_SPLIT_SIGNER_ADDRESS }}" >> "$GITHUB_ENV"
+          # The fee sweeper comes from the environment's FEE_SWEEPER_ADDRESS variable. It
+          # is the only key that can release escrow fees (sweepFees), to targets it names
+          # itself, and it is immutable on the factory and stamped into every escrow. Only
+          # written when set; the deploy script defaults it to the factory OWNER (relayer)
+          # when the variable is absent.
+          if [ -n "${{ vars.FEE_SWEEPER_ADDRESS }}" ]; then
+            echo "FEE_SWEEPER_ADDRESS=${{ vars.FEE_SWEEPER_ADDRESS }}" >> "$GITHUB_ENV"
           fi
           # Stamped into the implementation and factory bytecode as GIT_COMMIT().
           echo "GIT_COMMIT=0x${{ github.sha }}" >> "$GITHUB_ENV"
@@ -168,14 +165,10 @@ jobs:
           echo "Legacy implementation: $IMPLEMENTATION_ADDRESS"
           echo "Legacy factory: $FACTORY_ADDRESS"
 
-          # Fee recipient for the summary (vars are public, safe to print).
-          FEE_RECIPIENT_DISPLAY="${{ vars.FEE_RECIPIENT_ADDRESS }}"
-          if [ -z "$FEE_RECIPIENT_DISPLAY" ]; then
-            FEE_RECIPIENT_DISPLAY="Default (OWNER)"
-          fi
-          FEE_SPLIT_SIGNER_DISPLAY="${{ vars.FEE_SPLIT_SIGNER_ADDRESS }}"
-          if [ -z "$FEE_SPLIT_SIGNER_DISPLAY" ]; then
-            FEE_SPLIT_SIGNER_DISPLAY="Default (OWNER)"
+          # Fee sweeper for the summary (vars are public, safe to print).
+          FEE_SWEEPER_DISPLAY="${{ vars.FEE_SWEEPER_ADDRESS }}"
+          if [ -z "$FEE_SWEEPER_DISPLAY" ]; then
+            FEE_SWEEPER_DISPLAY="Default (OWNER)"
           fi
 
           # Create a summary with important addresses
@@ -185,8 +178,7 @@ jobs:
           echo "Legacy implementation:     $IMPLEMENTATION_ADDRESS"
           echo "Legacy factory:            $FACTORY_ADDRESS"
           echo "Git commit:                0x${{ github.sha }}"
-          echo "Fee Recipient:             $FEE_RECIPIENT_DISPLAY"
-          echo "Fee split signer:          $FEE_SPLIT_SIGNER_DISPLAY  (IMMUTABLE)"
+          echo "Fee sweeper:               $FEE_SWEEPER_DISPLAY  (IMMUTABLE)"
           echo "Fallback arbiter (Safe):   ${{ vars.DEFAULT_ARBITER_ADDRESS }}  (IMMUTABLE)"
           echo "==================================================="
           echo "LEGACY FACTORY ADDRESS FOR UI CONFIG: $FACTORY_ADDRESS"

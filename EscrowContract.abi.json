@@ -121,19 +121,6 @@
   },
   {
     "type": "function",
-    "name": "FEE_RECIPIENT",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "GIT_COMMIT",
     "inputs": [],
     "outputs": [
@@ -154,32 +141,6 @@
         "name": "",
         "type": "uint64",
         "internalType": "uint64"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "PARTNER_FEE",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "PARTNER_FEE_RECIPIENT",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -335,13 +296,6 @@
   },
   {
     "type": "function",
-    "name": "depositFunds",
-    "inputs": [],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "evictArbiter",
     "inputs": [],
     "outputs": [],
@@ -425,64 +379,6 @@
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "initialize",
-    "inputs": [
-      {
-        "name": "_tokenAddress",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_buyer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_seller",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_arbiter",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_expiryTimestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_creatorFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_feeRecipient",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_partnerFeeRecipient",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_partnerFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -983,56 +879,6 @@
   },
   {
     "type": "event",
-    "name": "PartnerFeeCollected",
-    "inputs": [
-      {
-        "name": "recipient",
-        "type": "address",
-        "indexed": false,
-        "internalType": "address"
-      },
-      {
-        "name": "feeAmount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "timestamp",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "PlatformFeeCollected",
-    "inputs": [
-      {
-        "name": "recipient",
-        "type": "address",
-        "indexed": false,
-        "internalType": "address"
-      },
-      {
-        "name": "feeAmount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "timestamp",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
     "name": "RecipientChanged",
     "inputs": [
       {
@@ -1250,16 +1096,6 @@
   },
   {
     "type": "error",
-    "name": "InvalidFeeRecipientAddress",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InvalidPartnerFeeRecipient",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "InvalidPercentage",
     "inputs": []
   },
@@ -1347,11 +1183,6 @@
   },
   {
     "type": "error",
-    "name": "PartnerFeeExceedsCreatorFee",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "PartyCannotBeDefaultArbiter",
     "inputs": []
   },
@@ -1378,7 +1209,197 @@
   },
   {
     "type": "error",
-    "name": "TransferAmountMismatch",
+    "name": "InvalidFeeSweeperAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSweepBps",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidSweepTarget",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoFeesToSweep",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OnlyFeeSweeper",
+    "inputs": []
+  },
+  {
+    "type": "event",
+    "name": "FeeRetained",
+    "inputs": [
+      {
+        "name": "feeAmount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "timestamp",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "FeesSwept",
+    "inputs": [
+      {
+        "name": "target",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "bps",
+        "type": "uint16",
+        "indexed": false,
+        "internalType": "uint16"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "timestamp",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "function",
+    "name": "BPS_DENOMINATOR",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "FEE_SWEEPER",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "initialize",
+    "inputs": [
+      {
+        "name": "_tokenAddress",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_buyer",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_seller",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_arbiter",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_expiryTimestamp",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_creatorFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_feeSweeper",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "retainedFee",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "sweepFees",
+    "inputs": [
+      {
+        "name": "target1",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "bps1",
+        "type": "uint16",
+        "internalType": "uint16"
+      },
+      {
+        "name": "target2",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "bps2",
+        "type": "uint16",
+        "internalType": "uint16"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "error",
+    "name": "RecipientUnchanged",
     "inputs": []
   }
 ]

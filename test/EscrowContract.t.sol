@@ -130,7 +130,7 @@ contract EscrowContractTest is Test {
     function setUp() public {
         usdc = new MockERC20();
         EscrowContract implementation = new EscrowContract(address(0xDEFA17), bytes20(0));
-        factory = new EscrowContractFactory(arbiter, address(implementation), address(0), address(0), bytes20(0));
+        factory = new EscrowContractFactory(arbiter, address(implementation), address(0), bytes20(0));
 
         expiryTimestamp = block.timestamp + 7 days;
 
@@ -158,10 +158,8 @@ contract EscrowContractTest is Test {
 
         // Buyer approves and funds the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         return escrow;
     }
@@ -265,7 +263,7 @@ contract EscrowContractTest is Test {
         assertTrue(escrow.isClaimed());
         assertTrue(escrow.consensusReached());
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore + (AMOUNT - CREATOR_FEE));
-        assertEq(usdc.balanceOf(address(escrow)), 0);
+        assertEq(usdc.balanceOf(address(escrow)), CREATOR_FEE, "only the retained fee is left");
     }
 
     function testAllPartiesCanVote() public {
@@ -300,6 +298,13 @@ contract EscrowContractTest is Test {
 
         assertTrue(escrow.isClaimed());
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
+        assertEq(usdc.balanceOf(address(escrow)), CREATOR_FEE, "the retained fee stays until swept");
+
+        // The fee is independent of the claim: the sweeper releases it afterwards.
+        uint256 arbiterBefore = usdc.balanceOf(arbiter);
+        vm.prank(arbiter);
+        escrow.sweepFees(arbiter, 10_000, address(0), 0);
+        assertEq(usdc.balanceOf(arbiter), arbiterBefore + CREATOR_FEE);
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
 
@@ -395,9 +400,8 @@ contract EscrowContractTest is Test {
 
         // Fund the contract
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Check createdAt still hasn't changed after funding
         assertEq(escrow.createdAt(), creationTime);
@@ -425,46 +429,64 @@ contract EscrowContractTest is Test {
         uint256 buyerBalanceBefore = usdc.balanceOf(buyer);
 
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         assertTrue(escrow.isFunded());
-        assertEq(usdc.balanceOf(address(escrow)), AMOUNT - CREATOR_FEE);
+        assertEq(usdc.balanceOf(address(escrow)), AMOUNT, "escrowed amount plus the retained fee");
+        assertEq(escrow.retainedFee(), CREATOR_FEE);
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
     }
 
-    function testCannotDepositTwice() public {
+    function testCannotActivateTwice() public {
         EscrowContract escrow = createAndFundEscrow();
 
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-
-        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT);
         vm.expectRevert(EscrowContract.AlreadyFundedOrClaimed.selector);
-        escrow.depositFunds();
+        escrow.checkAndActivate();
     }
 
-    function testAnyoneCanDeposit() public {
+    /**
+     * 🔐 THERE IS NO APPROVE-AND-PULL DEPOSIT ANY MORE.
+     *
+     * ⚠️ depositFunds() USED TO EXIST, pulling AMOUNT from the buyer under an ERC20 approval,
+     *    and it was callable by anyone on the reasoning that the approval was the consent.
+     *    An approval outlives an abandoned deposit, and the dispute window closes at the
+     *    exact moment claimFunds opens, so after expiry the seller could deposit-and-claim
+     *    in one transaction with the buyer never able to dispute. The function was removed
+     *    rather than guarded: every live client funds by direct transfer, and a transfer
+     *    the buyer makes themselves has no lingering authority for anyone to abuse.
+     */
+    function testThereIsNoApproveAndPullDeposit() public {
+        EscrowContract escrow = createUnfundedEscrow();
+        vm.prank(buyer);
+        usdc.approve(address(escrow), type(uint256).max); // an approval, then nothing
+
+        vm.warp(expiryTimestamp + 30 days);
+        vm.prank(seller);
+        (bool ok,) = address(escrow).call(abi.encodeWithSignature("depositFunds()"));
+        assertFalse(ok, "no such function");
+
+        assertEq(usdc.balanceOf(buyer), AMOUNT * 10, "the buyer's money never moved");
+        assertFalse(escrow.isFunded());
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.claimFunds();
+    }
+
+    /// Direct-transfer funding is deliberately NOT gated the same way: the money is already
+    /// at the address, so activating cannot take anything from anyone (see createAndActivate).
+    function testDirectTransferActivationStillWorksAfterExpiry() public {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
-            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(30))
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(47))
         );
-        EscrowContract escrow = EscrowContract(escrowAddress);
-
-        // Buyer approves the contract to spend tokens
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-
-        // Anyone can call depositFunds (seller in this case)
-        // The tokens still come from the BUYER who approved them
-        vm.prank(seller);
-        escrow.depositFunds(); // This should succeed
-
-        // Verify contract is now funded
-        (,,,, uint8 state,,,,) = escrow.getContractInfo();
-        assertEq(state, 1, "Contract should be ACTIVE");
+        usdc.transfer(escrowAddress, AMOUNT);
+        vm.warp(expiryTimestamp + 1);
+        vm.prank(other);
+        EscrowContract(escrowAddress).checkAndActivate();
+        assertTrue(EscrowContract(escrowAddress).isFunded());
     }
 
     function testCannotUseUnfundedContract() public {
@@ -489,7 +511,7 @@ contract EscrowContractTest is Test {
         escrow.submitResolutionVote(100);
     }
 
-    function testCreatorFeeTransferOnDeposit() public {
+    function testCreatorFeeIsRetainedOnDeposit() public {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(28))
@@ -503,15 +525,21 @@ contract EscrowContractTest is Test {
 
         // Buyer approves and funds the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
-        vm.prank(buyer);
-        escrow.depositFunds();
-
-        // Check that creator fee was transferred to gas payer
-        assertEq(usdc.balanceOf(arbiter), initialArbiterBalance + CREATOR_FEE);
+        // The fee is set aside in the escrow, not paid out: the sweeper has received nothing
+        assertEq(usdc.balanceOf(arbiter), initialArbiterBalance);
         assertEq(usdc.balanceOf(buyer), initialBuyerBalance - AMOUNT);
+        assertEq(usdc.balanceOf(address(escrow)), AMOUNT);
+        assertEq(escrow.retainedFee(), CREATOR_FEE);
+
+        // Only sweepFees moves it, and only the sweeper (the factory owner here) may call
+        vm.prank(arbiter);
+        escrow.sweepFees(arbiter, 10_000, address(0), 0);
+        assertEq(usdc.balanceOf(arbiter), initialArbiterBalance + CREATOR_FEE);
         assertEq(usdc.balanceOf(address(escrow)), AMOUNT - CREATOR_FEE);
+        assertEq(escrow.retainedFee(), 0);
     }
 
     function testClaimFundsWithCreatorFee() public {
@@ -703,25 +731,31 @@ contract EscrowContractTest is Test {
 
         // Buyer deposits funds
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Verify funds went directly to seller (minus fee)
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
 
-        // Verify platform got fee
-        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
+        // The fee is set aside, not paid: the sweeper has nothing yet
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore);
 
         // Verify buyer paid full amount
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
 
-        // Verify no funds left in escrow
-        assertEq(usdc.balanceOf(address(escrow)), 0);
+        // Only the retained fee is left in the escrow
+        assertEq(usdc.balanceOf(address(escrow)), CREATOR_FEE);
+        assertEq(escrow.retainedFee(), CREATOR_FEE);
 
         // Verify state is claimed (4)
         assertTrue(escrow.isClaimed());
         assertTrue(escrow.isFunded()); // State >= 1
+
+        // And it is sweepable even though the escrow is already finished
+        vm.prank(arbiter);
+        escrow.sweepFees(arbiter, 10_000, address(0), 0);
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
+        assertEq(usdc.balanceOf(address(escrow)), 0);
     }
 
     function testInstantTransferCannotDispute() public {
@@ -742,9 +776,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Verify cannot dispute
         assertFalse(escrow.canDispute());
@@ -797,9 +830,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Verify cannot claim (already transferred)
         assertFalse(escrow.canClaim());
@@ -835,9 +867,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // After instant transfer
         assertTrue(escrow.isFunded());
@@ -890,9 +921,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Check state after deposit
         (,,,, _currentState,,,,) = escrow.getContractInfo();
@@ -921,9 +951,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // After deposit - state should be 4 (claimed) for instant transfer
         (,,,, uint8 stateAfter,,,,) = escrow.getContractInfo();
@@ -959,9 +988,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow
         vm.prank(buyer);
-        usdc.approve(address(escrow), smallAmount);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), smallAmount);
+        escrow.checkAndActivate();
 
         // Verify seller got full amount (no fee)
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + smallAmount);
@@ -1026,13 +1054,13 @@ contract EscrowContractTest is Test {
         (,,,, uint8 state,,,,) = escrow.getContractInfo();
         assertEq(state, 1, "Contract should be in funded state");
 
-        // Excess stays in contract (overpayment - CREATOR_FEE = remaining in contract)
-        // Contract had overpayment, fee was sent out, so remaining = overpayment - CREATOR_FEE
-        assertEq(usdc.balanceOf(escrowAddress), overpayment - CREATOR_FEE);
+        // Everything stays in the contract: the escrowed amount, the retained fee, and the excess
+        assertEq(usdc.balanceOf(escrowAddress), overpayment);
+        assertEq(escrow.retainedFee(), CREATOR_FEE);
     }
 
     function testCheckAndActivateAlreadyFunded() public {
-        // Create and fund escrow via normal depositFunds flow
+        // Create and fund escrow via the normal direct-transfer flow
         EscrowContract escrow = createAndFundEscrow();
 
         // Transfer tokens to contract (even though already funded)
@@ -1102,14 +1130,13 @@ contract EscrowContractTest is Test {
         // Verify funds went to seller immediately (minus fee)
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
 
-        // Verify platform got fee
-        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
-
-        // Verify no funds left in escrow
-        assertEq(usdc.balanceOf(escrowAddress), 0);
+        // The fee is set aside for the sweeper, not paid out
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore);
+        assertEq(usdc.balanceOf(escrowAddress), CREATOR_FEE);
+        assertEq(escrow.retainedFee(), CREATOR_FEE);
     }
 
-    function testCheckAndActivateFeeDistribution() public {
+    function testCheckAndActivateRetainsTheFee() public {
         // Create escrow contract
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
@@ -1127,10 +1154,15 @@ contract EscrowContractTest is Test {
         // Call checkAndActivate
         escrow.checkAndActivate();
 
-        // Verify CREATOR_FEE sent to FEE_RECIPIENT (arbiter in this test setup)
-        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
+        // CREATOR_FEE is set aside in the escrow; the sweeper (arbiter in this test setup) has nothing yet
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore);
+        assertEq(usdc.balanceOf(escrowAddress), AMOUNT);
+        assertEq(escrow.retainedFee(), CREATOR_FEE);
 
-        // Verify remainder locked in contract
+        // sweepFees releases it and leaves the escrowed amount locked
+        vm.prank(arbiter);
+        escrow.sweepFees(arbiter, 10_000, address(0), 0);
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
         assertEq(usdc.balanceOf(escrowAddress), AMOUNT - CREATOR_FEE);
     }
 
@@ -1239,7 +1271,7 @@ contract EscrowContractTest is Test {
         // Verify claimed state
         assertTrue(escrow.isClaimed());
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (AMOUNT - CREATOR_FEE));
-        assertEq(usdc.balanceOf(escrowAddress), 0);
+        assertEq(usdc.balanceOf(escrowAddress), CREATOR_FEE, "only the retained fee is left");
     }
 
     function testDepositFundsStillWorks() public {
@@ -1255,15 +1287,14 @@ contract EscrowContractTest is Test {
 
         // Standard approve+deposit flow
         vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Verify everything works as before
         assertTrue(escrow.isFunded());
         assertEq(usdc.balanceOf(buyer), buyerBalanceBefore - AMOUNT);
-        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore + CREATOR_FEE);
-        assertEq(usdc.balanceOf(escrowAddress), AMOUNT - CREATOR_FEE);
+        assertEq(usdc.balanceOf(arbiter), arbiterBalanceBefore, "the fee is retained, not paid out");
+        assertEq(usdc.balanceOf(escrowAddress), AMOUNT);
 
         // Verify full lifecycle still works
         vm.warp(expiryTimestamp + 1);
@@ -1316,13 +1347,7 @@ contract EscrowContractTest is Test {
         address escrowAddress = factory.createEscrowContract(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(7))
         );
-        EscrowContract escrow = EscrowContract(escrowAddress);
-
-        // Approve so depositFunds can be called later if needed
-        vm.prank(buyer);
-        usdc.approve(address(escrow), AMOUNT);
-
-        return escrow;
+        return EscrowContract(escrowAddress);
     }
 
     function testSweepTokenByBuyer() public {
@@ -1365,7 +1390,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow normally
         vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Try to sweep the escrow token — should revert
         vm.prank(buyer);
@@ -1400,10 +1426,16 @@ contract EscrowContractTest is Test {
         uint256 buyerBefore = usdc.balanceOf(buyer);
         escrow.claimFunds();
 
-        // Now every obligation is discharged, so what is left is surplus by definition.
+        // Now every obligation to buyer and seller is discharged, so what is left beyond the
+        // retained fee is surplus by definition.
         escrow.sweepToken(address(usdc));
 
         assertEq(usdc.balanceOf(buyer) - buyerBefore, surplus, "the overpayment goes home");
+        assertEq(usdc.balanceOf(address(escrow)), CREATOR_FEE, "but the retained fee is not surplus");
+
+        // The fee is still the sweeper's to release, and then nothing is stranded.
+        vm.prank(arbiter);
+        escrow.sweepFees(arbiter, 10_000, address(0), 0);
         assertEq(usdc.balanceOf(address(escrow)), 0, "and nothing is stranded");
     }
 
@@ -1475,7 +1507,8 @@ contract EscrowContractTest is Test {
 
         // Fund the escrow normally
         vm.prank(buyer);
-        escrow.depositFunds();
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
 
         // Send a wrong token to the funded escrow
         MockERC20 wrongToken = new MockERC20();
@@ -1988,7 +2021,7 @@ contract EscrowContractTest is Test {
         // Funds go to the new recipient, not the original seller
         assertEq(usdc.balanceOf(seller), oldSellerBefore);
         assertEq(usdc.balanceOf(other), newSellerBefore + (AMOUNT - CREATOR_FEE));
-        assertEq(usdc.balanceOf(address(escrow)), 0);
+        assertEq(usdc.balanceOf(address(escrow)), CREATOR_FEE, "only the retained fee is left");
     }
 
     function testChangeRecipientTransfersVotingRights() public {
@@ -2022,6 +2055,49 @@ contract EscrowContractTest is Test {
     // default. Without the explicit `= 255` in changeRecipient, the new seller's
     // default mapping value (0) would collude with an arbiter 0-vote to force a
     // false consensus paying the seller 100%.
+    /**
+     * 🔐 A TRANSFER TO THE CURRENT RECIPIENT IS NOT A TRANSFER.
+     *
+     * ⚠️ IT USED TO BE ACCEPTED. Through transferRecipientFrom the seller could approve a
+     *    wallet of their own and have it "buy" the role back to the same address: the
+     *    recipient never moved, yet hasBeenSold flipped (so the marketplace refused a
+     *    holdback to any genuine later buyer) and the mutually agreed arbiter was unseated
+     *    with no dispute, no silence and no say from the buyer.
+     */
+    function testStagedSaleToTheSameRecipientIsRefused() public {
+        EscrowContract escrow = createAndFundEscrow();
+        address sellersOtherWallet = address(0x5E11E2);
+
+        // Refused at grant time ...
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.RecipientUnchanged.selector);
+        escrow.approveRecipientTransfer(sellersOtherWallet, seller);
+
+        // ... and at execution, for an approval that named someone else and then tries the seller
+        vm.prank(seller);
+        escrow.approveRecipientTransfer(sellersOtherWallet, other);
+        vm.prank(sellersOtherWallet);
+        vm.expectRevert(EscrowContract.ApprovedTargetMismatch.selector);
+        escrow.transferRecipientFrom(seller);
+
+        // The plain rotation path refuses the no-op too
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.RecipientUnchanged.selector);
+        escrow.changeRecipient(seller);
+
+        assertFalse(escrow.hasBeenSold(), "never sold");
+        assertEq(escrow.ARBITER(), arbiter, "arbiter still seated");
+        assertEq(escrow.recipientNonce(), 0, "nothing moved");
+    }
+
+    /// A doomed approval fails at grant time for every reason execution would refuse it.
+    function testApprovalToTheDefaultArbiterIsRefusedAtGrant() public {
+        EscrowContract escrow = createAndFundEscrow();
+        vm.prank(seller);
+        vm.expectRevert(EscrowContract.PartyCannotBeDefaultArbiter.selector);
+        escrow.approveRecipientTransfer(other, address(0xDEFA17));
+    }
+
     function testChangeRecipientNewSellerNotCountedAsVoted() public {
         EscrowContract escrow = createAndFundEscrow();
 
@@ -2038,7 +2114,7 @@ contract EscrowContractTest is Test {
 
         assertFalse(escrow.consensusReached());
         assertTrue(escrow.isDisputed());
-        assertEq(usdc.balanceOf(address(escrow)), AMOUNT - CREATOR_FEE);
+        assertEq(usdc.balanceOf(address(escrow)), AMOUNT, "nothing has moved: escrowed amount plus retained fee");
 
         // New seller can then genuinely vote to complete the 2-of-3
         vm.prank(other);
@@ -2074,18 +2150,18 @@ contract EscrowContractTest is Test {
 
         address cloneA = Clones.clone(address(impl));
         vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
-        EscrowContract(cloneA).initialize(address(usdc), buyer, seller, buyer, AMOUNT, expiryTimestamp, 0, arbiter, address(0), 0);
+        EscrowContract(cloneA).initialize(address(usdc), buyer, seller, buyer, AMOUNT, expiryTimestamp, 0, arbiter);
 
         address cloneB = Clones.clone(address(impl));
         vm.expectRevert(EscrowContract.ArbiterMustBeDistinct.selector);
-        EscrowContract(cloneB).initialize(address(usdc), buyer, seller, seller, AMOUNT, expiryTimestamp, 0, arbiter, address(0), 0);
+        EscrowContract(cloneB).initialize(address(usdc), buyer, seller, seller, AMOUNT, expiryTimestamp, 0, arbiter);
     }
 
     function testInitializeRejectsZeroFeeRecipient() public {
         EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
         address clone = Clones.clone(address(impl));
-        vm.expectRevert(EscrowContract.InvalidFeeRecipientAddress.selector);
-        EscrowContract(clone).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiryTimestamp, 0, address(0), address(0), 0);
+        vm.expectRevert(EscrowContract.InvalidFeeSweeperAddress.selector);
+        EscrowContract(clone).initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiryTimestamp, 0, address(0));
     }
 
     function testFactoryRejectsCreatorNamingSelfAsArbiter() public {
@@ -2103,7 +2179,12 @@ contract EscrowContractTest is Test {
     // Token safety: fee-on-transfer rejection and missing decimals() tolerance
     // ═══════════════════════════════════════════════════════════════════════════
 
-    function testDepositRejectsFeeOnTransferToken() public {
+    /// ⚠️ With depositFunds gone there is no amount-delta check any more: activation only
+    ///    asks that the balance has reached AMOUNT. A fee-on-transfer token therefore needs
+    ///    the buyer to send enough that AMOUNT actually arrives; sending exactly AMOUNT
+    ///    leaves the escrow unfunded and the shortfall stuck until topped up. Pinned so a
+    ///    future delta check (or a refund path) is a deliberate change.
+    function testFeeOnTransferTokenMustArriveInFull() public {
         FeeOnTransferERC20 feeToken = new FeeOnTransferERC20();
         feeToken.mint(buyer, AMOUNT * 10);
 
@@ -2114,13 +2195,9 @@ contract EscrowContractTest is Test {
         EscrowContract escrow = EscrowContract(esc);
 
         vm.prank(buyer);
-        feeToken.approve(esc, AMOUNT);
-
-        // The contract would receive less than AMOUNT; deposit must reject the token
-        // rather than under-fund the escrow and lock later payouts.
-        vm.prank(buyer);
-        vm.expectRevert(EscrowContract.TransferAmountMismatch.selector);
-        escrow.depositFunds();
+        feeToken.transfer(esc, AMOUNT); // 1% is skimmed in transit
+        vm.expectRevert(EscrowContract.InsufficientDirectPayment.selector);
+        escrow.checkAndActivate();
     }
 
     function testFactoryToleratesTokenWithoutDecimals() public {
@@ -2138,9 +2215,8 @@ contract EscrowContractTest is Test {
 
         // And the resulting escrow is fully usable (funds cleanly).
         vm.prank(buyer);
-        noDec.approve(esc, bigAmount);
-        vm.prank(buyer);
-        EscrowContract(esc).depositFunds();
+        noDec.transfer(esc, bigAmount);
+        EscrowContract(esc).checkAndActivate();
         assertTrue(EscrowContract(esc).isFunded());
     }
 

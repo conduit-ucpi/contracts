@@ -18,11 +18,11 @@ contract DeploymentScript is DeployEscrow, DeployCompletionEscrow {
     function run() external override(DeployEscrow, DeployCompletionEscrow) {
         uint256 deployerPrivateKey = vm.envUint("RELAYER_WALLET_PRIVATE_KEY");
         address relayerAddress = vm.addr(deployerPrivateKey);
-        (address defaultArbiter, address feeRecipient, address feeSplitSigner, bytes20 gitCommit) =
-            _readEscrowConfig(relayerAddress);
+        (address defaultArbiter, address feeSweeper, bytes20 gitCommit) = _readEscrowConfig(relayerAddress);
+        address feeRecipient = _readFeeRecipient();
 
         vm.startBroadcast(deployerPrivateKey);
-        deployEscrow(relayerAddress, defaultArbiter, feeRecipient, feeSplitSigner, gitCommit);
+        deployEscrow(relayerAddress, defaultArbiter, feeSweeper, gitCommit);
         deployCompletion(relayerAddress, feeRecipient, gitCommit);
         vm.stopBroadcast();
 

@@ -18,9 +18,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * ─────────────────────────────────────────────────────────────────────────────────
  * ✅ BUYER: Gets refund based on dispute outcome or mutual agreement
  * ✅ SELLER: Gets payment after expiry OR based on dispute outcome
- * ✅ PLATFORM: Gets small upfront fee only (disclosed transparently)
- * ✅ PARTNER: May receive a share OF that same fee, if the platform signed for it
- *    at creation - never anything beyond the disclosed fee
+ * ✅ PLATFORM: Gets a small fixed fee only (disclosed transparently). It is set aside
+ *    inside the escrow at funding and released later by sweepFees - never anything
+ *    beyond that fee, and never a wei of the escrowed amount
  * ❌ NOBODY ELSE: Code makes it impossible for funds to go anywhere else
  *
  * ─────────────────────────────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * ⚡ Buyer address cannot be changed; seller may reassign only their own payout
  *    address (recipient), and funds still only ever reach the current buyer/seller
  * ⚡ Platform cannot take escrowed funds for themselves
- * ⚡ Platform fee is fixed and transparent (paid once at deposit)
+ * ⚡ Platform fee is fixed and transparent (set aside once at deposit)
  * ⚡ Disputed funds MUST be split 100% between buyer and seller
  * ⚡ Seller cannot claim early (must wait for expiry)
  * ⚡ Buyer can always dispute before expiry
@@ -82,7 +82,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * ─────────────────────────────────────────────────────────────────────────────────
  * 💰 HOW FEES WORK
  * ─────────────────────────────────────────────────────────────────────────────────
- * PLATFORM FEE: Charged once at deposit time (transparent and fixed)
+ * PLATFORM FEE: Set aside once at deposit time (transparent and fixed)
  *    • $0.001 transactions: ZERO platform fee (free testing)
  *    • Real transactions: Platform fee disclosed before deposit
  *    • This is our ONLY revenue - we have no incentive to rule unfairly
@@ -204,7 +204,8 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *    single address can hold two votes and force an outcome alone. The BUYER address
  *    is immutable; the SELLER may reassign only its own payout address via
  *    changeRecipient(), which is seller-controlled and still cannot route funds to the
- *    platform. The platform only ever received its fixed fee at deposit.
+ *    platform. The platform only ever receives its fixed fee, set aside at deposit and
+ *    released by sweepFees - the payouts are computed without it either way.
  *
  * ─────────────────────────────────────────────────────────────────────────────────
  * Q: What trust is required?
@@ -233,7 +234,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * ─────────────────────────────────────────────────────────────────────────────────
  * A: Describe it accurately: "This is escrow with practical, code-bounded dispute
  *    resolution. Escrowed funds can only ever go to the buyer or seller, never the
- *    platform, which takes only a fixed fee at deposit. Disputes resolve by 2-of-3
+ *    platform, which takes only a fixed fee set aside at deposit. Disputes resolve by 2-of-3
  *    voting among buyer, seller and an arbiter who must be independent of both. The
  *    buyer address is fixed; the seller can reassign only its own payout address (e.g.
  *    to sell the receivable). Remaining trust: the arbiter voting fairly when parties
@@ -255,12 +256,10 @@ contract EscrowContract is ReentrancyGuard {
     error InvalidBuyerAddress();
     error InvalidSellerAddress();
     error InvalidArbiterAddress();
-    error InvalidFeeRecipientAddress();
+    error InvalidFeeSweeperAddress();
     error BuyerSellerMustBeDifferent();
     error ArbiterMustBeDistinct();
     error CreatorFeeMustBeLessThanAmount();
-    error PartnerFeeExceedsCreatorFee();
-    error InvalidPartnerFeeRecipient();
     error NotInitialized();
     error OnlyBuyer();
     error OnlySeller();
@@ -268,6 +267,7 @@ contract EscrowContract is ReentrancyGuard {
     error ApprovedTargetMismatch();
     error RecipientApprovalExpired();
     error CannotChangeRecipientDuringDispute();
+    error RecipientUnchanged();
     error OnlyArbiter();
     error AlreadyFundedOrClaimed();
     error CannotDisputeInstantTransfer();
@@ -282,7 +282,10 @@ contract EscrowContract is ReentrancyGuard {
     error InsufficientDirectPayment();
     error CannotSweepEscrowToken();
     error NoTokensToSweep();
-    error TransferAmountMismatch();
+    error OnlyFeeSweeper();
+    error NoFeesToSweep();
+    error InvalidSweepTarget();
+    error InvalidSweepBps();
     // §3.3 — sale-triggered arbiter reset
     error InvalidDefaultArbiterAddress();
     error NotDisputeParty(address caller);
@@ -294,7 +297,7 @@ contract EscrowContract is ReentrancyGuard {
     error PartyCannotBeDefaultArbiter();
 
     // 🔒 SECURITY: Set once at initialization. FACTORY, tokenAddress, BUYER, ARBITER
-    //    and FEE_RECIPIENT can NEVER change. SELLER is the one exception: the current
+    //    and FEE_SWEEPER can NEVER change. SELLER is the one exception: the current
     //    seller may reassign it via changeRecipient() (see that function), but only the
     //    seller can do so, only while funded and undisputed, and funds can still ONLY
     //    ever reach the current BUYER or SELLER - never the platform or a third party.
@@ -309,13 +312,13 @@ contract EscrowContract is ReentrancyGuard {
     //    after which the parties re-seat by matching nomination, or the DEFAULT_ARBITER
     //    fallback takes the seat once the nomination window lapses. See §3.3A.
     address public ARBITER;
-    address public FEE_RECIPIENT; // Address that receives the platform fee - immutable
+    address public FEE_SWEEPER; // The ONLY address that can release the platform fee (sweepFees) - immutable
 
     // 💰 FINANCIAL TERMS: Set once at creation, cannot be modified
     uint256 public AMOUNT; // Total amount BUYER must deposit (includes platform fee)
     uint256 public EXPIRY_TIMESTAMP; // When SELLER can claim funds (if no dispute)
     // Description stored in events only (not in storage) to save ~20k gas
-    uint256 public CREATOR_FEE; // Small platform fee (deducted from AMOUNT, rest goes to BUYER/SELLER)
+    uint256 public CREATOR_FEE; // Small platform fee (deducted from AMOUNT, rest goes to BUYER/SELLER). Set aside at funding, released by sweepFees
     uint256 public createdAt; // Timestamp when the contract was created
 
     // 🔐 INTERNAL STATE: Tracks contract progress (cannot be manipulated externally)
@@ -446,24 +449,18 @@ contract EscrowContract is ReentrancyGuard {
     ///         slots and an extra SSTORE on every recipient transfer.
     uint64 public recipientNonce;
 
-    /// @notice Revenue-share partner paid PARTNER_FEE out of CREATOR_FEE at funding
-    ///         (address(0) = no split). Set once at initialize, never changed.
+    /// @notice The platform fee this escrow is still holding: CREATOR_FEE from the moment
+    ///         the escrow is funded until FEE_SWEEPER releases it with sweepFees, then 0.
     ///
-    /// @dev    Declared HERE so it packs into the slot `resolvedBuyerPercentage` and
-    ///         `recipientNonce` already share (1 + 8 + 20 bytes), and initialize writes
-    ///         that slot anyway - a split costs no extra slot for the address.
+    /// @dev    The fee is SET ASIDE at funding, not paid out. Every payout computes its
+    ///         figure as AMOUNT - CREATOR_FEE and never reads this, so sweeping the fee
+    ///         cannot change what the buyer or seller receive, and a claim or resolution
+    ///         cannot change what the sweep releases. The two flows share a token balance
+    ///         and nothing else; sweepToken (the surplus recovery) is the one place that
+    ///         has to subtract this to tell surplus from fee.
     ///
-    ///         The partner is carved out of the fee, never added to it: the buyer pays
-    ///         AMOUNT and the seller nets AMOUNT - CREATOR_FEE whether or not a split
-    ///         exists. Only the platform's own portion shrinks. The factory admits a split
-    ///         only with a signature from its FEE_SPLIT_SIGNER - see
-    ///         EscrowContractFactory._validateSplit.
-    address public PARTNER_FEE_RECIPIENT;
-
-    /// @notice Portion of CREATOR_FEE paid to PARTNER_FEE_RECIPIENT (0 = no split).
-    ///         Always <= CREATOR_FEE. Only written when non-zero, so an unsplit escrow
-    ///         pays nothing for the slot.
-    uint256 public PARTNER_FEE;
+    ///         0 before funding and on a zero-fee escrow, so sweepFees refuses both.
+    uint256 public retainedFee;
 
     /// @notice Grace period for buyer + current recipient to agree an arbiter on a SOLD
     ///         escrow before the DEFAULT_ARBITER fallback becomes seatable.
@@ -495,10 +492,20 @@ contract EscrowContract is ReentrancyGuard {
     ///         closes nothing, so it cannot become a forced-resolution backdoor.
     uint256 public constant ARBITER_SILENCE_TIMEOUT = 30 days;
 
+    /// @notice sweepFees expresses the split in basis points of CREATOR_FEE; the two
+    ///         legs must sum to exactly this, so one call always releases the whole fee.
+    uint16 public constant BPS_DENOMINATOR = 10_000;
+
     // 📢 PUBLIC EVENTS: These events prove what happened (recorded permanently on blockchain)
     event FundsDeposited(address buyer, uint256 escrowAmount, uint256 timestamp);
-    event PlatformFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
-    event PartnerFeeCollected(address recipient, uint256 feeAmount, uint256 timestamp);
+    /// @notice The platform fee was set aside inside the escrow at funding. Not emitted
+    ///         on a zero-fee escrow.
+    event FeeRetained(uint256 feeAmount, uint256 timestamp);
+    /// @notice One leg of a sweepFees call: `amount` of the fee (`bps` of CREATOR_FEE,
+    ///         rounded as sweepFees describes) went to `target`. A split sweep emits two
+    ///         of these in the same transaction; an unsplit sweep emits one with bps 10_000.
+    ///         Sum the amounts over an escrow's FeesSwept events for the fee it has paid out.
+    event FeesSwept(address indexed target, uint16 bps, uint256 amount, uint256 timestamp);
     event DisputeRaised(uint256 timestamp);
     event DisputeResolved(uint256 buyerPercentage, uint256 sellerPercentage, uint256 timestamp);
     event FundsClaimed(address recipient, uint256 amount, uint256 timestamp);
@@ -539,6 +546,12 @@ contract EscrowContract is ReentrancyGuard {
         _;
     }
 
+    // 💳 FEE RELEASE: Only the sweeper fixed by the factory can move the retained fee
+    modifier onlyFeeSweeper() {
+        if (msg.sender != FEE_SWEEPER) revert OnlyFeeSweeper();
+        _;
+    }
+
     /**
      * @param _defaultArbiter The fallback arbitrator for SOLD escrows (§3.3A1a). Baked
      *        into this implementation's bytecode and shared by every clone, so it cannot
@@ -563,9 +576,7 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _amount,
         uint256 _expiryTimestamp,
         uint256 _creatorFee,
-        address _feeRecipient,
-        address _partnerFeeRecipient,
-        uint256 _partnerFee
+        address _feeSweeper
     ) external {
         if (_state != 0) revert AlreadyInitialized();
         if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
@@ -574,10 +585,10 @@ contract EscrowContract is ReentrancyGuard {
         if (_buyer == address(0)) revert InvalidBuyerAddress();
         if (_seller == address(0)) revert InvalidSellerAddress();
         if (_arbiter == address(0)) revert InvalidArbiterAddress();
-        // FEE_RECIPIENT is never meant to be zero: the factory substitutes its owner
-        // when unset. Reject a zero here so a directly-initialized clone cannot brick
-        // fee transfers (or silently burn the fee) on deposit.
-        if (_feeRecipient == address(0)) revert InvalidFeeRecipientAddress();
+        // FEE_SWEEPER is never meant to be zero: the factory substitutes its owner when
+        // unset. Reject a zero here so a directly-initialized clone cannot strand its fee
+        // behind an address nobody holds.
+        if (_feeSweeper == address(0)) revert InvalidFeeSweeperAddress();
         if (_buyer == _seller) revert BuyerSellerMustBeDifferent();
         // The arbiter must be a third party. If it shares an address with the buyer
         // or seller, that address would control 2-of-3 votes and could unilaterally
@@ -595,25 +606,16 @@ contract EscrowContract is ReentrancyGuard {
         BUYER = _buyer;
         SELLER = _seller;
         ARBITER = _arbiter;
-        FEE_RECIPIENT = _feeRecipient;
+        FEE_SWEEPER = _feeSweeper;
         AMOUNT = _amount;
         EXPIRY_TIMESTAMP = _expiryTimestamp;
         CREATOR_FEE = _creatorFee;
         createdAt = block.timestamp; // Set the creation timestamp
         if (_creatorFee >= _amount) revert CreatorFeeMustBeLessThanAmount();
-        // The partner share is carved out of the fee, so it can never exceed it - that is
-        // what keeps the buyer's and seller's figures independent of any split.
-        if (_partnerFee > _creatorFee) revert PartnerFeeExceedsCreatorFee();
-        if (_partnerFee > 0) {
-            if (_partnerFeeRecipient == address(0)) revert InvalidPartnerFeeRecipient();
-            PARTNER_FEE_RECIPIENT = _partnerFeeRecipient;
-            PARTNER_FEE = _partnerFee;
-        }
         _state = 0; // Set to unfunded state
 
         // NOTE: the arbiter nomination window is the NOMINATION_WINDOW constant and is
-        // deliberately NOT a parameter here - see its declaration for why. (This signature
-        // did grow the partner-split pair; only the factory calls it in production.)
+        // deliberately NOT a parameter here - see its declaration for why.
 
         // §3.3C: 255 = "no dispute resolution has occurred". This MUST be written here
         // rather than as a declaration initializer - clone storage starts at zero, and a
@@ -634,97 +636,16 @@ contract EscrowContract is ReentrancyGuard {
     }
 
     /**
-     * 💰 BUYER DEPOSITS MONEY - THE ESCROW BEGINS
-     *
-     * 🔒 SECURITY GUARANTEE: Callable by anyone. Funds always come from BUYER's wallet
-     *    via safeTransferFrom, which requires BUYER's prior approval - so no other
-     *    address can cause funds to leave BUYER's wallet without their consent.
-     *
-     * What happens when funds are deposited:
-     * 1. BUYER's money is LOCKED in this contract (not sent to SELLER yet)
-     * 2. Platform gets their small fee immediately (shown upfront)
-     * 3. The remaining money stays LOCKED until expiry or dispute resolution
-     * 4. SELLER cannot access the money until the time expires (unless dispute happens)
-     *
-     * 🛡️ MONEY PROTECTION:
-     * ✅ Money is safe from everyone (even the platform) except BUYER and SELLER
-     * ✅ SELLER must wait for expiry time to get paid
-     * ✅ BUYER can dispute at any time to get protection
-     * ✅ Platform fee is transparent and fixed upfront
-     * ✅ Funds always come from BUYER's wallet (BUYER must have approved this contract)
-     *
-     * After this function:
-     * - Total deposited: {AMOUNT}
-     * - Platform gets: {CREATOR_FEE}
-     * - Escrowed for BUYER/SELLER: {AMOUNT - CREATOR_FEE}
-     */
-    function depositFunds() external initialized nonReentrant {
-        if (_state != 0) revert AlreadyFundedOrClaimed();
-
-        uint256 escrowAmount;
-        unchecked {
-            // Safe: CREATOR_FEE < AMOUNT is checked in initialize
-            escrowAmount = AMOUNT - CREATOR_FEE;
-        }
-
-        // Check if this is an instant transfer (expiry timestamp is 0)
-        bool isInstantTransfer = EXPIRY_TIMESTAMP == 0;
-
-        if (isInstantTransfer) {
-            _state = 4; // claimed - instant transfer complete
-
-            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
-            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            _emitFeeEvents();
-            emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
-
-            // 🔒 STEP 2: BUYER's money is transferred to this contract temporarily
-            uint256 balanceBefore = tokenAddress.balanceOf(address(this));
-            tokenAddress.safeTransferFrom(BUYER, address(this), AMOUNT);
-            // Reject fee-on-transfer / deflationary / rebasing tokens: payouts below
-            // assume exactly AMOUNT arrived. If less (or more) landed, fail the deposit
-            // rather than mis-accounting or locking funds on later payout.
-            if (tokenAddress.balanceOf(address(this)) - balanceBefore != AMOUNT) revert TransferAmountMismatch();
-
-            // 💳 STEP 3: Platform gets their fee (transparent and upfront)
-            _payFees();
-
-            // 💰 STEP 4: Immediately transfer to SELLER (no escrow period)
-            tokenAddress.safeTransfer(SELLER, escrowAmount);
-        } else {
-            _state = 1; // funded - money is now LOCKED in escrow
-
-            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
-            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            _emitFeeEvents();
-
-            // 🔒 STEP 2: BUYER's money is transferred to this contract (LOCKED AWAY)
-            uint256 balanceBefore = tokenAddress.balanceOf(address(this));
-            tokenAddress.safeTransferFrom(BUYER, address(this), AMOUNT);
-            // Reject fee-on-transfer / deflationary / rebasing tokens: the escrowed
-            // funds must equal AMOUNT so later claim/dispute payouts cannot revert and
-            // lock funds. Fail the deposit instead of accepting a short transfer.
-            if (tokenAddress.balanceOf(address(this)) - balanceBefore != AMOUNT) revert TransferAmountMismatch();
-
-            // 💳 STEP 3: Platform gets their fee (transparent and upfront)
-            // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
-            _payFees();
-
-            // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
-        }
-    }
-
-    /**
      * 💰 CHECK AND ACTIVATE - DIRECT TRANSFER FUNDING
      *
      * 🔒 SECURITY GUARANTEE: This function can be called by ANYONE - this is safe because
-     *    it only distributes funds to the escrow's own roles (BUYER, current SELLER,
-     *    FEE_RECIPIENT, PARTNER_FEE_RECIPIENT) - never to an arbitrary caller.
+     *    it only ever moves funds to the escrow's own roles (BUYER, current SELLER) and
+     *    sets the fee aside for FEE_SWEEPER - never anything to an arbitrary caller.
      *
      * What happens when checkAndActivate is called:
      * 1. Checks if tokens were already sent directly to this contract address
      * 2. If balance >= AMOUNT, activates the escrow
-     * 3. Platform gets their small fee immediately (shown upfront)
+     * 3. The platform's small fee (shown upfront) is SET ASIDE here, released only by sweepFees
      * 4. For instant transfers (EXPIRY_TIMESTAMP == 0): funds go directly to SELLER
      * 5. For normal escrow: remaining money stays LOCKED until expiry or dispute resolution
      *
@@ -732,6 +653,14 @@ contract EscrowContract is ReentrancyGuard {
      * ✅ Supports funding via direct token transfer (e.g., exchange withdrawals)
      * ✅ No approval needed - buyer sends tokens directly to contract address
      * ✅ Anyone can call to activate after tokens arrive
+     *
+     * ⚠️ THIS IS THE ONLY FUNDING PATH. There used to be a depositFunds() that pulled
+     *    AMOUNT from BUYER under an ERC20 approval. It was removed: an approval outlives
+     *    an abandoned deposit, the dispute window closes at the moment claimFunds opens,
+     *    and the pull was callable by anyone - so after expiry the seller could pull and
+     *    claim the buyer's money in one transaction with no dispute window at all. A
+     *    direct transfer has no such hazard: activating money that is already here cannot
+     *    take anything from anyone, which is also why this stays permissionless.
      */
     function checkAndActivate() external initialized nonReentrant {
         if (_state != 0) revert AlreadyFundedOrClaimed();
@@ -751,61 +680,119 @@ contract EscrowContract is ReentrancyGuard {
         if (isInstantTransfer) {
             _state = 4; // claimed - instant transfer complete
 
-            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
+            // 💳 STEP 1: Set the platform fee aside (it stays here until sweepFees)
+            _retainFee();
+
+            // 📝 STEP 2: Emit events before external calls to prevent event-based reentrancy
             emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            _emitFeeEvents();
             emit FundsClaimed(SELLER, escrowAmount, block.timestamp);
 
-            // 💳 STEP 2: Platform gets their fee (transparent and upfront)
-            _payFees();
-
-            // 💰 STEP 3: Immediately transfer to SELLER (no escrow period)
+            // 💰 STEP 3: Immediately transfer to SELLER (no escrow period). The fee stays.
             tokenAddress.safeTransfer(SELLER, escrowAmount);
         } else {
             _state = 1; // funded - money is now LOCKED in escrow
 
-            // 📝 STEP 1: Emit events before external calls to prevent event-based reentrancy
-            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
-            _emitFeeEvents();
-
-            // 💳 STEP 2: Platform gets their fee (transparent and upfront)
+            // 💳 STEP 1: Set the platform fee aside (it stays here until sweepFees)
             // ⚠️  IMPORTANT: This is the ONLY money the platform gets - they cannot access the rest
-            _payFees();
+            _retainFee();
 
-            // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or SELLER
+            // 📝 STEP 2: Emit events before external calls to prevent event-based reentrancy
+            emit FundsDeposited(BUYER, escrowAmount, block.timestamp);
+
+            // 🔐 At this point: (AMOUNT - CREATOR_FEE) is LOCKED and can ONLY go to BUYER or
+            //    SELLER, and CREATOR_FEE is set aside and can ONLY leave via sweepFees
         }
     }
 
     /**
-     * The fee, split between the platform and (if any) the partner. Together they are
-     * exactly CREATOR_FEE, so every caller's escrowAmount = AMOUNT - CREATOR_FEE holds.
-     *
-     * PlatformFeeCollected now reports the PLATFORM'S portion; on an unsplit escrow that
-     * is the whole fee, as before. Sum it with PartnerFeeCollected for the total.
+     * Set the fee aside. Every caller's escrowAmount = AMOUNT - CREATOR_FEE holds from
+     * here on; the fee itself just sits in this contract's balance, earmarked, until
+     * sweepFees moves it. Nothing is emitted on a zero-fee escrow.
      */
-    function _emitFeeEvents() internal {
-        uint256 partnerFee = PARTNER_FEE;
-        unchecked {
-            // Safe: PARTNER_FEE <= CREATOR_FEE is checked in initialize
-            if (CREATOR_FEE - partnerFee > 0) {
-                emit PlatformFeeCollected(FEE_RECIPIENT, CREATOR_FEE - partnerFee, block.timestamp);
-            }
-        }
-        if (partnerFee > 0) {
-            emit PartnerFeeCollected(PARTNER_FEE_RECIPIENT, partnerFee, block.timestamp);
+    function _retainFee() internal {
+        uint256 fee = CREATOR_FEE;
+        if (fee > 0) {
+            retainedFee = fee;
+            emit FeeRetained(fee, block.timestamp);
         }
     }
 
-    function _payFees() internal {
-        uint256 partnerFee = PARTNER_FEE;
+    /**
+     * 💳 SWEEP THE PLATFORM FEE - THE ONLY WAY THE FEE LEAVES THIS ESCROW
+     *
+     * The fee was set aside at funding (checkAndActivate) and has sat in
+     * this contract since, untouched by every payout. This releases it. It is the one
+     * fee-moving function, and the fee is the one thing it can move.
+     *
+     * 🔀 INDEPENDENT OF THE PAYOUT, BY CONSTRUCTION.
+     *    claimFunds, _executeResolution and the instant-transfer path all pay out
+     *    AMOUNT - CREATOR_FEE and never read `retainedFee`. This reads `retainedFee` and
+     *    never reads `_state`. So the fee can be swept while the escrow is live, disputed
+     *    or finished, and the escrow can be claimed or resolved before or after the sweep,
+     *    with the same figures every way round. The only ordering is that the money has to
+     *    have arrived: before funding there is nothing set aside, and this reverts.
+     *
+     * ✂️ ONE SHOT, SPLIT ATOMICALLY.
+     *    The whole fee goes out in a single call, divided between up to two targets by
+     *    basis points of CREATOR_FEE that must sum to exactly BPS_DENOMINATOR. A split
+     *    executed as two separate calls could be half-applied - the first leg lands, the
+     *    second fails or never comes, and whoever calls next decides where the rest goes.
+     *    Making both legs one transaction means the split either executes as stated or
+     *    not at all, and once it has there is nothing left for a second call to take:
+     *    `retainedFee` is zeroed and this reverts NoFeesToSweep for ever after.
+     *
+     *    target1 receives CREATOR_FEE * bps1 / BPS_DENOMINATOR, rounded down; target2
+     *    receives everything else, so rounding dust never strands. With bps1 == 10_000
+     *    the second leg does not exist: target2 is ignored and may be zero.
+     *
+     * 🔒 SECURITY:
+     * ✅ Only FEE_SWEEPER - fixed by the factory when the clone was created - can call
+     * ✅ Can only ever move CREATOR_FEE in total. The escrowed AMOUNT - CREATOR_FEE is
+     *    not reachable from here under any arguments
+     * ✅ Reverts before funding, after the sweep, and on a zero-fee escrow
+     * ✅ Reverts rather than burns: a zero target on a live leg is refused
+     *
+     * @param target1 Receives bps1 of the fee. Must not be zero.
+     * @param bps1    Basis points of CREATOR_FEE for target1. 1..10_000.
+     * @param target2 Receives the rest. Must not be zero unless bps2 == 0.
+     * @param bps2    Basis points of CREATOR_FEE for target2. bps1 + bps2 must be 10_000.
+     */
+    function sweepFees(address target1, uint16 bps1, address target2, uint16 bps2)
+        external
+        onlyFeeSweeper
+        initialized
+        nonReentrant
+    {
+        uint256 fee = retainedFee;
+        if (fee == 0) revert NoFeesToSweep();
+        if (bps1 == 0 || uint256(bps1) + uint256(bps2) != BPS_DENOMINATOR) revert InvalidSweepBps();
+        if (target1 == address(0) || (bps2 != 0 && target2 == address(0))) revert InvalidSweepTarget();
+
+        // 🔐 STEP 1: Release the earmark before any external call. From here the fee is
+        //    gone as far as this contract is concerned; sweepToken will no longer hold it back.
+        retainedFee = 0;
+
+        uint256 amount1 = bps2 == 0 ? fee : (fee * bps1) / BPS_DENOMINATOR;
+        uint256 amount2;
         unchecked {
-            // Safe: PARTNER_FEE <= CREATOR_FEE is checked in initialize
-            if (CREATOR_FEE - partnerFee > 0) {
-                tokenAddress.safeTransfer(FEE_RECIPIENT, CREATOR_FEE - partnerFee);
-            }
+            // Safe: amount1 <= fee by math (bps1 <= BPS_DENOMINATOR)
+            amount2 = fee - amount1;
         }
-        if (partnerFee > 0) {
-            tokenAddress.safeTransfer(PARTNER_FEE_RECIPIENT, partnerFee);
+
+        // 📝 STEP 2: Emit events before external calls to prevent event-based reentrancy
+        emit FeesSwept(target1, bps1, amount1, block.timestamp);
+        if (bps2 != 0) {
+            emit FeesSwept(target2, bps2, amount2, block.timestamp);
+        }
+
+        // 💸 STEP 3: Pay the legs. A tiny fee can round either leg to zero; the events
+        //    above still record both legs, and a zero transfer is simply skipped (some
+        //    tokens revert on transfer(0), and nothing is owed).
+        if (amount1 > 0) {
+            tokenAddress.safeTransfer(target1, amount1);
+        }
+        if (amount2 > 0) {
+            tokenAddress.safeTransfer(target2, amount2);
         }
     }
 
@@ -821,19 +808,31 @@ contract EscrowContract is ReentrancyGuard {
      *    from AMOUNT. So a buyer who sends too much (a mistyped QR amount, an exchange
      *    withdrawal rounded up) leaves the excess behind, and while this refused the escrow
      *    token in every state that excess could never leave: not stolen, but locked for
-     *    good. After a claim or a resolution every obligation has been discharged, so any
-     *    remaining balance is surplus by definition and belongs to the depositor.
+     *    good. After a claim or a resolution every obligation to buyer and seller has been
+     *    discharged, so any remaining balance BEYOND THE RETAINED FEE is surplus by
+     *    definition and belongs to the depositor.
+     *
+     * ⚠️ THE FEE IS NOT SURPLUS. Since the fee is set aside here rather than paid out at
+     *    funding, a finished escrow's balance is (unswept fee) + (surplus). This hands over
+     *    only the surplus: `retainedFee` is subtracted first, so the buyer cannot sweep the
+     *    platform's fee out from under FEE_SWEEPER, before or after the escrow settles.
+     *    Once the fee has been swept, `retainedFee` is 0 and the whole balance is surplus.
      *
      * 🔒 SECURITY:
      * ✅ The escrow token is untouchable while the escrow is live, disputed or unfunded —
      *    only state 4 (claimed, whether at maturity or by resolution) opens it
+     * ✅ The retained fee is never swept here, whatever the state
      * ✅ Callable by anyone - funds always go to BUYER regardless of caller
      * ✅ Funds always go to BUYER (the depositor)
      */
     function sweepToken(address _token) external initialized nonReentrant {
-        if (_token == address(tokenAddress) && _state != 4) revert CannotSweepEscrowToken();
-
         uint256 balance = IERC20(_token).balanceOf(address(this));
+        if (_token == address(tokenAddress)) {
+            if (_state != 4) revert CannotSweepEscrowToken();
+            // Safe: retainedFee was funded into this balance and only leaves via sweepFees,
+            // which zeroes it in the same transaction as the transfer.
+            balance -= retainedFee;
+        }
         if (balance == 0) revert NoTokensToSweep();
 
         emit TokensSwept(_token, BUYER, balance);
@@ -919,8 +918,10 @@ contract EscrowContract is ReentrancyGuard {
         // Validate the destination up front with the same guards the execution applies,
         // so a doomed approval fails at grant time rather than at the swap.
         if (newRecipient == address(0)) revert InvalidSellerAddress();
+        if (newRecipient == SELLER) revert RecipientUnchanged();
         if (newRecipient == BUYER) revert BuyerSellerMustBeDifferent();
         if (newRecipient == ARBITER) revert ArbiterMustBeDistinct();
+        if (newRecipient == DEFAULT_ARBITER) revert PartyCannotBeDefaultArbiter();
 
         uint64 expiry = uint64(block.timestamp + RECIPIENT_APPROVAL_TTL);
         recipientOperator = operator;
@@ -980,6 +981,18 @@ contract EscrowContract is ReentrancyGuard {
         if (_state == 2) revert CannotChangeRecipientDuringDispute();
         if (_state != 1) revert NotFundedOrAlreadyProcessed();
         if (newSeller == address(0)) revert InvalidSellerAddress();
+        // ⚠️ A transfer to the CURRENT recipient is not a transfer. It used to be accepted
+        //    as a harmless no-op, but through transferRecipientFrom it was not harmless:
+        //    the seller could approve a wallet of their own and have it "buy" the role
+        //    back to the same address, and the sale consequences still fired. hasBeenSold
+        //    flipped on an escrow that had never changed hands, which made the
+        //    marketplace refuse a holdback to any genuine later buyer; and the seated,
+        //    mutually agreed arbiter was unseated with no dispute, no silence and no say
+        //    from the buyer. Nothing legitimate needs a no-op transfer, so refuse it.
+        //    (A seller with TWO wallets can still stage a sale between them. That is
+        //    indistinguishable on-chain from a real OTC sale and is documented at
+        //    transferRecipientFrom; this closes the case where even the address is a lie.)
+        if (newSeller == SELLER) revert RecipientUnchanged();
         if (newSeller == BUYER) revert BuyerSellerMustBeDifferent();
         // Prevent collapsing the seller and arbiter into one address, which would
         // give that address 2-of-3 votes and unilateral control of dispute outcomes.
@@ -1366,7 +1379,7 @@ contract EscrowContract is ReentrancyGuard {
      * Total escrowed = (AMOUNT - CREATOR_FEE)
      * Buyer receives = (Total × agreedPercentage) ÷ 100
      * Seller receives = Total - Buyer amount
-     * Platform receives = 0 (already got CREATOR_FEE at deposit)
+     * Platform receives = 0 here (CREATOR_FEE was set aside at deposit, for sweepFees)
      *
      * This approach combines BLOCKCHAIN SECURITY (code-guaranteed fund safety)
      * with PRACTICAL UX (voting-based resolution). It's transparent and fair.
@@ -1473,7 +1486,8 @@ contract EscrowContract is ReentrancyGuard {
         }
 
         // ✅ SECURITY VERIFICATION: At this point, 100% of escrowed money has been
-        //    distributed to BUYER and SELLER. Platform cannot access any of it.
+        //    distributed to BUYER and SELLER. Platform cannot access any of it. The
+        //    retained fee, if unswept, is still here and still only sweepFees can move it.
     }
 
     /**
@@ -1499,7 +1513,7 @@ contract EscrowContract is ReentrancyGuard {
      *
      * 💰 MONEY FLOW:
      * [LOCKED FUNDS] → [SELLER gets 100% of escrowed amount]
-     * Platform already got their fee during deposit - they get NOTHING here
+     * The platform's fee was set aside at deposit and leaves only via sweepFees - NOTHING here
      */
     function claimFunds() external initialized nonReentrant {
         if (_state != 1) revert NotFundedOrAlreadyProcessed();
@@ -1508,7 +1522,7 @@ contract EscrowContract is ReentrancyGuard {
 
         _state = 4; // claimed - transaction complete
 
-        // 💰 Calculate amount for SELLER (total minus platform fee that was already paid)
+        // 💰 Calculate amount for SELLER (total minus the platform fee set aside at deposit)
         uint256 escrowAmount;
         unchecked {
             // Safe: CREATOR_FEE < AMOUNT is checked in initialize
@@ -1585,7 +1599,7 @@ contract EscrowContract is ReentrancyGuard {
     }
 
     /// @notice Net amount the recipient actually receives (AMOUNT minus the platform
-    ///         fee already collected at deposit). This is the value of the cashflow
+    ///         fee set aside at deposit). This is the value of the cashflow
     ///         a marketplace/LP should price against, not the gross AMOUNT.
     function payoutAmount() external view initialized returns (uint256) {
         // Safe: CREATOR_FEE < AMOUNT is enforced in initialize.

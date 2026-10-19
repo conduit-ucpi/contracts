@@ -40,14 +40,18 @@ contract InvToken {
 }
 
 /// Drives one funded escrow through random legal actions: disputes, votes (by the
-/// current seller/buyer/arbiter), claims, and recipient reassignments. Every call is
-/// wrapped in try/catch so reverts (wrong state, wrong caller) simply no-op.
+/// current seller/buyer/arbiter), claims, recipient reassignments, and fee sweeps (by
+/// the sweeper and by impostors, whole and split). Every call is wrapped in try/catch so
+/// reverts (wrong state, wrong caller) simply no-op.
 contract EscrowHandler is Test {
     EscrowContract public escrow;
     InvToken public token;
 
     address public buyer;
     address public arbiter;
+    address public feeSweeper;
+    address public feeTargetA; // where the sweeper sends fees
+    address public feeTargetB;
     address[] public reassignTargets; // legal newSeller candidates (never buyer/arbiter)
 
     constructor(
@@ -55,13 +59,38 @@ contract EscrowHandler is Test {
         InvToken _token,
         address _buyer,
         address _arbiter,
+        address _feeSweeper,
+        address _feeTargetA,
+        address _feeTargetB,
         address[] memory _reassignTargets
     ) {
         escrow = _escrow;
         token = _token;
         buyer = _buyer;
         arbiter = _arbiter;
+        feeSweeper = _feeSweeper;
+        feeTargetA = _feeTargetA;
+        feeTargetB = _feeTargetB;
         reassignTargets = _reassignTargets;
+    }
+
+    /// The sweeper releases the fee, whole or split, at any point in the lifecycle. Legal
+    /// targets only: the invariants sum over a closed set, so a stray target would read as
+    /// a leak rather than a sweep.
+    function sweepFees(uint256 bpsSeed) external {
+        uint16 bps1 = uint16(bound(bpsSeed, 1, 10_000));
+        uint16 bps2 = 10_000 - bps1;
+        vm.prank(feeSweeper);
+        try escrow.sweepFees(feeTargetA, bps1, bps2 == 0 ? address(0) : feeTargetB, bps2) {} catch {}
+    }
+
+    /// Anyone else trying to sweep, with any arguments, must be a no-op.
+    function sweepFeesAsImpostor(uint256 callerSeed, uint256 bpsSeed) external {
+        address[4] memory callers = [buyer, escrow.SELLER(), arbiter, address(this)];
+        address caller = callers[callerSeed % 4];
+        uint16 bps1 = uint16(bound(bpsSeed, 0, 10_000));
+        vm.prank(caller);
+        try escrow.sweepFees(caller, bps1, caller, 10_000 - bps1) {} catch {}
     }
 
     function raiseDispute() external {
@@ -123,7 +152,9 @@ contract InvariantEscrowTest is Test {
     address buyer = address(0xB1);
     address seller = address(0x5E);
     address arbiter = address(0xA6);
-    address feeRecipient = address(0xFEE);
+    address feeSweeper = address(0xFEE); // the factory's FEE_SWEEPER; never a party, never a target
+    address feeTargetA = address(0xFA);
+    address feeTargetB = address(0xFB);
     address lp1 = address(0x11);
     address lp2 = address(0x22);
 
@@ -135,7 +166,7 @@ contract InvariantEscrowTest is Test {
         token.mint(buyer, AMOUNT);
 
         EscrowContract impl = new EscrowContract(address(0xDEFA17), bytes20(0));
-        factory = new EscrowContractFactory(arbiter, address(impl), feeRecipient, address(0), bytes20(0));
+        factory = new EscrowContractFactory(arbiter, address(impl), feeSweeper, bytes20(0));
 
         address esc = factory.createEscrowContract(
             address(token), buyer, seller, AMOUNT, block.timestamp + 7 days, "inv", arbiter, bytes32(uint256(64))
@@ -145,22 +176,21 @@ contract InvariantEscrowTest is Test {
 
         // Fund it so the invariant explores the post-funding state space.
         vm.prank(buyer);
-        token.approve(esc, AMOUNT);
-        vm.prank(buyer);
-        escrow.depositFunds();
+        token.transfer(esc, AMOUNT);
+        escrow.checkAndActivate();
 
         // newSeller candidates: never buyer, never arbiter (rejected on-chain), and we
-        // deliberately exclude feeRecipient so the fee address stays a pure sink and the
-        // fee invariant remains meaningful. (Reassigning to feeRecipient is legal on-chain
-        // but nonsensical, and would just make it a seller receiving a payout.)
+        // deliberately exclude the fee targets so those addresses stay pure sinks and the
+        // fee invariant remains meaningful. (Reassigning to one is legal on-chain but
+        // nonsensical, and would just make it a seller receiving a payout.)
         address[] memory targets = new address[](3);
         targets[0] = seller;
         targets[1] = lp1;
         targets[2] = lp2;
 
-        handler = new EscrowHandler(escrow, token, buyer, arbiter, targets);
+        handler = new EscrowHandler(escrow, token, buyer, arbiter, feeSweeper, feeTargetA, feeTargetB, targets);
 
-        participants = [buyer, seller, arbiter, feeRecipient, lp1, lp2, address(escrow)];
+        participants = [buyer, seller, arbiter, feeSweeper, feeTargetA, feeTargetB, lp1, lp2, address(escrow)];
 
         targetContract(address(handler));
     }
@@ -175,14 +205,27 @@ contract InvariantEscrowTest is Test {
         assertEq(sum, AMOUNT);
     }
 
-    /// The escrow never holds more than the escrowed amount (AMOUNT - fee): the
-    /// platform fee left immediately at deposit and payouts only ever reduce it.
-    function invariant_escrowNeverExceedsEscrowed() public view {
-        assertLe(token.balanceOf(address(escrow)), escrowAmount);
+    /// The escrow never holds more than the escrowed amount (AMOUNT - fee) plus whatever
+    /// of the fee is still set aside: payouts and the sweep only ever reduce it.
+    function invariant_escrowNeverExceedsEscrowedPlusRetainedFee() public view {
+        assertLe(token.balanceOf(address(escrow)), escrowAmount + escrow.retainedFee());
     }
 
-    /// The fee recipient received exactly the fee and it never moves afterward.
-    function invariant_feeIsExactAndImmutable() public view {
-        assertEq(token.balanceOf(feeRecipient), AMOUNT - escrowAmount);
+    /// The fee is conserved: whatever has been swept to the targets plus whatever is still
+    /// retained is exactly the fee, at every moment. The sweeper itself never holds any of
+    /// it (it only names targets), and no impostor sweep ever moves a unit.
+    function invariant_feeIsExactAndOnlyEverSwept() public view {
+        uint256 fee = AMOUNT - escrowAmount;
+        assertEq(token.balanceOf(feeTargetA) + token.balanceOf(feeTargetB) + escrow.retainedFee(), fee);
+        assertEq(token.balanceOf(feeSweeper), 0);
+        assertEq(token.balanceOf(arbiter), 0);
+    }
+
+    /// The escrow's balance can never be below what it still owes: the escrowed funds
+    /// while live, and the retained fee always.
+    function invariant_escrowCoversWhatItOwes() public view {
+        uint256 owed = escrow.retainedFee();
+        if (escrow.isFunded() && !escrow.isClaimed()) owed += escrowAmount;
+        assertGe(token.balanceOf(address(escrow)), owed);
     }
 }

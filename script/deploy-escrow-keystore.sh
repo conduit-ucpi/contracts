@@ -13,8 +13,7 @@
 #   ./script/deploy-escrow-keystore.sh
 #
 # Reads config from .env (NETWORK, CHAIN_ID, NETWORK_RPC_URL,
-# DEFAULT_ARBITER_ADDRESS, optional FEE_RECIPIENT_ADDRESS /
-# FEE_SPLIT_SIGNER_ADDRESS, and — for
+# DEFAULT_ARBITER_ADDRESS, optional FEE_SWEEPER_ADDRESS, and — for
 # verification — VERIFIER_API_KEY / VERIFIER_URL). Override the keystore name
 # with ACCOUNT=<name>. Set VERIFY=0 to skip verification.
 set -euo pipefail
