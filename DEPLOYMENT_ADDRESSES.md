@@ -14,37 +14,40 @@ This file tracks all deployed contract addresses across different networks.
 Used by **chainservice**. Retains `EXPIRY_TIMESTAMP`, where expiry is load-bearing:
 it gates `claimFunds()`, and `EXPIRY_TIMESTAMP == 0` means instant transfer.
 
-Built from commit `a42c1e2`. It includes the §3.2 approve/pull recipient transfer, the §3.3
-sale-triggered arbiter reset, the `hasBeenSold` flag (§5.3), partner fee splits
-(`*WithSplit`, gated by `FEE_SPLIT_SIGNER`), arbiter resignation/reseating, and the
-fix for the dispute-window re-arm issue reported by xbyteid (`83a3e77b2f`). Every issue
-fixed up to that commit is live in this deployment. Anything reported against
-`0x77acD2d…` or older addresses describes a superseded deployment.
+Built from commit `45232e8` (release `v62.0.1`). It includes the §3.2 approve/pull
+recipient transfer, the §3.3 sale-triggered arbiter reset, the `hasBeenSold` flag (§5.3),
+arbiter resignation/reseating, the fix for the dispute-window re-arm issue reported by
+xbyteid (`83a3e77b2f`), and the `3ad8671` changes: the platform fee is retained in the
+escrow and released only by `sweepFees` from `FEE_SWEEPER`, `depositFunds` (approve-and-pull
+funding) is removed, and a recipient transfer to the current recipient is refused. Signed
+partner fee splits (`*WithSplit`, `FEE_SPLIT_SIGNER`) are gone. Every issue fixed up to that
+commit is live in this deployment. Anything reported against `0xFe951aB…` or older
+addresses describes a superseded deployment.
 
 | Contract | Address | BaseScan Link | Deployment Date |
 |----------|---------|---------------|-----------------|
-| EscrowContract (Implementation) | `0xFe951aB5d24F0B09F692e6C7C71Bf4C4235E2B5D` | [View on BaseScan](https://basescan.org/address/0xFe951aB5d24F0B09F692e6C7C71Bf4C4235E2B5D) | 2026-10-14 |
-| EscrowContractFactory | `0xe9F9e568B0B52b93c5aD3289A556A395Ea92B93b` | [View on BaseScan](https://basescan.org/address/0xe9F9e568B0B52b93c5aD3289A556A395Ea92B93b) | 2026-10-14 |
+| EscrowContract (Implementation) | `0x87e339D889F52ffc4Ee4EA2c718Da684fBBf5475` | [View on BaseScan](https://basescan.org/address/0x87e339D889F52ffc4Ee4EA2c718Da684fBBf5475) | 2026-10-19 |
+| EscrowContractFactory | `0x5C7aE5B61fBd1E677aFDF0A2540AcA694FcEE136` | [View on BaseScan](https://basescan.org/address/0x5C7aE5B61fBd1E677aFDF0A2540AcA694FcEE136) | 2026-10-19 |
 
 **Immutable parameters baked into this deployment** (changing any of them requires a
 new implementation, which means a new codehash, factory and marketplace):
 
 | Parameter | Value |
 |---|---|
-| `GIT_COMMIT` | `0xa42c1e200107969f937f0e9d3ec12d4775e60776` |
+| `GIT_COMMIT` | `0x45232e8f5da8bb38271cd41b55ea1853842fa941` |
 | `DEFAULT_ARBITER` (fallback arbitrator Safe) | `0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C` |
-| `FEE_SPLIT_SIGNER` | `0xCbd6Fb910694A9c2c0729D89D2057469857B1C26` |
+| `FEE_SWEEPER` (factory immutable, stamped into every clone) | `0xCbd6Fb910694A9c2c0729D89D2057469857B1C26` |
 | `NOMINATION_WINDOW` | 72 hours (259200s) |
 | `ARBITER_SILENCE_TIMEOUT` | 30 days |
 | `RECIPIENT_APPROVAL_TTL` | 5 minutes |
 
 **ERC-1167 clone codehash for this implementation**: the value `OfferVaultFactory`
 derives and enforces as its provenance gate. Computed with `cast keccak` over the
-minimal-proxy runtime. When the marketplace is deployed, compare it against the
-`EXPECTED_ESCROW_CODEHASH` that `DeployMarketplace.s.sol` logs:
+minimal-proxy runtime, and matches the `EXPECTED_ESCROW_CODEHASH` that
+`DeployMarketplace.s.sol` logged for the current marketplace:
 
 ```
-0x9fe6294a6c47f65ce1c577a04ffa30054d50995f441c8ce1de1eb57f94d86b0b
+0x515e7e39f2594afea1b12c2dcbe58ad61a8ae22749b5b9a68db0cd7c7ad7b686
 ```
 
 #### Superseded legacy pairs
@@ -55,6 +58,8 @@ behaviour at these addresses as current.
 
 | Contract | Address | Status |
 |----------|---------|--------|
+| EscrowContract (Implementation) | `0xFe951aB5d24F0B09F692e6C7C71Bf4C4235E2B5D` | `a42c1e2`, deployed 2026-10-14, superseded 2026-10-19 |
+| EscrowContractFactory | `0xe9F9e568B0B52b93c5aD3289A556A395Ea92B93b` | `a42c1e2`, deployed 2026-10-14, superseded 2026-10-19 |
 | EscrowContract (Implementation) | `0x77acD2d342cF513A60e6d51ca5a36C93BD14A04B` | deployed 2026-08-06, superseded 2026-10-14 |
 | EscrowContractFactory | `0x575AB01251cfc4DB9Ce90A13152a7a616Bd304b9` | deployed 2026-08-06, superseded 2026-10-14 |
 | EscrowContract (Implementation) | `0xCbfD53842f0ACc885a55b7A0eDb18eF5ac9237f9` | pre-marketplace, superseded 2026-08-06 |
@@ -182,15 +187,18 @@ After deployment, update these environment variables in all services:
 
 **contracts/.env**:
 ```bash
-CONTRACT_FACTORY_ADDRESS=0xe9F9e568B0B52b93c5aD3289A556A395Ea92B93b  # Production factory
+CONTRACT_FACTORY_ADDRESS=0x5C7aE5B61fBd1E677aFDF0A2540AcA694FcEE136  # Production factory
 ```
 
 **chainservice/.env**:
 ```bash
-CONTRACT_FACTORY_ADDRESS=0xe9F9e568B0B52b93c5aD3289A556A395Ea92B93b  # Production factory
-ESCROW_IMPLEMENTATION_ADDRESS=0xFe951aB5d24F0B09F692e6C7C71Bf4C4235E2B5D
+CONTRACT_FACTORY_ADDRESS=0x5C7aE5B61fBd1E677aFDF0A2540AcA694FcEE136  # Production factory
+ESCROW_IMPLEMENTATION_ADDRESS=0x87e339D889F52ffc4Ee4EA2c718Da684fBBf5475
 DEFAULT_ARBITER_ADDRESS=0x9bB8e809EA6F5A74f46027D8016641D9cE9A149C  # stabledropAdmin Safe
 USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913  # Base mainnet USDC
+MARKETPLACE_FACTORY_ADDRESS=0xcDa01BD5814Df29672ACb52EfA53F31eE576BEEa
+MARKETPLACE_IMPLEMENTATION_ADDRESS=0x5E2139E0f0594F835Fc25d157FbD271beF5ad7eA
+MARKETPLACE_INDEX_FROM_BLOCK=53069362  # the factory's deploy block
 ```
 
 > ⚠️ **`ESCROW_IMPLEMENTATION_ADDRESS` must ship in the same release as the factory repoint**
@@ -205,7 +213,7 @@ USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913  # Base mainnet
 
 **webapp/.env.local**:
 ```bash
-CONTRACT_FACTORY_ADDRESS=0xe9F9e568B0B52b93c5aD3289A556A395Ea92B93b  # Production factory
+CONTRACT_FACTORY_ADDRESS=0x5C7aE5B61fBd1E677aFDF0A2540AcA694FcEE136  # Production factory
 USDC_CONTRACT_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913  # Base mainnet USDC
 ```
 
@@ -228,22 +236,40 @@ factory → marketplace.
 longer pools LP capital (§5.0): the factory holds no tokens at any point, and each offer's
 funds sit in its own `OfferVault` clone.
 
-| Contract | Address | Status |
-|----------|---------|--------|
-| OfferVault (implementation) | _not yet deployed_ | pending — cloned once per offer |
-| OfferVaultFactory | _not yet deployed_ | pending — the venue and registry |
+### Base Mainnet — CURRENT
 
-Factory constructor inputs when it is deployed:
+Deployed 2026-10-25 by `deploy-marketplace.yml` on tag `offervault-v62.0.1` (commit
+`45232e8`, block 53069362). Used by **chainservice** (`MARKETPLACE_FACTORY_ADDRESS`,
+`MARKETPLACE_IMPLEMENTATION_ADDRESS`, `MARKETPLACE_INDEX_FROM_BLOCK=53069362`).
+
+| Contract | Address | BaseScan Link |
+|----------|---------|---------------|
+| OfferVault (implementation) | `0x5E2139E0f0594F835Fc25d157FbD271beF5ad7eA` | [View on BaseScan](https://basescan.org/address/0x5E2139E0f0594F835Fc25d157FbD271beF5ad7eA) |
+| OfferVaultFactory | `0xcDa01BD5814Df29672ACb52EfA53F31eE576BEEa` | [View on BaseScan](https://basescan.org/address/0xcDa01BD5814Df29672ACb52EfA53F31eE576BEEa) |
+
+Source verification on BaseScan failed in the deploy run (0 / 2 verified) and is still
+outstanding.
+
+Factory constructor inputs:
 
 | Input | Value |
 |---|---|
-| `vaultImplementation` | the OfferVault deployed in the same script |
-| `trustedImplementation` | `0xFe951aB5d24F0B09F692e6C7C71Bf4C4235E2B5D` |
-| `initialFeeRateBps` | **TBD** — §13.1 proposes 25–50; hard cap 1000 |
+| `vaultImplementation` | `0x5E2139E0f0594F835Fc25d157FbD271beF5ad7eA` |
+| `trustedImplementation` | `0x87e339D889F52ffc4Ee4EA2c718Da684fBBf5475` (`EXPECTED_ESCROW_CODEHASH` `0x515e7e39…b686`) |
+| `initialFeeRateBps` | 20 |
 | `initialMinOfferBps` | 1000 (10%) — §13.12, settled |
-| `initialDefaultOfferDuration` | **TBD** — §13.2 proposes 86400 (24h) |
-| `initialFeeRecipient` | **TBD** — fees are paid here at acceptance, never accrued |
-| `initialOwner` | **TBD** — MUST differ from the `DEFAULT_ARBITER` Safe (§3.3E) |
+| `initialDefaultOfferDuration` | 600 (10 minutes) — §13.2 proposes 86400 (24h) |
+| `initialFeeRecipient` | `0xC9125aCda217A4c79453Fa33955ebf141Bae7349` — fees are paid here at acceptance, never accrued |
+| `initialOwner` | `0xC9125aCda217A4c79453Fa33955ebf141Bae7349` — differs from the `DEFAULT_ARBITER` Safe (§3.3E) |
+
+#### Superseded marketplaces
+
+Existing vaults keep working and their funds stay reachable by their own LP and seller.
+
+| Contract | Address | Status |
+|----------|---------|--------|
+| OfferVault (implementation) | `0xA0656B99A7A4B90307F6A8A4E9c8C4E035a3805a` | `offervault-v57.2.1`, deployed 2026-08-23, superseded 2026-10-25 |
+| OfferVaultFactory | `0x879e491ff930ceb25C78689b5A57110eFf5a6035` | trusted escrow implementation `0x17FF3bAE1567e23eC2E5e2A20025f4AcD61D8Dd2`; deployed 2026-08-23, superseded 2026-10-25 |
 
 > Record BOTH addresses. Redeploying the factory later would orphan its `hasBeenSold` /
 > `holdbackVault` registry — existing vaults keep working and their funds stay reachable by
@@ -251,7 +277,7 @@ Factory constructor inputs when it is deployed:
 > sold, so a second reserve could be stacked on one that already has a live reserve.
 
 > **Inventory reality (§3.4):** the marketplace opens **empty** and fills only from
-> escrows created by factory `0xe9F9e5…` onward. Escrows from the superseded factories
+> escrows created by factory `0x5C7aE5…` onward. Escrows from the superseded factories
 > are permanently invisible to it. Launch messaging must not promise liquidity on
 > existing deals.
 
