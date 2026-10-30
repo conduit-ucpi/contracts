@@ -22,6 +22,7 @@ Include:
 - Potential impact
 - Suggested fix (if any)
 - Your contact information for follow-up
+- Note: active contracts are: EscrowContract.sol, EscrowContractFactory.sol, OfferVault.sol, OfferVaultFactory.sol others are not being used.
 
 ### 2. Response Timeline
 
