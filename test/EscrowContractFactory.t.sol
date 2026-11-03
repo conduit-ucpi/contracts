@@ -370,42 +370,101 @@ contract EscrowContractFactoryTest is Test {
     }
 
     /**
-     * Money that arrives after the dispute window has already closed must still be
-     * recoverable. Refusing the deploy would strand it permanently: nothing else can move
-     * funds at an address that holds no code.
+     * Money that arrives after the dispute window has closed is returned, not started.
      *
-     * The escrow therefore lands funded-and-expired - seller can claim, buyer cannot
-     * dispute - which is the same bargain an instant transfer makes, except the buyer did
-     * not choose it here.
+     * Earlier factories deployed it funded-and-expired (seller could claim at once, buyer
+     * could never dispute) because refusing would strand it at an address with no code.
+     * createAndRefund now deploys the escrow there and hands the money back instead.
      */
-    function testLateFundingStillDeploysSoTheMoneyIsNotStranded() public {
+    function testLateFundingIsRefusedAndThenRefundedToTheBuyer() public {
         bytes32 externalId = keccak256("late");
         address predicted =
             factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+        uint256 buyerBefore = usdc.balanceOf(buyer);
 
         vm.prank(buyer);
         usdc.transfer(predicted, AMOUNT);
-
         vm.warp(expiryTimestamp + 1);
 
         vm.prank(other);
-        address deployed = factory.createAndActivate(
+        vm.expectRevert(EscrowContract.CannotActivateAfterExpiry.selector);
+        factory.createAndActivate(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId);
+        assertEq(predicted.code.length, 0, "all-or-nothing: nothing deployed");
+
+        vm.prank(other); // anyone may send it; only the buyer is paid
+        address deployed = factory.createAndRefund(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
         );
-        assertEq(deployed, predicted);
+        assertEq(deployed, predicted, "deployed at the address that was paid");
+        assertEq(usdc.balanceOf(buyer), buyerBefore, "the buyer has every unit back");
+        assertEq(usdc.balanceOf(deployed), 0);
+        assertFalse(EscrowContract(deployed).isFunded(), "never started");
+    }
 
-        EscrowContract escrow = EscrowContract(deployed);
-        assertTrue(escrow.isFunded(), "funded, not stranded");
-
-        // The window is gone, so there is no dispute to be had...
+    /// A short payment to an undeployed address, after the payout date: the case that was
+    /// stuck for good, since neither create path would deploy there.
+    function testAShortPaymentAfterThePayoutDateIsRefunded() public {
+        bytes32 externalId = keccak256("short-and-late");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+        uint256 buyerBefore = usdc.balanceOf(buyer);
         vm.prank(buyer);
-        vm.expectRevert(EscrowContract.CannotDisputeAfterExpiry.selector);
-        escrow.raiseDispute();
+        usdc.transfer(predicted, AMOUNT - 1);
+        vm.warp(expiryTimestamp + 1);
 
-        // ...and the seller can take the money straight away.
-        uint256 sellerBefore = usdc.balanceOf(seller);
-        escrow.claimFunds();
-        assertGt(usdc.balanceOf(seller) - sellerBefore, 0, "seller can claim immediately");
+        vm.expectRevert(EscrowContractFactory.InvalidExpiryTimestamp.selector);
+        factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId
+        );
+
+        factory.createAndRefund(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId);
+        assertEq(usdc.balanceOf(buyer), buyerBefore);
+    }
+
+    /// The refund goes to the named buyer, never to whoever sent the money or called.
+    function testARefundGoesToTheNamedBuyerNotTheSender() public {
+        address stranger = makeAddr("stranger");
+        bytes32 externalId = keccak256("stranger-paid");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+        usdc.mint(stranger, 10);
+        vm.prank(stranger);
+        usdc.transfer(predicted, 10);
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+
+        vm.prank(stranger);
+        factory.createAndRefund(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId);
+        assertEq(usdc.balanceOf(buyer) - buyerBefore, 10, "to the buyer");
+        assertEq(usdc.balanceOf(stranger), 0, "not back to the sender");
+    }
+
+    /// Nothing there, nothing deployed.
+    function testARefundWithNothingToReturnDeploysNothing() public {
+        bytes32 externalId = keccak256("empty");
+        address predicted =
+            factory.getContractAddress(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId);
+        vm.expectRevert(EscrowContract.NoTokensToSweep.selector);
+        factory.createAndRefund(address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId);
+        assertEq(predicted.code.length, 0);
+    }
+
+    /// The chosen-fee variant lands at the chosen-fee address and refunds there.
+    function testRefundAtAChosenFee() public {
+        bytes32 externalId = keccak256("fee-late");
+        uint256 fee = factory.quoteCreatorFee(address(usdc), AMOUNT) + 1;
+        address predicted = factory.getContractAddressWithFee(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, owner, externalId, fee
+        );
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        vm.prank(buyer);
+        usdc.transfer(predicted, AMOUNT);
+        vm.warp(expiryTimestamp + 1);
+
+        address deployed = factory.createAndRefundWithFee(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, owner, externalId, fee
+        );
+        assertEq(deployed, predicted);
+        assertEq(usdc.balanceOf(buyer), buyerBefore);
     }
 
     /// A fresh escrow whose window has already closed is a caller bug, and there is no

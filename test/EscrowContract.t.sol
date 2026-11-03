@@ -474,19 +474,130 @@ contract EscrowContractTest is Test {
         escrow.claimFunds();
     }
 
-    /// Direct-transfer funding is deliberately NOT gated the same way: the money is already
-    /// at the address, so activating cannot take anything from anyone (see createAndActivate).
-    function testDirectTransferActivationStillWorksAfterExpiry() public {
+    /**
+     * 💸 A LATE PAYMENT IS NOT ACTIVATED: IT GOES BACK TO THE BUYER.
+     *
+     * Activating after the payout date would start an escrow whose dispute window had
+     * already closed, handing the seller the money with no protection the buyer agreed to.
+     * It used to be allowed because the money had no other way out; sweepToken is now that
+     * way out.
+     */
+    function testALatePaymentIsRefusedAndReturnedToTheBuyer() public {
         vm.prank(arbiter);
         address escrowAddress = factory.createEscrowContract(
             address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(47))
         );
+        EscrowContract escrow = EscrowContract(escrowAddress);
+        uint256 buyerBefore = usdc.balanceOf(buyer);
         vm.prank(buyer);
         usdc.transfer(escrowAddress, AMOUNT);
         vm.warp(expiryTimestamp + 1);
+
         vm.prank(other);
+        vm.expectRevert(EscrowContract.CannotActivateAfterExpiry.selector);
+        escrow.checkAndActivate();
+        assertFalse(escrow.isFunded(), "never started");
+
+        vm.expectRevert(EscrowContract.NotFundedOrAlreadyProcessed.selector);
+        escrow.claimFunds();
+
+        vm.prank(other); // anyone may call it; it pays only the buyer
+        escrow.sweepToken(address(usdc));
+        assertEq(usdc.balanceOf(buyer), buyerBefore, "the whole payment is back with the buyer");
+        assertEq(usdc.balanceOf(escrowAddress), 0);
+    }
+
+    /// The boundary: activation is allowed strictly before the payout date, matching raiseDispute.
+    function testActivationClosesAtThePayoutDate() public {
+        vm.prank(arbiter);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, expiryTimestamp, description, arbiter, bytes32(uint256(48))
+        );
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+        vm.warp(expiryTimestamp);
+        vm.expectRevert(EscrowContract.CannotActivateAfterExpiry.selector);
         EscrowContract(escrowAddress).checkAndActivate();
-        assertTrue(EscrowContract(escrowAddress).isFunded());
+
+        vm.warp(expiryTimestamp - 1);
+        EscrowContract(escrowAddress).checkAndActivate();
+        assertTrue(EscrowContract(escrowAddress).isFunded(), "one second earlier it starts, and can still be disputed");
+        assertTrue(EscrowContract(escrowAddress).canDispute());
+    }
+
+    /**
+     * 💸 A SHORT PAYMENT GOES BACK TO THE BUYER, BEFORE OR AFTER THE PAYOUT DATE.
+     *
+     * It can never activate, and the escrow token used to be unsweepable until the escrow
+     * finished, so it was locked for good: the only exit was topping it up.
+     */
+    function testAShortPaymentCanBeSweptBackBeforeActivation() public {
+        EscrowContract escrow = createUnfundedEscrow();
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT / 2);
+
+        vm.expectRevert(EscrowContract.InsufficientDirectPayment.selector);
+        escrow.checkAndActivate();
+
+        vm.prank(other);
+        escrow.sweepToken(address(usdc));
+        assertEq(usdc.balanceOf(buyer), buyerBefore, "returned before the payout date");
+
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT / 2);
+        vm.warp(escrow.EXPIRY_TIMESTAMP() + 1);
+        escrow.sweepToken(address(usdc));
+        assertEq(usdc.balanceOf(buyer), buyerBefore, "and after it");
+    }
+
+    /**
+     * ⚠️ A FULL PAYMENT IS ALSO THE BUYER'S UNTIL SOMEONE ACTIVATES IT. Nothing has been
+     *    promised to the seller yet, so it may come back. This is why only isFunded() means
+     *    paid: a balance at the address does not.
+     */
+    function testAFullPaymentCanBeSweptBackUntilActivated() public {
+        EscrowContract escrow = createUnfundedEscrow();
+        uint256 buyerBefore = usdc.balanceOf(buyer);
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT);
+        assertFalse(escrow.isFunded(), "money arriving is not the escrow starting");
+
+        escrow.sweepToken(address(usdc));
+        assertEq(usdc.balanceOf(buyer), buyerBefore);
+
+        // Paid again and activated, it is locked like any escrow.
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
+        vm.expectRevert(EscrowContract.CannotSweepEscrowToken.selector);
+        escrow.sweepToken(address(usdc));
+    }
+
+    /// Never while disputed: the balance is the escrow.
+    function testTheEscrowTokenCannotBeSweptDuringADispute() public {
+        EscrowContract escrow = createUnfundedEscrow();
+        vm.prank(buyer);
+        usdc.transfer(address(escrow), AMOUNT);
+        escrow.checkAndActivate();
+        vm.prank(buyer);
+        escrow.raiseDispute();
+        vm.expectRevert(EscrowContract.CannotSweepEscrowToken.selector);
+        escrow.sweepToken(address(usdc));
+    }
+
+    /// An instant transfer has no payout date to miss: it still activates whenever it is paid.
+    function testAnInstantTransferStillActivatesAtAnyTime() public {
+        vm.prank(arbiter);
+        address escrowAddress = factory.createEscrowContract(
+            address(usdc), buyer, seller, AMOUNT, 0, description, arbiter, bytes32(uint256(49))
+        );
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(buyer);
+        usdc.transfer(escrowAddress, AMOUNT);
+        uint256 sellerBefore = usdc.balanceOf(seller);
+        EscrowContract(escrowAddress).checkAndActivate();
+        assertGt(usdc.balanceOf(seller), sellerBefore, "paid straight through");
     }
 
     function testCannotUseUnfundedContract() public {

@@ -190,23 +190,19 @@ contract EscrowContractFactory {
      * Permissionless, like checkAndActivate() itself — the parameters are fixed by the salt,
      * so a caller cannot influence where the money goes. Whoever calls it only pays the gas.
      *
-     * ⚠️ A PAST EXPIRY IS ACCEPTED HERE, and rejected by createEscrowContract.
+     * ⚠️ NOT AFTER THE PAYOUT DATE. The escrow's checkAndActivate refuses then
+     *    (CannotActivateAfterExpiry), so this reverts and nothing is deployed. Earlier
+     *    factories deployed anyway, landing the escrow funded-and-expired: the seller could
+     *    claim at once and the buyer could never dispute, a bargain the buyer never chose.
+     *    That was the price of not stranding the money, since a short or refused payment at
+     *    an address with no code had no way out. It has one now: createAndRefund deploys
+     *    the escrow there and returns the balance to the buyer. A late payment is refunded.
      *
-     * The terms were fixed when the address was quoted, so by the time money arrives the
-     * dispute window may already have run out. Refusing to deploy would be the stricter
-     * reading, but it would also mean nothing could ever deploy at that address again — and
-     * because the address holds no code, nobody could move the funds either. That strands
-     * real money to defend a window that has already gone.
+     * Likewise a SHORT payment reverts here (InsufficientDirectPayment), and is refunded
+     * with createAndRefund rather than topped up.
      *
-     * So we deploy. The escrow lands funded-and-expired: the seller can claim at once and
-     * the buyer cannot dispute (CannotDisputeAfterExpiry). The system already has this
-     * shape — an instant transfer (expiryTimestamp == 0) is the same bargain, chosen up
-     * front. The difference worth remembering is that here the buyer did NOT choose it, so
-     * callers should treat a late funding as something to surface, not to pass over
-     * quietly.
-     *
-     * createEscrowContract keeps the check: creating a fresh escrow whose window has
-     * already closed is a caller bug, and there is no stranded money to rescue.
+     * The factory still passes requireFutureExpiry = false so that the error a caller sees
+     * is the escrow's own, which names the reason.
      */
     function createAndActivate(
         address tokenAddress,
@@ -242,6 +238,63 @@ contract EscrowContractFactory {
             false
         );
         EscrowContract(clone).checkAndActivate();
+    }
+
+    /**
+     * 💸 CREATE AND REFUND — for an address that was paid but must not start.
+     *
+     * A payer can send money to an escrow's address before it exists. If that payment is
+     * short (below AMOUNT) or late (the payout date has passed), it can never activate, and
+     * since the address holds no code nothing could move it. This deploys the escrow there,
+     * unactivated, and sweeps the whole balance of the escrow token to the BUYER in the same
+     * transaction.
+     *
+     * Permissionless, like createAndActivate: the parameters are fixed by the salt and
+     * sweepToken only ever pays the named BUYER, so a caller cannot redirect anything. Past
+     * payout dates are accepted, because that is exactly when it is needed.
+     *
+     * It also refunds a full, on-time payment that nobody has activated yet. That is the
+     * buyer's money until the escrow starts, so it may go back: whoever activates first
+     * decides. Callers must therefore treat only an ACTIVATED escrow (isFunded) as paid.
+     *
+     * Reverts with NoTokensToSweep, deploying nothing, when there is nothing to return.
+     * Once deployed by either function, the escrow lives at that address; a later payment
+     * there can be activated (if on time and in full) or swept directly with sweepToken.
+     */
+    function createAndRefund(
+        address tokenAddress,
+        address buyer,
+        address seller,
+        uint256 amount,
+        uint256 expiryTimestamp,
+        string memory description,
+        address arbiter,
+        bytes32 externalId
+    ) external returns (address clone) {
+        clone = _create(
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, 0), description, false
+        );
+        EscrowContract(clone).sweepToken(tokenAddress);
+    }
+
+    /// 💸 CREATE AND REFUND AT A CHOSEN FEE — the refund path for createEscrowContractWithFee.
+    function createAndRefundWithFee(
+        address tokenAddress,
+        address buyer,
+        address seller,
+        uint256 amount,
+        uint256 expiryTimestamp,
+        string memory description,
+        address arbiter,
+        bytes32 externalId,
+        uint256 creatorFee
+    ) external returns (address clone) {
+        clone = _create(
+            Terms(tokenAddress, buyer, seller, amount, expiryTimestamp, arbiter, externalId, creatorFee),
+            description,
+            false
+        );
+        EscrowContract(clone).sweepToken(tokenAddress);
     }
 
     /**

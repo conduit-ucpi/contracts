@@ -1185,6 +1185,11 @@
   },
   {
     "type": "error",
+    "name": "CannotActivateAfterExpiry",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "CannotChangeRecipientDuringDispute",
     "inputs": []
   },

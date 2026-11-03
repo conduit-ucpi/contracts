@@ -272,6 +272,7 @@ contract EscrowContract is ReentrancyGuard {
     error AlreadyFundedOrClaimed();
     error CannotDisputeInstantTransfer();
     error CannotDisputeAfterExpiry();
+    error CannotActivateAfterExpiry();
     error NotFundedOrAlreadyProcessed();
     error InstantTransferAlreadyCompleted();
     error NotExpiredYet();
@@ -644,7 +645,7 @@ contract EscrowContract is ReentrancyGuard {
      *
      * What happens when checkAndActivate is called:
      * 1. Checks if tokens were already sent directly to this contract address
-     * 2. If balance >= AMOUNT, activates the escrow
+     * 2. If balance >= AMOUNT and the payout date has not passed, activates the escrow
      * 3. The platform's small fee (shown upfront) is SET ASIDE here, released only by sweepFees
      * 4. For instant transfers (EXPIRY_TIMESTAMP == 0): funds go directly to SELLER
      * 5. For normal escrow: remaining money stays LOCKED until expiry or dispute resolution
@@ -661,9 +662,22 @@ contract EscrowContract is ReentrancyGuard {
      *    claim the buyer's money in one transaction with no dispute window at all. A
      *    direct transfer has no such hazard: activating money that is already here cannot
      *    take anything from anyone, which is also why this stays permissionless.
+     *
+     * ⚠️ NOT AFTER THE PAYOUT DATE (CannotActivateAfterExpiry). Activating then would start
+     *    an escrow whose dispute window had already closed: the seller could claim at once
+     *    and the buyer could never dispute (raiseDispute needs block.timestamp < EXPIRY).
+     *    Earlier versions activated anyway, because a late payment had no other way out.
+     *    It has one now: an unactivated escrow's balance goes back to the buyer through
+     *    sweepToken, and EscrowContractFactory.createAndRefund deploys one for an address
+     *    that was paid before it existed. So a late payment is returned, never consumed.
      */
     function checkAndActivate() external initialized nonReentrant {
         if (_state != 0) revert AlreadyFundedOrClaimed();
+        // A late payment does not start an escrow whose dispute window has already closed:
+        // that would hand the seller the money with no protection the buyer agreed to. It
+        // stays unactivated, and sweepToken returns it to the buyer. Instant transfers
+        // (EXPIRY_TIMESTAMP == 0) have no window and are unaffected.
+        if (EXPIRY_TIMESTAMP != 0 && block.timestamp >= EXPIRY_TIMESTAMP) revert CannotActivateAfterExpiry();
 
         uint256 balance = tokenAddress.balanceOf(address(this));
         if (balance < AMOUNT) revert InsufficientDirectPayment();
@@ -802,7 +816,19 @@ contract EscrowContract is ReentrancyGuard {
      * If someone accidentally sends the wrong ERC20 token to this contract, this function
      * sends the entire balance of that token to the BUYER.
      *
-     * ⚠️ AND THE ESCROW TOKEN TOO, BUT ONLY ONCE THE ESCROW IS FINISHED (`_state == 4`).
+     * ⚠️ AND THE ESCROW TOKEN TOO, BEFORE THE ESCROW STARTS (`_state == 0`) OR ONCE IT HAS
+     *    FINISHED (`_state == 4`) — never while it is funded or disputed.
+     *
+     *    BEFORE IT STARTS: money sent to an escrow that never activated is still the
+     *    buyer's. A short payment cannot activate (InsufficientDirectPayment) and a late
+     *    one is refused (CannotActivateAfterExpiry); before this, both were locked for
+     *    good, and the only way out of a short payment was to top it up — which, after the
+     *    payout date, paid the seller at once with no dispute window. Now the buyer takes
+     *    it back. A full, on-time payment can be swept back too until someone activates
+     *    it: until then nothing has been promised to the seller, so ANYTHING THAT TREATS A
+     *    BALANCE AS "PAID" BEFORE ACTIVATION IS WRONG — only `isFunded()` means paid.
+     *
+     *    AFTER IT FINISHES:
      *    Direct-transfer funding is a first-class path here — `checkAndActivate` accepts
      *    any balance at or above AMOUNT — while every payout moves a FIXED figure derived
      *    from AMOUNT. So a buyer who sends too much (a mistyped QR amount, an exchange
@@ -819,8 +845,9 @@ contract EscrowContract is ReentrancyGuard {
      *    Once the fee has been swept, `retainedFee` is 0 and the whole balance is surplus.
      *
      * 🔒 SECURITY:
-     * ✅ The escrow token is untouchable while the escrow is live, disputed or unfunded —
-     *    only state 4 (claimed, whether at maturity or by resolution) opens it
+     * ✅ The escrow token is untouchable while the escrow is funded or disputed — only
+     *    state 0 (never activated) and state 4 (claimed, whether at maturity or by
+     *    resolution) open it
      * ✅ The retained fee is never swept here, whatever the state
      * ✅ Callable by anyone - funds always go to BUYER regardless of caller
      * ✅ Funds always go to BUYER (the depositor)
@@ -828,9 +855,13 @@ contract EscrowContract is ReentrancyGuard {
     function sweepToken(address _token) external initialized nonReentrant {
         uint256 balance = IERC20(_token).balanceOf(address(this));
         if (_token == address(tokenAddress)) {
-            if (_state != 4) revert CannotSweepEscrowToken();
+            // Before activation (0) nothing is owed to anyone but the depositor; after the
+            // escrow finishes (4) everything owed has been paid. In between (funded 1,
+            // disputed 2) the balance IS the escrow, and stays put.
+            if (_state != 0 && _state != 4) revert CannotSweepEscrowToken();
             // Safe: retainedFee was funded into this balance and only leaves via sweepFees,
-            // which zeroes it in the same transaction as the transfer.
+            // which zeroes it in the same transaction as the transfer. Before activation it
+            // is 0: the fee is only set aside when the escrow starts.
             balance -= retainedFee;
         }
         if (balance == 0) revert NoTokensToSweep();
