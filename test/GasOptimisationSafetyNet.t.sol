@@ -830,9 +830,9 @@ contract GasOptimisationSafetyNetTest is Test {
     }
 
     function test_TheImplementationCanNeverBeInitialised() public {
-        // The constructor marks the implementation as already initialised; that guard fires first.
-        // Whichever guard a rewrite keeps, the implementation must refuse — pinned by the revert.
-        vm.expectRevert(EscrowContract.AlreadyInitialized.selector);
+        // The constructor marks the implementation as disabled (_state 255); that guard fires
+        // first and names the reason. The implementation must refuse — pinned by the revert.
+        vm.expectRevert(EscrowContract.ImplementationCannotBeInitialized.selector);
         implementation.initialize(address(usdc), buyer, seller, arbiter, AMOUNT, expiry, 10e6, feeSweeper);
     }
 

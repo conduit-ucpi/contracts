@@ -4,6 +4,8 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 /**
  * ═══════════════════════════════════════════════════════════════════════════════════
@@ -91,7 +93,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *    • Experience deposit, escrow, and dispute processes
  *    • Verify response time and professionalism
  *    • Only cost: blockchain gas fees
- *    • Instructions: https://app.instantescrow.nz
+ *    • Instructions: https://stabledrop.me
  *
  * ─────────────────────────────────────────────────────────────────────────────────
  * 💬 HOW DISPUTES ARE RESOLVED
@@ -144,7 +146,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * ─────────────────────────────────────────────────────────────────────────────────
  * STEP 3: Verify Platform Identity
  * ─────────────────────────────────────────────────────────────────────────────────
- * • Visit: https://app.instantescrow.nz
+ * • Visit: https://stabledrop.me
  * • Platform operator contact details available on site
  * • Dispute policy and documentation available
  * • Public identity creates accountability
@@ -304,7 +306,7 @@ contract EscrowContract is ReentrancyGuard {
     //    ever reach the current BUYER or SELLER - never the platform or a third party.
     address public FACTORY; // Factory contract that created this escrow - only it can initialize
     IERC20 public tokenAddress; // The ERC20 token contract (any ERC20) - immutable after initialization
-    address public BUYER; // ONLY this address can deposit funds and raise disputes - immutable
+    address public BUYER; // ONLY this address can raise disputes, and every refund or surplus goes to it, whoever sent the payment (anyone may fund) - immutable
     address public SELLER; // Receives funds after expiry or dispute - reassignable by the seller via changeRecipient()
     // ⚖️  Arbiter address - can ONLY vote on disputes, NOT take your money. Distinct from
     //    buyer/seller. Set at initialize. Buyer + current recipient may REPLACE the
@@ -532,13 +534,13 @@ contract EscrowContract is ReentrancyGuard {
 
     // ⚡ BUYER PROTECTION: Only the original BUYER can raise disputes
     modifier onlyBuyer() {
-        if (msg.sender != BUYER) revert OnlyBuyer();
+        if (_actor() != BUYER) revert OnlyBuyer();
         _;
     }
 
     // ⚡ DISPUTE RESOLUTION: Only arbiter can resolve disputes (but money still goes to BUYER/SELLER)
     modifier onlyArbiter() {
-        if (msg.sender != ARBITER) revert OnlyArbiter();
+        if (_actor() != ARBITER) revert OnlyArbiter();
         _;
     }
 
@@ -551,6 +553,142 @@ contract EscrowContract is ReentrancyGuard {
     modifier onlyFeeSweeper() {
         if (msg.sender != FEE_SWEEPER) revert OnlyFeeSweeper();
         _;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    //  ✍️ SIGNED CALLS: a party signs a message, anyone may deliver it, and pays the gas
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    //
+    // A party who holds no ETH cannot call this contract. Handing them ETH to do it does not
+    // work either: nothing makes them spend it here. So the party SIGNS what they want done,
+    // a relayer delivers it, and the contract acts for the signer and for nobody else.
+    //
+    // ⚠️ HOW THE SIGNER REACHES THE FUNCTION. executeSigned calls this same contract with the
+    //    signer's address appended to the call. `_actor()` reads that address back, and ONLY
+    //    when the caller is this contract itself - which nothing else can arrange, because no
+    //    other code here calls address(this). Every party check asks `_actor()`, so a function
+    //    behaves identically whether its party called it or signed for it.
+    //
+    // ⚠️ WHAT MAY BE SIGNED FOR IS A LIST, NOT "ANYTHING". Only the party actions that have a
+    //    message type below. Never initialize, the fee sweeper's functions, or executeSigned itself.
+    //
+    // ⚠️ EACH ACTION HAS ITS OWN NAMED MESSAGE, SO THE WALLET SHOWS WHAT IS BEING SIGNED. A single
+    //    generic message carrying the call as bytes would show the signer a line of hex. Asking
+    //    people to sign what they cannot read is the habit that gets them phished.
+    //
+    //    The message's fields are the function's own arguments, then nonce, then deadline. Every
+    //    action here takes only uint256 and address arguments, and for those EIP-712 encodes a
+    //    field exactly as the ABI encodes the argument: one 32-byte word each. So the struct hash
+    //    is (type hash, the call's argument bytes, nonce, deadline) with nothing to decode.
+    //    ⚠️ That holds ONLY for those types. An action taking bytes, a string or an array must
+    //    not be added to `_signedMessage` without hashing those fields separately.
+
+    error SignedCallExpired();
+    error SignedCallAlreadyUsed();
+    error SignedCallNotSignedBy(address signer);
+    error SignedCallNotAllowed(bytes4 selector);
+    error SignedCallMalformed();
+
+    /// @notice Emitted when a signed call is delivered. The inner function emits its own event too.
+    event SignedCallExecuted(address indexed signer, uint256 nonce, bytes4 selector);
+
+    /// @notice Whether `signer` has already spent `nonce`. Nonces are unordered: any unused one will do.
+    mapping(address => mapping(uint256 => bool)) public signedCallUsed;
+
+    bytes32 private constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    // What the signer's wallet shows, one per action. The names are for the person reading the
+    // prompt; the order and types must match the function's arguments.
+    bytes32 private constant RAISE_DISPUTE_TYPEHASH = keccak256("RaiseDispute(uint256 nonce,uint256 deadline)");
+    bytes32 private constant VOTE_TYPEHASH =
+        keccak256("Vote(uint256 refundToBuyerPercent,uint256 nonce,uint256 deadline)");
+    bytes32 private constant NOMINATE_ARBITER_TYPEHASH =
+        keccak256("NominateArbiter(address candidate,uint256 nonce,uint256 deadline)");
+    bytes32 private constant EVICT_ARBITER_TYPEHASH = keccak256("EvictArbiter(uint256 nonce,uint256 deadline)");
+    bytes32 private constant RESIGN_ARBITER_TYPEHASH = keccak256("ResignArbiter(uint256 nonce,uint256 deadline)");
+    bytes32 private constant CHANGE_RECIPIENT_TYPEHASH =
+        keccak256("ChangeRecipient(address newRecipient,uint256 nonce,uint256 deadline)");
+    bytes32 private constant APPROVE_RECIPIENT_TRANSFER_TYPEHASH =
+        keccak256("ApproveRecipientTransfer(address operator,address newRecipient,uint256 nonce,uint256 deadline)");
+
+    /**
+     * @notice Deliver a call that `signer` signed. Anyone may deliver it; it runs as `signer`.
+     * @param signer    The party the call is for. Their signature is what authorises it.
+     * @param call      The function call, exactly as `signer` would have sent it themselves.
+     * @param nonce     Any number `signer` has not used here before. It cannot be used twice.
+     * @param deadline  The last second at which this may be delivered.
+     * @param signature `signer`'s EIP-712 signature over that action's message (its arguments,
+     *                  nonce, deadline), bound to this contract and this chain. A contract
+     *                  wallet's ERC-1271 answer is accepted.
+     */
+    function executeSigned(
+        address signer,
+        bytes calldata call,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external initialized {
+        if (block.timestamp > deadline) revert SignedCallExpired();
+        if (call.length < 4) revert SignedCallMalformed();
+        bytes4 selector = bytes4(call);
+        (bytes32 typeHash, uint256 argumentWords) = _signedMessage(selector);
+        if (typeHash == bytes32(0)) revert SignedCallNotAllowed(selector);
+        // Exactly the arguments the message names: no fewer, and nothing after them.
+        if (call.length != 4 + argumentWords * 32) revert SignedCallMalformed();
+        if (signedCallUsed[signer][nonce]) revert SignedCallAlreadyUsed();
+        signedCallUsed[signer][nonce] = true;
+
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                signedCallDomainSeparator(),
+                keccak256(abi.encodePacked(typeHash, call[4:], nonce, deadline))
+            )
+        );
+        if (!SignatureChecker.isValidSignatureNow(signer, digest, signature)) revert SignedCallNotSignedBy(signer);
+
+        emit SignedCallExecuted(signer, nonce, selector);
+
+        (bool ok, bytes memory answer) = address(this).call(abi.encodePacked(call, signer));
+        if (!ok) {
+            // The inner function's own error, unchanged, so a relayer sees why it failed.
+            assembly ("memory-safe") {
+                revert(add(answer, 32), mload(answer))
+            }
+        }
+    }
+
+    /// @notice The EIP-712 domain a signed call is bound to: this contract, on this chain.
+    function signedCallDomainSeparator() public view returns (bytes32) {
+        return
+            keccak256(
+                abi.encode(DOMAIN_TYPEHASH, keccak256("Stabledrop"), keccak256("1"), block.chainid, address(this))
+            );
+    }
+
+    /// @dev The message a signature must be for, and how many arguments the call carries. A
+    ///      function with no entry here returns a zero type hash: it cannot be signed for.
+    function _signedMessage(bytes4 selector) private pure returns (bytes32 typeHash, uint256 argumentWords) {
+        if (selector == EscrowContract.raiseDispute.selector) return (RAISE_DISPUTE_TYPEHASH, 0);
+        if (selector == EscrowContract.submitResolutionVote.selector) return (VOTE_TYPEHASH, 1);
+        if (selector == EscrowContract.nominateArbiter.selector) return (NOMINATE_ARBITER_TYPEHASH, 1);
+        if (selector == EscrowContract.evictArbiter.selector) return (EVICT_ARBITER_TYPEHASH, 0);
+        if (selector == EscrowContract.resignArbiter.selector) return (RESIGN_ARBITER_TYPEHASH, 0);
+        if (selector == EscrowContract.changeRecipient.selector) return (CHANGE_RECIPIENT_TYPEHASH, 1);
+        if (selector == EscrowContract.approveRecipientTransfer.selector) {
+            return (APPROVE_RECIPIENT_TRANSFER_TYPEHASH, 2);
+        }
+        return (bytes32(0), 0);
+    }
+
+    /// @dev Who is acting: the caller, or - when this contract is delivering a signed call to
+    ///      itself - the signer whose address executeSigned appended to it.
+    function _actor() private view returns (address actor) {
+        if (msg.sender != address(this)) return msg.sender;
+        assembly ("memory-safe") {
+            actor := shr(96, calldataload(sub(calldatasize(), 20)))
+        }
     }
 
     /**
@@ -579,8 +717,11 @@ contract EscrowContract is ReentrancyGuard {
         uint256 _creatorFee,
         address _feeSweeper
     ) external {
-        if (_state != 0) revert AlreadyInitialized();
-        if (FACTORY != address(0)) revert ImplementationCannotBeInitialized();
+        // The implementation: its constructor set _state to 255 and it is never usable.
+        if (_state == 255) revert ImplementationCannotBeInitialized();
+        // A clone that has been initialized: FACTORY is set below, on the first call, and
+        // msg.sender is never zero, so this holds in every state from then on.
+        if (FACTORY != address(0)) revert AlreadyInitialized();
         FACTORY = msg.sender; // Set the factory to the caller
         if (_tokenAddress == address(0)) revert InvalidTokenAddress();
         if (_buyer == address(0)) revert InvalidBuyerAddress();
@@ -836,7 +977,8 @@ contract EscrowContract is ReentrancyGuard {
      *    token in every state that excess could never leave: not stolen, but locked for
      *    good. After a claim or a resolution every obligation to buyer and seller has been
      *    discharged, so any remaining balance BEYOND THE RETAINED FEE is surplus by
-     *    definition and belongs to the depositor.
+     *    definition and goes to the BUYER. The contract does not record who sent a
+     *    payment, so the BUYER receives it even when another wallet paid.
      *
      * ⚠️ THE FEE IS NOT SURPLUS. Since the fee is set aside here rather than paid out at
      *    funding, a finished escrow's balance is (unswept fee) + (surplus). This hands over
@@ -850,12 +992,12 @@ contract EscrowContract is ReentrancyGuard {
      *    resolution) open it
      * ✅ The retained fee is never swept here, whatever the state
      * ✅ Callable by anyone - funds always go to BUYER regardless of caller
-     * ✅ Funds always go to BUYER (the depositor)
+     * ✅ Funds always go to BUYER, whoever sent them: the sender of a payment is not recorded
      */
     function sweepToken(address _token) external initialized nonReentrant {
         uint256 balance = IERC20(_token).balanceOf(address(this));
         if (_token == address(tokenAddress)) {
-            // Before activation (0) nothing is owed to anyone but the depositor; after the
+            // Before activation (0) nothing is owed to anyone but the BUYER; after the
             // escrow finishes (4) everything owed has been paid. In between (funded 1,
             // disputed 2) the balance IS the escrow, and stays put.
             if (_state != 0 && _state != 4) revert CannotSweepEscrowToken();
@@ -905,7 +1047,7 @@ contract EscrowContract is ReentrancyGuard {
      * @param newSeller The address that will receive seller funds going forward.
      */
     function changeRecipient(address newSeller) external initialized {
-        if (msg.sender != SELLER) revert OnlySeller();
+        if (_actor() != SELLER) revert OnlySeller();
         _transferRecipient(newSeller);
     }
 
@@ -932,7 +1074,7 @@ contract EscrowContract is ReentrancyGuard {
      * @param newRecipient The exact address the operator may transfer the role to.
      */
     function approveRecipientTransfer(address operator, address newRecipient) external initialized {
-        if (msg.sender != SELLER) revert OnlySeller();
+        if (_actor() != SELLER) revert OnlySeller();
         // No approval while disputed: it could never be executed (see _transferRecipient).
         if (_state == 2) revert CannotChangeRecipientDuringDispute();
         if (_state != 1) revert NotFundedOrAlreadyProcessed();
@@ -1154,7 +1296,8 @@ contract EscrowContract is ReentrancyGuard {
         // Agreement is allowed BEFORE any dispute (settle governance while relations are
         // good) as well as during one.
         if (_state != 1 && _state != 2) revert NotFundedOrAlreadyProcessed();
-        if (msg.sender != BUYER && msg.sender != SELLER) revert NotDisputeParty(msg.sender);
+        address actor = _actor();
+        if (actor != BUYER && actor != SELLER) revert NotDisputeParty(actor);
         // An arbiter who is also a party would hold 2-of-3 alone - the precise failure
         // initialize guards against. Beyond that, the only other rejection is the seated
         // incumbent (see @param). Candidates are otherwise free-form.
@@ -1166,13 +1309,13 @@ contract EscrowContract is ReentrancyGuard {
         if (candidate == ARBITER) revert InvalidArbiterCandidate(candidate);
 
         // Nominations are mutable until seated: re-nominating overwrites.
-        if (msg.sender == BUYER) {
+        if (actor == BUYER) {
             nominatedByBuyer = candidate;
         } else {
             nominatedByRecipient = candidate;
         }
 
-        emit ArbiterNominated(msg.sender, candidate);
+        emit ArbiterNominated(actor, candidate);
 
         // There is deliberately NO deadline check here: a match is always better than the
         // fallback, so a late agreement still seats right up until seatDefaultArbiter
@@ -1259,7 +1402,8 @@ contract EscrowContract is ReentrancyGuard {
     function evictArbiter() external initialized {
         if (_state != 2) revert ContractMustBeDisputed();
         if (ARBITER == address(0)) revert NoArbiterSeated();
-        if (msg.sender != BUYER && msg.sender != SELLER) revert NotDisputeParty(msg.sender);
+        address actor = _actor();
+        if (actor != BUYER && actor != SELLER) revert NotDisputeParty(actor);
         if (block.timestamp <= lastArbiterActionAt + ARBITER_SILENCE_TIMEOUT) {
             revert ArbiterNotSilent(lastArbiterActionAt);
         }
@@ -1326,14 +1470,14 @@ contract EscrowContract is ReentrancyGuard {
      * 4. Platform cannot take the disputed money - it MUST go to BUYER/SELLER
      *
      * 🔐 BUYER'S RIGHTS:
-     * ✅ Can dispute at ANY time before SELLER claims
+     * ✅ Can dispute at any time while the escrow is funded and BEFORE the expiry time
      * ✅ Stops SELLER from taking money until dispute is resolved
      * ✅ Guarantees neutral review of the situation
      * ✅ Ensures fair distribution of funds based on what actually happened
      *
-     * ⏰ TIMING: BUYER should dispute BEFORE the expiry time if there's a problem.
-     *          After expiry, SELLER can claim - but if BUYER disputes first,
-     *          SELLER must wait for resolution.
+     * ⏰ TIMING: BUYER must dispute BEFORE the expiry time. At expiry the right to dispute
+     *          ends (CannotDisputeAfterExpiry), whether or not SELLER has claimed yet.
+     *          A dispute raised in time stops the claim until the dispute is resolved.
      */
     function raiseDispute() external onlyBuyer initialized {
         if (_state != 1) revert NotFundedOrAlreadyProcessed();
@@ -1421,19 +1565,20 @@ contract EscrowContract is ReentrancyGuard {
         if (_buyerPercentage > 100) revert InvalidPercentage();
         // No change needed here for the unseated case: this gates on msg.sender == ARBITER,
         // and msg.sender can never be the zero address.
-        if (msg.sender != BUYER && msg.sender != SELLER && msg.sender != ARBITER) revert NotAuthorizedToVote();
+        address actor = _actor();
+        if (actor != BUYER && actor != SELLER && actor != ARBITER) revert NotAuthorizedToVote();
 
         // All parties can vote anytime - votes can be changed until consensus
         // casting to uint8 is safe: _buyerPercentage is bounded to <= 100 above
         // forge-lint: disable-next-line(unsafe-typecast)
-        resolutionVotes[msg.sender].buyerPercentage = uint8(_buyerPercentage);
+        resolutionVotes[actor].buyerPercentage = uint8(_buyerPercentage);
 
         // §3.3A1a: casting OR changing a vote resets the eviction clock.
-        if (msg.sender == ARBITER) {
+        if (actor == ARBITER) {
             lastArbiterActionAt = uint64(block.timestamp);
         }
 
-        emit VoteSubmitted(msg.sender, _buyerPercentage);
+        emit VoteSubmitted(actor, _buyerPercentage);
 
         _checkAndExecuteConsensus();
     }
@@ -1494,7 +1639,13 @@ contract EscrowContract is ReentrancyGuard {
         unchecked {
             // Safe: CREATOR_FEE < AMOUNT is checked in initialize
             escrowAmount = AMOUNT - CREATOR_FEE;
-            buyerAmount = (escrowAmount * _buyerPercentage) / 100;
+        }
+        // NOT unchecked, and not a plain multiply either. escrowAmount * percentage wraps
+        // for an amount above ~1.15e75, which unchecked would turn into a wrong split and a
+        // checked multiply into a resolution that can never execute. mulDiv carries the
+        // full 512-bit product, so the split is exact and cannot revert for any amount.
+        buyerAmount = Math.mulDiv(escrowAmount, _buyerPercentage, 100);
+        unchecked {
             // Safe: buyerAmount <= escrowAmount by math (percentage <= 100)
             sellerAmount = escrowAmount - buyerAmount;
         }

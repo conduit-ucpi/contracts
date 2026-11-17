@@ -403,6 +403,36 @@ contract VotingResolutionTest is Test {
         assertEq(usdc.balanceOf(seller), sellerBalanceBefore + (escrowAmount - expectedHalf));
     }
 
+    /// The split must be exact for ANY amount. escrowAmount * percentage wraps above
+    /// ~1.15e75; computed unchecked, that paid a wrong split, and a checked multiply would
+    /// make the resolution revert for good. Pins the full-precision split in its place.
+    function testResolutionSplitIsExactForAnAmountWhoseProductOverflows() public {
+        MockERC20 big = new MockERC20();
+        uint256 amount = type(uint256).max / 2;
+        big.mint(buyer, amount);
+
+        vm.prank(admin);
+        EscrowContract escrow = EscrowContract(
+            factory.createEscrowContract(
+                address(big), buyer, seller, amount, expiryTimestamp, description, admin, bytes32(uint256(69))
+            )
+        );
+        vm.prank(buyer);
+        big.transfer(address(escrow), amount);
+        escrow.checkAndActivate();
+        vm.prank(buyer);
+        escrow.raiseDispute();
+
+        vm.prank(buyer);
+        escrow.submitResolutionVote(50);
+        vm.prank(seller);
+        escrow.submitResolutionVote(50);
+
+        uint256 escrowAmount = amount - escrow.CREATOR_FEE();
+        assertEq(big.balanceOf(buyer), escrowAmount / 2);
+        assertEq(big.balanceOf(seller), escrowAmount - escrowAmount / 2);
+    }
+
     function testResolutionEmitsCorrectEvents() public {
         EscrowContract escrow = createDisputedEscrow();
 

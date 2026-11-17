@@ -469,7 +469,7 @@ contract EscrowContractFactory {
         EscrowContract(clone)
             .initialize(
                 t.tokenAddress, // ERC20 token to be used for this escrow
-                t.buyer, // ONLY this address can deposit and dispute
+                t.buyer, // ONLY this address can dispute; refunds go to it (anyone may fund)
                 t.seller, // ONLY this address can receive funds (with buyer)
                 t.arbiter, // Arbiter - can vote on disputes but NOT take money
                 t.amount,
