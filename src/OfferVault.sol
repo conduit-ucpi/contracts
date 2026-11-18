@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 interface IStabledropEscrow {
     function recipient() external view returns (address);
@@ -57,6 +58,11 @@ interface IOfferVaultFactory {
  *    can pause NEW offers, but no role — owner, factory, or anyone else — can move the
  *    capital in this contract. `withdraw` pays ONLY the LP and is never pausable — it is
  *    callable by anyone precisely because it has no discretion to abuse.
+ *
+ * ✍️ THE SELLER NEEDS NO ETH. accept() and reject() can be SIGNED for and delivered by a
+ *    relayer through executeSigned, exactly as the escrow's party actions can. Together
+ *    with the escrow's signed ApproveRecipientTransfer, a seller can take an offer with two
+ *    signatures and no gas.
  *
  * ⚠️ AN OPEN OFFER IS A FIRM, IRREVOCABLE QUOTE. The LP cannot cancel it; they exit when
  *    the seller rejects, when it expires, or when the escrow becomes permanently
@@ -159,6 +165,125 @@ contract OfferVault is ReentrancyGuard {
         _;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    //  ✍️ SIGNED CALLS: the seller signs a message, anyone may deliver it, and pays the gas
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    //
+    // The same mechanism as EscrowContract.executeSigned, for the same reason: a seller who
+    // holds no ETH cannot call this contract, and handing them ETH does not bind them to
+    // spending it here. So the seller SIGNS, a relayer delivers, and the vault acts for the
+    // signer and for nobody else.
+    //
+    // ⚠️ HOW THE SIGNER REACHES THE FUNCTION. executeSigned calls this same contract with the
+    //    signer's address appended to the call. `_actor()` reads that address back, and ONLY
+    //    when the caller is this contract itself - which nothing else can arrange, because no
+    //    other code here calls address(this). Every party check asks `_actor()`, so a function
+    //    behaves identically whether the seller called it or signed for it.
+    //
+    // ⚠️ WHAT MAY BE SIGNED FOR IS A LIST: accept and reject, the only functions here that
+    //    answer to a party. fund, withdraw and releaseHoldback are already open to any caller
+    //    (they need no signature to relay), sweep belongs to the factory owner, and initialize
+    //    and executeSigned itself are never signable.
+    //
+    // ⚠️ EACH ACTION HAS ITS OWN NAMED MESSAGE, so the wallet shows "AcceptOffer" rather than
+    //    a line of hex. Neither takes arguments, so the struct hash is (type hash, nonce,
+    //    deadline). Should an argument-bearing action ever be added, the escrow's rule holds:
+    //    uint256 and address arguments only, each one 32-byte word, or hash fields separately.
+    //
+    // ⚠️ ACCEPT IS NON-REENTRANT, SO executeSigned IS NOT. The delivery re-enters this
+    //    contract by design; guarding executeSigned too would make every signed accept revert.
+
+    error SignedCallExpired();
+    error SignedCallAlreadyUsed();
+    error SignedCallNotSignedBy(address signer);
+    error SignedCallNotAllowed(bytes4 selector);
+    error SignedCallMalformed();
+
+    /// @notice Emitted when a signed call is delivered. The inner function emits its own event too.
+    event SignedCallExecuted(address indexed signer, uint256 nonce, bytes4 selector);
+
+    /// @notice Whether `signer` has already spent `nonce`. Nonces are unordered: any unused one will do.
+    mapping(address => mapping(uint256 => bool)) public signedCallUsed;
+
+    bytes32 private constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    // What the signer's wallet shows, one per action.
+    bytes32 private constant ACCEPT_OFFER_TYPEHASH = keccak256("AcceptOffer(uint256 nonce,uint256 deadline)");
+    bytes32 private constant REJECT_OFFER_TYPEHASH = keccak256("RejectOffer(uint256 nonce,uint256 deadline)");
+
+    /**
+     * @notice Deliver a call that `signer` signed. Anyone may deliver it; it runs as `signer`.
+     * @param signer    The party the call is for. Their signature is what authorises it.
+     * @param call      The function call, exactly as `signer` would have sent it themselves.
+     * @param nonce     Any number `signer` has not used here before. It cannot be used twice.
+     * @param deadline  The last second at which this may be delivered.
+     * @param signature `signer`'s EIP-712 signature over that action's message (nonce,
+     *                  deadline), bound to this vault and this chain. A contract wallet's
+     *                  ERC-1271 answer is accepted.
+     */
+    function executeSigned(
+        address signer,
+        bytes calldata call,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external onlyInitialized {
+        if (block.timestamp > deadline) revert SignedCallExpired();
+        if (call.length < 4) revert SignedCallMalformed();
+        bytes4 selector = bytes4(call);
+        (bytes32 typeHash, uint256 argumentWords) = _signedMessage(selector);
+        if (typeHash == bytes32(0)) revert SignedCallNotAllowed(selector);
+        // Exactly the arguments the message names: no fewer, and nothing after them.
+        if (call.length != 4 + argumentWords * 32) revert SignedCallMalformed();
+        if (signedCallUsed[signer][nonce]) revert SignedCallAlreadyUsed();
+        signedCallUsed[signer][nonce] = true;
+
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                signedCallDomainSeparator(),
+                keccak256(abi.encodePacked(typeHash, call[4:], nonce, deadline))
+            )
+        );
+        if (!SignatureChecker.isValidSignatureNow(signer, digest, signature)) revert SignedCallNotSignedBy(signer);
+
+        emit SignedCallExecuted(signer, nonce, selector);
+
+        (bool ok, bytes memory answer) = address(this).call(abi.encodePacked(call, signer));
+        if (!ok) {
+            // The inner function's own error, unchanged, so a relayer sees why it failed.
+            assembly ("memory-safe") {
+                revert(add(answer, 32), mload(answer))
+            }
+        }
+    }
+
+    /// @notice The EIP-712 domain a signed call is bound to: this vault, on this chain.
+    function signedCallDomainSeparator() public view returns (bytes32) {
+        return
+            keccak256(
+                abi.encode(DOMAIN_TYPEHASH, keccak256("Stabledrop"), keccak256("1"), block.chainid, address(this))
+            );
+    }
+
+    /// @dev The message a signature must be for, and how many arguments the call carries. A
+    ///      function with no entry here returns a zero type hash: it cannot be signed for.
+    function _signedMessage(bytes4 selector) private pure returns (bytes32 typeHash, uint256 argumentWords) {
+        if (selector == OfferVault.accept.selector) return (ACCEPT_OFFER_TYPEHASH, 0);
+        if (selector == OfferVault.reject.selector) return (REJECT_OFFER_TYPEHASH, 0);
+        return (bytes32(0), 0);
+    }
+
+    /// @dev Who is acting: the caller, or - when this vault is delivering a signed call to
+    ///      itself - the signer whose address executeSigned appended to it.
+    function _actor() private view returns (address actor) {
+        if (msg.sender != address(this)) return msg.sender;
+        assembly ("memory-safe") {
+            actor := shr(96, calldataload(sub(calldatasize(), 20)))
+        }
+    }
+
     constructor() {
         // The implementation must never be initializable: a clone's storage starts empty,
         // so FACTORY == 0 marks "not a live offer". Setting a sentinel here would let the
@@ -252,7 +377,8 @@ contract OfferVault is ReentrancyGuard {
      *
      * PRE-CONDITION (tx 1, by the seller, on the ESCROW):
      *     escrow.approveRecipientTransfer(address(this), lp)
-     * which binds THIS VAULT as operator and the exact LP as destination, for 5 minutes.
+     * (sent directly, or signed as ApproveRecipientTransfer and relayed via the escrow's
+     * executeSigned) which binds THIS VAULT as operator and the exact LP as destination, for 5 minutes.
      * Note the operator is this offer's own contract, so the approval authorises exactly
      * one swap and nothing else. Without it — or after it expires — the pull below reverts
      * and NOTHING moves; the seller re-approves and calls again.
@@ -269,9 +395,10 @@ contract OfferVault is ReentrancyGuard {
 
         IStabledropEscrow escrow = IStabledropEscrow(escrowContract);
 
-        // Live read, never the snapshot: the caller must be the CURRENT recipient.
+        // Live read, never the snapshot: the caller (or signer) must be the CURRENT recipient.
         address currentRecipient = escrow.recipient();
-        if (msg.sender != currentRecipient) revert NotEscrowRecipient(msg.sender);
+        address actor = _actor();
+        if (actor != currentRecipient) revert NotEscrowRecipient(actor);
 
         // The role must never have MOVED — not "must match again". A round trip
         // (seller → other → seller) leaves the address comparison reading fresh, which
@@ -283,7 +410,7 @@ contract OfferVault is ReentrancyGuard {
         //    two places — initialize (before any offer can exist) and _transferRecipient,
         //    which always bumps recipientNonce. So an unchanged nonce proves the recipient
         //    has not moved since this offer was priced, hence
-        //    msg.sender == currentRecipient == seller, and paying the `seller` snapshot
+        //    actor == currentRecipient == seller, and paying the `seller` snapshot
         //    below pays the live recipient. A separate `currentRecipient != seller` branch
         //    could never fire and was removed.
         if (escrow.recipientNonce() != sellerNonce) revert OfferStale();
@@ -363,7 +490,8 @@ contract OfferVault is ReentrancyGuard {
      */
     function reject() external onlyInitialized nonReentrant {
         if (status != Status.OPEN) revert OfferNotOpen();
-        if (msg.sender != seller) revert NotEscrowRecipient(msg.sender);
+        address actor = _actor();
+        if (actor != seller) revert NotEscrowRecipient(actor);
         // An unchanged nonce proves the recipient has not moved since creation, which
         // implies recipient() == seller; comparing the addresses too would add a branch
         // that can never fire.

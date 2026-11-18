@@ -35,6 +35,10 @@ import {OfferVault, IStabledropEscrow} from "./OfferVault.sol";
  *    CANNOT do: touch a deposit or a reserve. Those live in vaults this contract cannot
  *    move funds out of, and the exits (withdraw, releaseHoldback, reject) are never
  *    pausable (§5.2.10).
+ *
+ * ✍️ NOTHING HERE NEEDS A SIGNED CALL. createOffer names the LP as a parameter, so a relayer
+ *    can already deploy an offer for them, and every other function is the owner's. The
+ *    seller's actions (accept, reject) are signable on each vault: see OfferVault.executeSigned.
  * ═══════════════════════════════════════════════════════════════════════════════════
  */
 contract OfferVaultFactory is Ownable2Step, Pausable, ReentrancyGuard {
