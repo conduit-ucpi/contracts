@@ -583,6 +583,10 @@ contract EscrowContract is ReentrancyGuard {
     //    ⚠️ That holds ONLY for those types. An action taking bytes, a string or an array must
     //    not be added to `_signedMessage` without hashing those fields separately.
 
+    // ⚠️ KEEP DEADLINES SHORT. A signature is live from signing until delivery or deadline,
+    //    and acting directly does not spend it. The relayer should ask for minutes, not days;
+    //    cancelSignedCall is the way to withdraw one sooner.
+
     error SignedCallExpired();
     error SignedCallAlreadyUsed();
     error SignedCallNotSignedBy(address signer);
@@ -591,6 +595,9 @@ contract EscrowContract is ReentrancyGuard {
 
     /// @notice Emitted when a signed call is delivered. The inner function emits its own event too.
     event SignedCallExecuted(address indexed signer, uint256 nonce, bytes4 selector);
+
+    /// @notice Emitted when a signer withdraws a signature before it was delivered.
+    event SignedCallCancelled(address indexed signer, uint256 nonce);
 
     /// @notice Whether `signer` has already spent `nonce`. Nonces are unordered: any unused one will do.
     mapping(address => mapping(uint256 => bool)) public signedCallUsed;
@@ -611,6 +618,8 @@ contract EscrowContract is ReentrancyGuard {
         keccak256("ChangeRecipient(address newRecipient,uint256 nonce,uint256 deadline)");
     bytes32 private constant APPROVE_RECIPIENT_TRANSFER_TYPEHASH =
         keccak256("ApproveRecipientTransfer(address operator,address newRecipient,uint256 nonce,uint256 deadline)");
+    bytes32 private constant CANCEL_SIGNED_CALL_TYPEHASH =
+        keccak256("CancelSignedCall(uint256 cancelledNonce,uint256 nonce,uint256 deadline)");
 
     /**
      * @notice Deliver a call that `signer` signed. Anyone may deliver it; it runs as `signer`.
@@ -659,6 +668,25 @@ contract EscrowContract is ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Withdraw a signature before it is delivered: spend its nonce so it can never run.
+     *
+     * ⚠️ WHY THIS EXISTS. Acting directly spends no nonce, so without it a signature handed to a
+     *    relayer and not yet delivered stays live until its deadline - and would override
+     *    whatever the signer did since (a later vote, a changed mind on a sale). Short
+     *    deadlines are the first defence; this is the second.
+     *
+     * Call it directly, or sign it (CancelSignedCall) and have it delivered: either way it
+     * spends the ACTING address's nonce and nobody else's. Reverts if the nonce is already
+     * spent, which tells the signer the signature they meant to withdraw has already run.
+     */
+    function cancelSignedCall(uint256 cancelledNonce) external {
+        address signer = _actor();
+        if (signedCallUsed[signer][cancelledNonce]) revert SignedCallAlreadyUsed();
+        signedCallUsed[signer][cancelledNonce] = true;
+        emit SignedCallCancelled(signer, cancelledNonce);
+    }
+
     /// @notice The EIP-712 domain a signed call is bound to: this contract, on this chain.
     function signedCallDomainSeparator() public view returns (bytes32) {
         return
@@ -679,6 +707,7 @@ contract EscrowContract is ReentrancyGuard {
         if (selector == EscrowContract.approveRecipientTransfer.selector) {
             return (APPROVE_RECIPIENT_TRANSFER_TYPEHASH, 2);
         }
+        if (selector == EscrowContract.cancelSignedCall.selector) return (CANCEL_SIGNED_CALL_TYPEHASH, 1);
         return (bytes32(0), 0);
     }
 

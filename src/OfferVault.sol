@@ -181,17 +181,22 @@ contract OfferVault is ReentrancyGuard {
     //    behaves identically whether the seller called it or signed for it.
     //
     // ⚠️ WHAT MAY BE SIGNED FOR IS A LIST: accept and reject, the only functions here that
-    //    answer to a party. fund, withdraw and releaseHoldback are already open to any caller
+    //    answer to a party, and cancelSignedCall, which withdraws a signature not yet delivered. fund, withdraw and releaseHoldback are already open to any caller
     //    (they need no signature to relay), sweep belongs to the factory owner, and initialize
     //    and executeSigned itself are never signable.
     //
     // ⚠️ EACH ACTION HAS ITS OWN NAMED MESSAGE, so the wallet shows "AcceptOffer" rather than
-    //    a line of hex. Neither takes arguments, so the struct hash is (type hash, nonce,
-    //    deadline). Should an argument-bearing action ever be added, the escrow's rule holds:
-    //    uint256 and address arguments only, each one 32-byte word, or hash fields separately.
+    //    a line of hex. The struct hash is (type hash, the call's argument bytes, nonce,
+    //    deadline): accept and reject take no arguments and cancelSignedCall one uint256. That
+    //    shortcut holds ONLY for uint256 and address arguments, one 32-byte word each - an
+    //    action taking bytes, a string or an array must hash those fields separately.
     //
     // ⚠️ ACCEPT IS NON-REENTRANT, SO executeSigned IS NOT. The delivery re-enters this
     //    contract by design; guarding executeSigned too would make every signed accept revert.
+
+    // ⚠️ KEEP DEADLINES SHORT. A signature is live from signing until delivery or deadline,
+    //    and acting directly does not spend it. The relayer should ask for minutes, not days;
+    //    cancelSignedCall is the way to withdraw one sooner.
 
     error SignedCallExpired();
     error SignedCallAlreadyUsed();
@@ -202,6 +207,9 @@ contract OfferVault is ReentrancyGuard {
     /// @notice Emitted when a signed call is delivered. The inner function emits its own event too.
     event SignedCallExecuted(address indexed signer, uint256 nonce, bytes4 selector);
 
+    /// @notice Emitted when a signer withdraws a signature before it was delivered.
+    event SignedCallCancelled(address indexed signer, uint256 nonce);
+
     /// @notice Whether `signer` has already spent `nonce`. Nonces are unordered: any unused one will do.
     mapping(address => mapping(uint256 => bool)) public signedCallUsed;
 
@@ -211,6 +219,8 @@ contract OfferVault is ReentrancyGuard {
     // What the signer's wallet shows, one per action.
     bytes32 private constant ACCEPT_OFFER_TYPEHASH = keccak256("AcceptOffer(uint256 nonce,uint256 deadline)");
     bytes32 private constant REJECT_OFFER_TYPEHASH = keccak256("RejectOffer(uint256 nonce,uint256 deadline)");
+    bytes32 private constant CANCEL_SIGNED_CALL_TYPEHASH =
+        keccak256("CancelSignedCall(uint256 cancelledNonce,uint256 nonce,uint256 deadline)");
 
     /**
      * @notice Deliver a call that `signer` signed. Anyone may deliver it; it runs as `signer`.
@@ -259,6 +269,25 @@ contract OfferVault is ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Withdraw a signature before it is delivered: spend its nonce so it can never run.
+     *
+     * ⚠️ WHY THIS EXISTS. Acting directly spends no nonce, so without it a signature handed to a
+     *    relayer and not yet delivered stays live until its deadline - and would override
+     *    whatever the signer did since (a later vote, a changed mind on a sale). Short
+     *    deadlines are the first defence; this is the second.
+     *
+     * Call it directly, or sign it (CancelSignedCall) and have it delivered: either way it
+     * spends the ACTING address's nonce and nobody else's. Reverts if the nonce is already
+     * spent, which tells the signer the signature they meant to withdraw has already run.
+     */
+    function cancelSignedCall(uint256 cancelledNonce) external {
+        address signer = _actor();
+        if (signedCallUsed[signer][cancelledNonce]) revert SignedCallAlreadyUsed();
+        signedCallUsed[signer][cancelledNonce] = true;
+        emit SignedCallCancelled(signer, cancelledNonce);
+    }
+
     /// @notice The EIP-712 domain a signed call is bound to: this vault, on this chain.
     function signedCallDomainSeparator() public view returns (bytes32) {
         return
@@ -272,6 +301,7 @@ contract OfferVault is ReentrancyGuard {
     function _signedMessage(bytes4 selector) private pure returns (bytes32 typeHash, uint256 argumentWords) {
         if (selector == OfferVault.accept.selector) return (ACCEPT_OFFER_TYPEHASH, 0);
         if (selector == OfferVault.reject.selector) return (REJECT_OFFER_TYPEHASH, 0);
+        if (selector == OfferVault.cancelSignedCall.selector) return (CANCEL_SIGNED_CALL_TYPEHASH, 1);
         return (bytes32(0), 0);
     }
 

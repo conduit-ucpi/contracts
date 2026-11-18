@@ -60,6 +60,7 @@ contract OfferVaultSignedCallsTest is Test {
     uint256 constant OFFER = 9_000e6;
     bytes32 constant ACCEPT_OFFER = keccak256("AcceptOffer(uint256 nonce,uint256 deadline)");
     bytes32 constant REJECT_OFFER = keccak256("RejectOffer(uint256 nonce,uint256 deadline)");
+    bytes32 constant CANCEL = keccak256("CancelSignedCall(uint256 cancelledNonce,uint256 nonce,uint256 deadline)");
     bytes32 constant APPROVE_TRANSFER =
         keccak256("ApproveRecipientTransfer(address operator,address newRecipient,uint256 nonce,uint256 deadline)");
 
@@ -322,5 +323,34 @@ contract OfferVaultSignedCallsTest is Test {
         OfferVault implementation = OfferVault(market.VAULT_IMPLEMENTATION());
         vm.expectRevert(OfferVault.NotInitialized.selector);
         implementation.executeSigned(seller, abi.encodeCall(OfferVault.reject, ()), 1, deadlineSoon(), "");
+    }
+
+    // ---- and a seller who changes their mind can withdraw a signature ----
+
+    /// Both halves of a gasless sale are signed and held; the seller cancels the accept by
+    /// signing too. Delivering the held pair afterwards sells nothing.
+    function test_a_seller_can_back_out_of_a_signed_sale_before_delivery() public {
+        EscrowContract escrow = escrowFor(seller, 15);
+        OfferVault vault = openOffer(escrow);
+        bytes memory acceptance = signFor(SELLER_KEY, vault, message(ACCEPT_OFFER, 1, deadlineSoon()));
+
+        bytes memory cancel = signFor(SELLER_KEY, vault, keccak256(abi.encode(CANCEL, 1, 2, deadlineSoon())));
+        deliver(vault, seller, abi.encodeCall(OfferVault.cancelSignedCall, (1)), 2, cancel);
+
+        signedApproval(escrow, vault, 1);
+        vm.expectRevert(OfferVault.SignedCallAlreadyUsed.selector);
+        deliver(vault, seller, abi.encodeCall(OfferVault.accept, ()), 1, acceptance);
+        assertEq(escrow.recipient(), seller);
+        assertEq(uint256(vault.status()), uint256(OfferVault.Status.OPEN));
+    }
+
+    function test_cancelling_directly_spends_only_the_cancellers_own_nonce() public {
+        EscrowContract escrow = escrowFor(seller, 16);
+        OfferVault vault = openOffer(escrow);
+        vm.prank(stranger);
+        vault.cancelSignedCall(1);
+
+        assertTrue(vault.signedCallUsed(stranger, 1));
+        assertFalse(vault.signedCallUsed(seller, 1));
     }
 }

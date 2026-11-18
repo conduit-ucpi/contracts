@@ -55,6 +55,7 @@ contract SignedCallsTest is Test {
     bytes32 constant RAISE_DISPUTE = keccak256("RaiseDispute(uint256 nonce,uint256 deadline)");
     bytes32 constant VOTE = keccak256("Vote(uint256 refundToBuyerPercent,uint256 nonce,uint256 deadline)");
     bytes32 constant NOMINATE = keccak256("NominateArbiter(address candidate,uint256 nonce,uint256 deadline)");
+    bytes32 constant CANCEL = keccak256("CancelSignedCall(uint256 cancelledNonce,uint256 nonce,uint256 deadline)");
     bytes32 constant APPROVE_TRANSFER =
         keccak256("ApproveRecipientTransfer(address operator,address newRecipient,uint256 nonce,uint256 deadline)");
 
@@ -343,5 +344,60 @@ contract SignedCallsTest is Test {
         (bool ok, bytes memory answer) = address(escrow).call(forged);
         assertFalse(ok);
         assertEq(bytes4(answer), EscrowContract.OnlyBuyer.selector);
+    }
+
+    // ---- and a signature not yet delivered can be withdrawn ----
+
+    /// The stale-vote case: a signed vote for 100 is held back, the buyer votes 30 directly,
+    /// then cancels. The old signature can no longer flip the vote back.
+    function test_a_cancelled_signature_cannot_override_a_later_direct_vote() public {
+        EscrowContract escrow = disputed(19);
+        uint256 deadline = deadlineSoon();
+        bytes memory stale = sign(BUYER_KEY, escrow, voteMessage(100, 5, deadline));
+
+        vm.prank(buyer);
+        escrow.submitResolutionVote(30);
+        vm.prank(buyer);
+        escrow.cancelSignedCall(5);
+
+        vm.prank(relayer);
+        vm.expectRevert(EscrowContract.SignedCallAlreadyUsed.selector);
+        escrow.executeSigned(buyer, abi.encodeCall(EscrowContract.submitResolutionVote, (100)), 5, deadline, stale);
+        assertEq(escrow.resolutionVotes(buyer), 30);
+    }
+
+    function test_a_party_with_no_eth_can_cancel_by_signing() public {
+        EscrowContract escrow = funded(buyer, 20);
+        uint256 deadline = deadlineSoon();
+        bytes memory dispute = sign(BUYER_KEY, escrow, raiseDisputeMessage(1, deadline));
+        bytes memory cancel = sign(BUYER_KEY, escrow, keccak256(abi.encode(CANCEL, 1, 2, deadline)));
+
+        vm.prank(relayer);
+        escrow.executeSigned(buyer, abi.encodeCall(EscrowContract.cancelSignedCall, (1)), 2, deadline, cancel);
+        assertTrue(escrow.signedCallUsed(buyer, 1));
+
+        vm.prank(relayer);
+        vm.expectRevert(EscrowContract.SignedCallAlreadyUsed.selector);
+        escrow.executeSigned(buyer, abi.encodeCall(EscrowContract.raiseDispute, ()), 1, deadline, dispute);
+    }
+
+    function test_cancelling_spends_only_the_cancellers_own_nonce() public {
+        EscrowContract escrow = funded(buyer, 21);
+        vm.prank(stranger);
+        escrow.cancelSignedCall(1);
+
+        assertTrue(escrow.signedCallUsed(stranger, 1));
+        assertFalse(escrow.signedCallUsed(buyer, 1));
+        signedDispute(escrow, BUYER_KEY, buyer, 1);
+        assertTrue(escrow.isDisputed());
+    }
+
+    function test_cancelling_a_signature_that_already_ran_says_so() public {
+        EscrowContract escrow = funded(buyer, 22);
+        signedDispute(escrow, BUYER_KEY, buyer, 1);
+
+        vm.prank(buyer);
+        vm.expectRevert(EscrowContract.SignedCallAlreadyUsed.selector);
+        escrow.cancelSignedCall(1);
     }
 }

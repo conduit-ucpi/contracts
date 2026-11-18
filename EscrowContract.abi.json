@@ -269,6 +269,19 @@
   },
   {
     "type": "function",
+    "name": "cancelSignedCall",
+    "inputs": [
+      {
+        "name": "cancelledNonce",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "changeRecipient",
     "inputs": [
       {
@@ -1155,6 +1168,25 @@
       },
       {
         "name": "expiry",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SignedCallCancelled",
+    "inputs": [
+      {
+        "name": "signer",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "nonce",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
