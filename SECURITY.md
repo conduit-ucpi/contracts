@@ -37,15 +37,15 @@ We use the following severity levels:
 
 **Critical**: Immediate threat to user funds or contract integrity
 - Response: Immediate action, potential emergency deployment
-- Bounty: Up to $10,000 (if bug bounty program active)
+- Bounty: Up to $10 (if bug bounty program active - it isn't)
 
 **High**: Significant risk requiring prompt attention
 - Response: Within 7 days
-- Bounty: Up to $5,000
+- Bounty: Up to $5
 
 **Medium**: Notable issue with workarounds available
 - Response: Within 30 days
-- Bounty: Up to $1,000
+- Bounty: Up to $1
 
 **Low**: Minor issues with minimal impact
 - Response: Best effort
