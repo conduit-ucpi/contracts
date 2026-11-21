@@ -157,6 +157,73 @@ forge verify-contract <address> <ContractName> \
 - Immutable contract parameters prevent tampering
 - No upgrade mechanisms (security by design)
 
+### Static analysis (Slither)
+
+The escrow contract that holds buyers' funds has been analysed with
+[Slither](https://github.com/crytic/slither), the open-source Solidity analyser from Trail of Bits.
+Anyone can re-run the analysis and get the same results; instructions are below.
+
+**Full output:** [audits/slither/EscrowContract-c4aaa0a.md](audits/slither/EscrowContract-c4aaa0a.md)
+
+| | |
+|---|---|
+| **Contract** | `src/EscrowContract.sol` |
+| **Commit** | [`c4aaa0a`](https://github.com/conduit-ucpi/contracts/tree/c4aaa0af5034337d5fcb0d9931735f85da3215ab) |
+| **Deployed at** | [`0x55CD499D44Ac1536Fa461956Ac30EcdD7c9EAaa1`](https://basescan.org/address/0x55CD499D44Ac1536Fa461956Ac30EcdD7c9EAaa1) on Base (the implementation every escrow is cloned from) |
+| **Source verified** | [Sourcify, exact match](https://repo.sourcify.dev/8453/0x55CD499D44Ac1536Fa461956Ac30EcdD7c9EAaa1): the deployed bytecode compiles from this source, byte for byte |
+| **Tool** | Slither 0.11.4, all 100 detectors, solc 0.8.26, OpenZeppelin Contracts 5.4.0 |
+| **Date** | 21 November 2026 |
+| **Result** | 38 results: no High, 1 Medium, 10 Low, 27 Informational. None is a vulnerability. |
+
+Slither reported nothing in its high-impact categories: no reentrancy, no unprotected
+initialiser, no arbitrary token transfer, no unchecked transfer, no `delegatecall`, no `tx.origin`.
+
+| Detector | Impact | Count | Assessment |
+|---|---|---|---|
+| `incorrect-equality` | Medium | 1 | False positive. `balance == 0` in `sweepToken` is the "nothing to sweep" check. Sending tokens to change the balance only makes the sweep succeed and pay them to the buyer. |
+| `timestamp` | Low | 10 | Expected. Each is a deadline (payout date, 5-minute recipient approval, 72-hour nomination window, 30-day arbiter silence, signed-call deadline). Block timestamps can move by seconds; these deadlines are minutes to days. |
+| `low-level-calls` | Informational | 1 | Intended. `executeSigned` calls the escrow itself, and nothing else, to run an action a party signed. Only eight party actions can be signed for, each with a fixed argument length, and each signature works once. |
+| `assembly` | Informational | 2 | Intended. One reads the signer's address appended by `executeSigned`; the other passes the inner call's error back unchanged. |
+| `pragma` | Informational | 1 | The contract pins solc 0.8.26; OpenZeppelin's files allow a range of versions. |
+| `cyclomatic-complexity` | Informational | 1 | `initialize` has 12 branches, all of them input checks. |
+| `naming-convention` | Informational | 20 | Style only (upper-case storage names such as `BUYER`). Renaming would change the deployed interface. |
+| `unindexed-event-address` | Informational | 2 | `FundsDeposited` and `FundsClaimed` do not index their address. Changing it would alter the event format that indexers read. |
+
+The run covers our code only: `--exclude-dependencies` leaves out 34 results inside the
+OpenZeppelin Contracts 5.4.0 library code the escrow imports (`Math`, `SafeERC20`, `ECDSA`,
+`SignatureChecker` and others). Drop that flag to see them.
+
+**To reproduce:**
+
+```bash
+git clone https://github.com/conduit-ucpi/contracts.git && cd contracts
+git checkout c4aaa0af5034337d5fcb0d9931735f85da3215ab
+git submodule update --init --recursive
+
+python3 -m venv .venv && . .venv/bin/activate
+pip install slither-analyzer==0.11.4
+solc-select install 0.8.26 && solc-select use 0.8.26
+
+slither src/EscrowContract.sol \
+  --solc-remaps '@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/' \
+  --solc-args '--optimize --optimize-runs 200 --evm-version cancun' \
+  --exclude-dependencies --checklist
+```
+
+**To check that this is the code that is live**, compare the source on
+[Sourcify](https://repo.sourcify.dev/8453/0x55CD499D44Ac1536Fa461956Ac30EcdD7c9EAaa1), which
+has matched it to the deployed bytecode exactly, or ask the deployed contract which commit it
+was built from (needs [Foundry](https://book.getfoundry.sh/)'s `cast`):
+
+```bash
+cast call 0x55CD499D44Ac1536Fa461956Ac30EcdD7c9EAaa1 'GIT_COMMIT()(bytes20)' \
+  --rpc-url https://mainnet.base.org
+# 0xc4aaa0af5034337d5fcb0d9931735f85da3215ab
+```
+
+Slither is an automated, pattern-based tool. It is not a manual audit, and a clean result does
+not prove the absence of logic errors.
+
 ### Testing
 
 The test suite includes:
@@ -208,8 +275,8 @@ MIT License - see [LICENSE](LICENSE) file for details
 ## Deployed Contracts
 
 ### Base Mainnet (Production)
-- **Factory**: [`0x00b1D1A005022D1f140062Ba5aB0A44788089F88`](https://basescan.org/address/0x00b1D1A005022D1f140062Ba5aB0A44788089F88)
-- **Implementation**: [`0xCbfD53842f0ACc885a55b7A0eDb18eF5ac9237f9`](https://basescan.org/address/0xCbfD53842f0ACc885a55b7A0eDb18eF5ac9237f9)
+- **Factory**: [`0xD02EBb795809f38cd8a07898Fc7DCbcb5461B958`](https://basescan.org/address/0xD02EBb795809f38cd8a07898Fc7DCbcb5461B958)
+- **Implementation**: [`0x55CD499D44Ac1536Fa461956Ac30EcdD7c9EAaa1`](https://basescan.org/address/0x55CD499D44Ac1536Fa461956Ac30EcdD7c9EAaa1) (built from commit `c4aaa0a`)
 
 ### Base Sepolia (Testnet)
 - **Factory**: Not yet deployed
