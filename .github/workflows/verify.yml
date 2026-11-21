@@ -1,0 +1,245 @@
+name: Verify Escrow Contracts
+run-name: Verify escrow source for ${{ inputs.release_tag || github.ref_name }}
+
+# Publishes the source of an ALREADY DEPLOYED EscrowContract + EscrowContractFactory.
+# It deploys nothing, holds no key and reads no secret.
+#
+#   git tag verify-v64.0.0 && git push origin verify-v64.0.0
+#
+# verifies the pair that the tag v64.0.0 deployed. The part after `verify-` is the
+# release tag: its commit is the source that gets compiled, and its deploy run is
+# where the two addresses are read from.
+#
+# WHY THIS EXISTS. The deploy workflow (build.yml) passes `--verify --verifier
+# blockscout` to forge. base.blockscout.com/api sits behind a Cloudflare bot
+# challenge: every request from a runner gets HTTP 403 and an HTML "Just a
+# moment..." page, forge fails to parse it as JSON ("Failed to deserialize response:
+# expected value at line 1 column 1"), retries, and gives up. No release has been
+# verified by that step. So here:
+#
+#   - Sourcify is the verifier that must succeed. It needs no API key, is not behind
+#     the challenge, and Blockscout imports verified sources from it.
+#   - The job only passes when Sourcify itself reports a match for both addresses.
+#     The result is read back from Sourcify, not inferred from forge's exit status.
+#   - Blockscout is still tried directly, but its failure does not fail the job.
+on:
+  push:
+    tags:
+      - 'verify-v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag whose deployment to verify, e.g. v64.0.0'
+        required: true
+      implementation:
+        description: 'EscrowContract address (only needed when the deploy log has expired)'
+        required: false
+      factory:
+        description: 'EscrowContractFactory address (only needed when the deploy log has expired)'
+        required: false
+
+# No `environment:` on purpose. `production` holds the relayer key and waits for a
+# reviewer; nothing here needs either. The chain settings below are public.
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CHAIN_ID: '8453'
+  RPC_URL: https://mainnet.base.org
+  SOURCIFY_URL: https://sourcify.dev/server
+  BLOCKSCOUT_API_URL: https://base.blockscout.com/api
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve the release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="${GITHUB_REF_NAME#verify-}"
+          fi
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$TAG' is not a release tag. Expected verify-vX.Y.Z, e.g. verify-v64.0.0."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      # The source that is compiled is the release tag's, never this commit's: the
+      # contracts on main have moved on since, and would not match the chain.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # The same exact pin as the deploy workflows. See build.yml for why.
+          version: v1.8.4
+
+      - name: Find the deployed addresses
+        id: addr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          INPUT_IMPLEMENTATION: ${{ inputs.implementation }}
+          INPUT_FACTORY: ${{ inputs.factory }}
+        run: |
+          set -euo pipefail
+          IMPLEMENTATION="$INPUT_IMPLEMENTATION"
+          FACTORY="$INPUT_FACTORY"
+
+          if [ -z "$IMPLEMENTATION" ] || [ -z "$FACTORY" ]; then
+            RUN_ID=$(gh run list -R "$GITHUB_REPOSITORY" --workflow build.yml --branch "$RELEASE_TAG" \
+              --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::No successful 'Deploy Smart Contracts' run found for tag $RELEASE_TAG."
+              echo "::error::Run this workflow manually and pass the two addresses."
+              exit 1
+            fi
+            echo "Reading addresses from deploy run $RUN_ID"
+            if ! gh run view "$RUN_ID" -R "$GITHUB_REPOSITORY" --log > "$RUNNER_TEMP/deploy.log"; then
+              echo "::error::Could not download the log of run $RUN_ID (logs expire after 90 days)."
+              echo "::error::Run this workflow manually and pass the two addresses."
+              exit 1
+            fi
+            # The same two lines build.yml parses. `|| true`: an empty result is
+            # reported below with a useful message instead of killing the step here.
+            IMPLEMENTATION=$(grep "Implementation deployed at:" "$RUNNER_TEMP/deploy.log" | grep -o '0x[a-fA-F0-9]\{40\}' | head -1 || true)
+            FACTORY=$(grep "Legacy factory deployed at:" "$RUNNER_TEMP/deploy.log" | grep -o '0x[a-fA-F0-9]\{40\}' | head -1 || true)
+          fi
+
+          for pair in "implementation:$IMPLEMENTATION" "factory:$FACTORY"; do
+            if ! echo "${pair#*:}" | grep -Eq '^0x[a-fA-F0-9]{40}$'; then
+              echo "::error::Could not determine the ${pair%%:*} address (got '${pair#*:}')."
+              exit 1
+            fi
+          done
+
+          echo "implementation=$IMPLEMENTATION" >> "$GITHUB_OUTPUT"
+          echo "factory=$FACTORY" >> "$GITHUB_OUTPUT"
+          echo "Implementation: $IMPLEMENTATION"
+          echo "Factory:        $FACTORY"
+
+      # Both contracts carry the commit they were built from. If the chain disagrees
+      # with the checked-out source, stop before publishing the wrong source.
+      - name: Check the addresses against the chain
+        env:
+          IMPLEMENTATION: ${{ steps.addr.outputs.implementation }}
+          FACTORY: ${{ steps.addr.outputs.factory }}
+        run: |
+          set -euo pipefail
+          EXPECTED="0x$(git rev-parse HEAD)"
+          echo "Source commit: $EXPECTED"
+          lower() { tr '[:upper:]' '[:lower:]'; }
+
+          for pair in "implementation:$IMPLEMENTATION" "factory:$FACTORY"; do
+            NAME="${pair%%:*}"; ADDR="${pair#*:}"
+            if [ "$(cast code "$ADDR" --rpc-url "$RPC_URL")" = "0x" ]; then
+              echo "::error::No contract code at the $NAME address $ADDR on chain $CHAIN_ID."
+              exit 1
+            fi
+            ONCHAIN=$(cast call "$ADDR" "GIT_COMMIT()(bytes20)" --rpc-url "$RPC_URL")
+            echo "$NAME $ADDR GIT_COMMIT: $ONCHAIN"
+            if [ "$(echo "$ONCHAIN" | lower)" != "$(echo "$EXPECTED" | lower)" ]; then
+              echo "::error::The $NAME at $ADDR was built from $ONCHAIN, not from the checked-out $EXPECTED."
+              exit 1
+            fi
+          done
+
+          POINTS_AT=$(cast call "$FACTORY" "IMPLEMENTATION()(address)" --rpc-url "$RPC_URL")
+          if [ "$(echo "$POINTS_AT" | lower)" != "$(echo "$IMPLEMENTATION" | lower)" ]; then
+            echo "::error::Factory $FACTORY uses implementation $POINTS_AT, not $IMPLEMENTATION."
+            exit 1
+          fi
+          echo "Factory points at the implementation."
+
+      - name: Build contracts
+        run: forge build --skip test --skip script
+
+      - name: Submit to Sourcify
+        env:
+          IMPLEMENTATION: ${{ steps.addr.outputs.implementation }}
+          FACTORY: ${{ steps.addr.outputs.factory }}
+        run: |
+          # forge's exit status is deliberately not what decides this job: it also
+          # exits non-zero for "already verified". The next step asks Sourcify.
+          set -uo pipefail
+          forge verify-contract "$IMPLEMENTATION" src/EscrowContract.sol:EscrowContract \
+            --verifier sourcify --chain "$CHAIN_ID" --rpc-url "$RPC_URL" \
+            --watch --retries 10 --delay 15 \
+            || echo "::warning::forge reported a problem submitting the implementation; checking Sourcify directly next."
+          forge verify-contract "$FACTORY" src/EscrowContractFactory.sol:EscrowContractFactory \
+            --verifier sourcify --chain "$CHAIN_ID" --rpc-url "$RPC_URL" \
+            --watch --retries 10 --delay 15 \
+            || echo "::warning::forge reported a problem submitting the factory; checking Sourcify directly next."
+
+      - name: Confirm both are verified on Sourcify
+        env:
+          IMPLEMENTATION: ${{ steps.addr.outputs.implementation }}
+          FACTORY: ${{ steps.addr.outputs.factory }}
+        run: |
+          set -euo pipefail
+          FAILED=0
+          {
+            echo "## Sourcify verification for ${{ steps.release.outputs.tag }} (chain $CHAIN_ID)"
+            echo
+            echo "| Contract | Address | Sourcify match |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for pair in "EscrowContract:$IMPLEMENTATION" "EscrowContractFactory:$FACTORY"; do
+            NAME="${pair%%:*}"; ADDR="${pair#*:}"
+            MATCH=""
+            # Sourcify compiles asynchronously; give it up to five minutes.
+            for attempt in $(seq 1 30); do
+              BODY=$(curl -sS -m 30 "$SOURCIFY_URL/v2/contract/$CHAIN_ID/$ADDR" || true)
+              MATCH=$(echo "$BODY" | jq -r '.match // empty' 2>/dev/null || true)
+              if [ "$MATCH" = "exact_match" ] || [ "$MATCH" = "match" ]; then
+                break
+              fi
+              echo "$NAME $ADDR: not verified yet (attempt $attempt/30)"
+              sleep 10
+            done
+
+            if [ "$MATCH" = "exact_match" ] || [ "$MATCH" = "match" ]; then
+              echo "$NAME $ADDR: verified on Sourcify ($MATCH)"
+              echo "| $NAME | [\`$ADDR\`](https://repo.sourcify.dev/$CHAIN_ID/$ADDR) | $MATCH |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::$NAME $ADDR is not verified on Sourcify. Last response: $BODY"
+              echo "| $NAME | \`$ADDR\` | NOT VERIFIED |" >> "$GITHUB_STEP_SUMMARY"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+      # Best effort. This is the request the deploy workflow's --verify makes, and
+      # Cloudflare has answered it with a challenge page on every release so far.
+      # Blockscout shows Sourcify-verified sources regardless of what happens here.
+      - name: Submit to Blockscout (allowed to fail)
+        continue-on-error: true
+        env:
+          IMPLEMENTATION: ${{ steps.addr.outputs.implementation }}
+          FACTORY: ${{ steps.addr.outputs.factory }}
+        run: |
+          set -uo pipefail
+          STATUS=0
+          forge verify-contract "$IMPLEMENTATION" src/EscrowContract.sol:EscrowContract \
+            --verifier blockscout --verifier-url "$BLOCKSCOUT_API_URL" --chain "$CHAIN_ID" --rpc-url "$RPC_URL" \
+            --guess-constructor-args --watch --retries 3 --delay 10 2>&1 | cut -c1-400 || STATUS=1
+          forge verify-contract "$FACTORY" src/EscrowContractFactory.sol:EscrowContractFactory \
+            --verifier blockscout --verifier-url "$BLOCKSCOUT_API_URL" --chain "$CHAIN_ID" --rpc-url "$RPC_URL" \
+            --guess-constructor-args --watch --retries 3 --delay 10 2>&1 | cut -c1-400 || STATUS=1
+          if [ "$STATUS" -ne 0 ]; then
+            echo "::warning::Direct Blockscout submission failed (base.blockscout.com is behind a Cloudflare challenge). The contracts are verified on Sourcify, which Blockscout reads."
+          fi
+          exit $STATUS

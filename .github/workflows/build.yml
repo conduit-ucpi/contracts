@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
       - 'test*'
+      # `verify-v64.0.0` starts with a `v`. Without this it would start a production
+      # DEPLOY. Those tags belong to verify.yml, which only publishes source.
+      - '!verify-*'
 
 jobs:
   build:
